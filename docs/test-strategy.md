@@ -1,6 +1,6 @@
 # テスト戦略
 
-状態: **v0.1（Phase 0.1 監査是正後）** — 2026-09-15
+状態: **v0.2（Phase 0.2 監査是正後）** — 2026-09-15
 
 ## 1. レイヤー
 
@@ -16,11 +16,11 @@
 
 ## 2. 投資ロジック回帰テスト
 
-仕様: **[specs/regression-fixtures.md](specs/regression-fixtures.md)**（RF-01〜RF-16）
+仕様: **[specs/regression-fixtures.md](specs/regression-fixtures.md)**（RF-01〜RF-22）
 
 - 監査で必須とされた6件（RF-01〜RF-06）を含む。
 - 実行可能になる Phase より前は `pending` として CI に登録し、削除しない。
-- 規則を広げすぎていないことを確かめる対照ケース（RF-01-C / RF-02-C / RF-04-C / RF-06-C）も必ず実装する。
+- 規則を広げすぎていないこと・必要な参照をしていることを確かめる対照ケース（RF-01-C / RF-01-M / RF-02-C / RF-04-C / RF-05-C / RF-06-C / RF-17-C / RF-19c / RF-20-C）も必ず実装する。
 
 ## 3. Interface の共通保証テスト
 
@@ -34,7 +34,9 @@
 ## 4. データリーク検査
 
 - **未来データ挿入**: cutoff 以降の行・manifest を追加しても、その cutoff で計算した Feature・候補・分析入力が変わらない。
-- **取得時刻**: `published_at` が cutoff 前でも `fetched_at` / `first_seen_at` が後なら使われない（RF-05）。
+- **利用可能時刻**: `source_published_at` が cutoff 前でも `available_to_model_at` が後なら使われない（RF-05）。
+- **backfill**: 後から取り込んだ過去ニュースが、既存の Production 分析・Historical Replay の入力に入らない（RF-17）。
+- **Corporate action**: 分割・併合で Target / Failure / MFE / MAE を誤判定しない。配当を Target に加算しない（RF-18）。
 - **後日訂正**: 訂正版 manifest は、作成時刻より前の as-of では読まれない（RF-16）。
 - **分割係数**: 後日公表の係数が過去の判定に混入しない（RF-11）。
 - **walk-forward**: 全 fold で 学習データの最大日付 < 評価データの最小日付。

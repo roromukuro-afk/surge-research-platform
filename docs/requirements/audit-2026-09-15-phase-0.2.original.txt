@@ -1,0 +1,207 @@
+## ChatGPT監査結果 — Phase 0.2 最終是正
+
+Phase 0.1は条件付き合格です。
+アーキテクチャの全面変更は不要です。
+
+以下だけ是正し、再報告後にPhase 1へ進んでください。
+まだコード実装は開始しないこと。
+
+1. PRIOR_SURGE_HIGHの扱いを修正する。
+
+過去急騰高値をReachable Zoneの強気根拠・Potential Upsideとして使用することは禁止する。
+
+ただし、
+
+- Resistance
+- Supply Overhang
+- 戻り売り候補
+- 高値掴み保有者の存在する可能性
+- Reachable Zoneまでの障害
+
+として利用することは許可ではなく、必要に応じて積極的に行う。
+
+「過去高値を参照禁止」ではない。
+「過去高値まで戻ることを上昇根拠にすること」が禁止である。
+
+回帰fixtureもこの意味へ修正する。
+
+
+2. D-06bを更新する。
+
+J-Quants公式仕様では1分足・ティックAPIは存在するが、更新は日次16:30頃である。
+
+したがってJ-Quants分足/ティックを場中ENTRY判断用データ源として扱わない。
+
+用途：
+
+- Historical research
+- EOD
+- Replay
+- Teacher data
+
+日本株の場中ENTRY用リアルタイムProviderは別途選定する。
+
+
+3. Decision PriceとEntry Reference Priceを分離する。
+
+最低限：
+
+decision_price
+decision_price_observed_at
+
+entry_reference_price
+entry_price_observed_at
+
+を持つ。
+
+decision_priceはAIがENTRY判断時に参照していた価格。
+
+entry_reference_priceはENTRY判断後、現実に取引可能だったとみなす評価価格。
+
+成績・20% Thresholdはentry_reference_priceを基準にする。
+
+実際の自動売買を導入するまではactual_fillは任意でよい。
+
+entry_reference_priceの厳密な算出方式はProvider能力を確認後にD-01aとして決定する。
+
+
+4. D-18を確定する。
+
+ENTRY時に3,000円Hard Filterを再判定する。
+
+WATCH/SETUP時に3,000円以下でも、ENTRY判断時に3,000円を超えていれば正式Predictionを作らない。
+
+
+5. Post-close setupを分離する。
+
+EODまでのチャート・価格・出来高で形成されたセットアップと、
+引け後の新規材料によって翌日監視対象になったセットアップを区別する。
+
+例：
+
+TECHNICAL_SETUP_EOD
+POST_CLOSE_CATALYST_SETUP
+
+引け後材料をEOD価格の未織り込み評価には使用しない。
+
+
+6. Horizonを固定する。
+
+Primary prediction horizonはENTRY成立時点から20 trading sessions。
+
+WATCH開始日から数えない。
+
+State UpdateやREAFFIRMEDではHorizonをリセットしない。
+
+新しいPrediction Episodeが正式に開始された場合のみ新しいHorizonを持つ。
+
+
+7. Failure Lineを二層化する。
+
+initial_failure_line：
+Prediction作成時に固定。Primary Outcome/Teacher Label用。後から変更禁止。
+
+current_risk_line：
+State Transitionとして変更可能。運用上のリスク管理研究用。
+
+Primary Failure判定はinitial_failure_lineで行う。
+
+
+8. 米国株のOutcome通貨を確定する。
+
+3,000円Eligibility：
+同時点USD/JPYでJPY換算。
+
++20% Threshold / price outcome：
+米国株はUSD建て株価を基準とする。
+
+為替込みJPY returnは別の補助Outcomeとして保存可能。
+
+
+9. News availability timestampを追加する。
+
+最低限：
+
+source_published_at
+system_first_seen_at
+ingested_at
+available_to_model_at
+
+を設計する。
+
+Production PredictionおよびHistorical Replayでは、
+
+available_to_model_at <= decision_cutoff_at
+
+の情報だけを使用可能にする。
+
+過去ニュースを後からbackfillした際に、過去のPredictionがその情報を知っていたことにしてはいけない。
+
+これを新規Regression Fixtureに追加する。
+
+
+10. Corporate Action fixtureを追加する。
+
+Stock Split / Reverse Splitによって、
+
+- +20% Target
+- Failure Line
+- MFE
+- MAE
+
+が誤判定されない設計にする。
+
+Raw/tradable priceは保存する。
+
+Outcome engineでは経済的に比較可能なprice pathを使用する。
+
+配当は「株価+20%」のTargetには加算しない。
+
+
+11. AMBIGUOUS_PATH判定手順を明確にする。
+
+OpenでTargetまたはFailureを既に跨いでいる場合はOpen eventを優先する。
+
+同一Daily bar内でTarget/Failure双方に触れた場合：
+より細かいIntraday barへ降りる。
+
+同一最小bar内で双方に触れた場合：
+利用可能ならtrade/tickへ降りる。
+
+それでも順序不明：
+AMBIGUOUS_PATH。
+
+データ不足で降りられない：
+UNRESOLVED_MISSING_DATA。
+
+恣意的にSuccess/Failureへ寄せない。
+
+
+12. v5.1は原文ファイルとして別途受領後に登録する。
+
+Canonical v5.1と、
+その後のsystem addendumを混ぜない。
+
+v5.1本体：
+immutable original
+
+post-v5.1 decisions：
+versioned addenda
+
+として管理する。
+
+
+Phase 0.2では文書・仕様・Regression Fixtureのみ修正すること。
+Phase 1のコード実装へまだ進まない。
+
+完了後：
+
+Completed
+Files changed
+Decisions resolved
+Regression fixtures changed/added
+Remaining decisions
+Risks
+Phase 1 readiness
+
+を報告して停止すること。

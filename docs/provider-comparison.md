@@ -62,9 +62,13 @@ Provider は [interfaces.md](interfaces.md) の役割（role）ごとに別々�
 API 仕様（確認済み）:
 - 株価四本値 `/equities/bars/daily`: 無調整の O/H/L/C/Vo/Va、`AdjFactor`、調整済み AdjO 等、値幅制限フラグ UL/LL、前場・後場項目は Premium のみ。取引がない日は四本値が Null。
 - 上場銘柄一覧 `GET /v2/equities/master`: `Mkt`（市場区分コード）、`ProdCat`（商品区分コード）、翌営業日時点の情報は 17時半以降に取得可能。
-- 分足 `GET /v2/equities/bars/minute`: 1分足の四本値・出来高・売買代金、過去2年、東証上場銘柄のみ、銘柄コードまたは日付の指定が必須、取引のない分は返らない。**データの提供タイミング（当日中か）は確認したページに記載がない。**
+- 分足 `GET /v2/equities/bars/minute`: 1分足の四本値・出来高・売買代金、過去2年、東証上場銘柄のみ、銘柄コードまたは日付の指定が必須、取引のない分は返らない。
+- **更新スケジュール（公式）**: 株価四本値・株価分足・株価ティックは日次 16:30頃、上場銘柄一覧は 17:30頃と翌営業日 8:00頃。更新時刻は確約ではなく前後しうる。ヘルプにも「分足データは日次で更新されます。リアルタイムでの配信ではございません」とある。
+- **結論**: J-Quants の分足・ティックは Historical research / EOD / Replay / Teacher data 用。**場中の ENTRY 判断・Watch 監視には使わない**（監査 0.2 #2）。
 
-**未解決の重要事項**: 場中の ENTRY 判断に使う**日本株のリアルタイム価格の入手手段**を確認できていない（D-06b）。
+**未解決の重要事項**: 日本株の場中 ENTRY 判断・Watch 監視に使うリアルタイム Provider は未選定（D-06b）。約定・気配を提供するかは `entry_price_method`（D-01a）にも影響する。
+
+出典（更新時刻）: [データ更新スケジュール](https://jpx-jquants.com/ja/spec/data-update)、[ヘルプ: データ内容・仕様](https://jpx-jquants.com/ja/help/data)
 
 出典: [J-Quants](https://jpx-jquants.com/)、[データ格納期間](https://jpx-jquants.com/ja/spec/data-spec)、[株価四本値](https://jpx-jquants.com/ja/spec/eq-bars-daily)、[上場銘柄一覧](https://jpx-jquants.com/ja/spec/eq-master)、[市場区分コード](https://jpx-jquants.com/ja/spec/eq-master/marketcode)、[分足](https://jpx-jquants.com/ja/spec/eq-bars-minute)
 

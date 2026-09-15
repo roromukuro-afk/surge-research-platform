@@ -16,15 +16,19 @@
 | 由来の記録 | MANIFEST に「受領日・受領経路（ファイル / チャット本文の転記）」を書く。原文ファイル自体には注記を書き込まない |
 
 **現状**
-- v5.1 原文: **未受領**（Phase 1 の前提条件）
-- 実装指示書 v1.0 / 監査 Phase 0.1: チャット本文を転記した `.original.txt` を保存済み。元ファイルとのバイト一致は未確認（D-22）
+- v5.1 原文: **未受領**（Phase 1 の前提条件）。**原文ファイルとして受け取ってから登録する**（監査 0.2 #12）
+- 実装指示書 v1.0 / 監査 Phase 0.1 / 監査 Phase 0.2: チャット本文を転記した `.original.txt` を保存済み。元ファイルとのバイト一致は未確認（D-22）
 
 ## 2. 追加仕様（addenda）
 
+- **Canonical v5.1 と post-v5.1 decisions を混ぜない**（監査 0.2 #12）。
+  - v5.1 本体: immutable original（`short-surge-v5.1.md`。受領したファイルのバイト列そのまま）
+  - post-v5.1 decisions: versioned addenda（`addenda/` 配下の別ファイル）
+  - v5.1 ファイルに addendum の見出し・文言・注記を書き込まない。
 - v5.1 以後に確定した仕様は `docs/prompts/addenda/` に別ファイルで置く。
 - **優先順位**: 新しい addendum > 古い addendum > v5.1 原文。
 - addendum は根拠となる原文（指示書・監査）の該当箇所への**所在一覧**とし、言い換えで上書きしない。詳細仕様は `docs/specs/` に置く。
-- LLM に渡すプロンプトは「原文 + 適用する addenda + 実行時データ」を組み立てたものとし、組み立て結果のハッシュを `input_sha256` として保存する。
+- LLM に渡すプロンプトは「v5.1 原文」「適用する各 addendum」「実行時データ」を**別セクション**として組み立てる。v5.1 原文の SHA-256（`prompt_original_sha256`）、各 addendum の SHA-256（`prompt_addenda_sha256s`）、組み立て結果全体の SHA-256（`input_sha256`）を別々に保存する（RF-14b）。
 - 訂正は新しい addendum で行う。
 
 ## 3. バージョン識別子

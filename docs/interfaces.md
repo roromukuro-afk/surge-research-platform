@@ -67,7 +67,7 @@ interface Scheduler:
 
 - スケジュール定義は実行環境から独立したデータ（例: `schedules.yaml`）として持つ。
   - `on: EOD_DATA_AVAILABLE(market=JP)` → `jp_eod_universe`
-  - `on: SESSION_OPEN(market=US) + offset` → `entry_decision`（SETUP_EOD 対象）
+  - `on: SESSION_OPEN(market=US) + offset` → `entry_decision`（Setup 対象）
   - `every: N minutes during SESSION(market)` → `watch_monitor`
 - トリガーの実体（GitHub Actions の cron、常駐 Worker 内のループ等）は `tick()` を呼ぶだけ。
 - 休場日は `tick()` がリクエストを出さず、スキップ理由を記録する。
@@ -95,8 +95,9 @@ interface Scheduler:
 |---|---|---|
 | `SECURITY_MASTER_JP` / `_US` | 銘柄一覧・種別・取引所・上場廃止 | 上場廃止銘柄の履歴、種別コード |
 | `EOD_UNIVERSE_JP` / `_US` | Stage 1 用の全銘柄日足 | 全銘柄一括取得、無調整価格 + 調整情報 |
-| `INTRADAY_HISTORY_JP` / `_US` | Stage 2・パス解決用の分足履歴 | 対象銘柄の過去分足 |
-| `REALTIME_DECISION_JP` / `_US` | Watch 監視・ENTRY 判断時の現在価格・当日分足 | 遅延区分 `REALTIME`（D-21） |
+| `INTRADAY_HISTORY_JP` / `_US` | Stage 2・パス解決・Replay 用の分足履歴 | 対象銘柄の過去分足 |
+| `TRADES_HISTORY_JP` / `_US` | パス解決（最小足が曖昧な時間帯）・`entry_reference_price` の事後算出 | 約定の時刻・順序（提供される場合） |
+| `REALTIME_DECISION_JP` / `_US` | Watch 監視・ENTRY 判断時の `decision_price`・当日分足、判断後の `entry_reference_price` の観測 | 遅延区分 `REALTIME`（D-21）。**日次更新の Provider（J-Quants の分足・ティック等）は割り当て不可** |
 | `FX_USDJPY` | USD/JPY | 観測時刻付き |
 | `CORPORATE_ACTIONS_*` | 分割・併合等 | 公表時刻（known_at） |
 
@@ -124,6 +125,7 @@ interface MarketDataProvider:
     get_daily_bars_all(market, trade_date) -> Result[list[DailyBar]]          # 一括が無い Provider は内部で分割取得
     get_daily_bars(symbols, start_date, end_date) -> Result[list[DailyBar]]
     get_intraday_bars(symbols, start_ts, end_ts, granularity) -> Result[list[IntradayBar]]
+    get_trades(symbols, start_ts, end_ts) -> Result[list[Trade]]              # 任意の能力。capabilities().trades で宣言
     get_price_observation(symbols, at_or_before: timestamptz) -> Result[list[PriceObservation]]
     get_corporate_actions(market, start_date, end_date) -> Result[list[CorporateAction]]
 
@@ -148,8 +150,10 @@ FxObservation   { pair, rate, observed_at, basis, source }
 1. すべての応答の raw を `raw/api_responses` に保存し、`provenance.raw_object_key` を持つ。
 2. 価格は**無調整**を正本として保存。調整済み値のみを返す Provider は、そのままでは `EOD_UNIVERSE` に使えない（調整係数から無調整を復元できる場合のみ可）。
 3. `get_price_observation` / `get_fx` は `at_or_before` を超える観測を返さない。呼び出し側でも `observed_at <= decision_cutoff_at` を再検査する。
-4. `latency_class` を Prediction に保存する。ENTRY 判断ジョブは、許可された遅延区分以外の Provider を拒否する（許可範囲は D-21）。
+4. `latency_class` を Prediction に保存する。ENTRY 判断ジョブは、許可された遅延区分以外の Provider を拒否する（許可範囲は D-21）。`capabilities().update_schedule` が日次の Provider は `REALTIME_DECISION_*` に割り当てられない（設定検証で拒否）。
 5. 利用規約上の用途（個人・非プロ・内部利用など）を capabilities に持ち、設定時に確認できるようにする。
+6. `decision_price` と `entry_reference_price` は別の呼び出しで観測する。前者は `at_or_before = decision_cutoff_at`、後者は判断完了後の観測（算出方式 `entry_price_method` は D-01a）。
+7. `capabilities().trades` は「構成上提供しない」（`NOT_SUPPORTED`）と「提供するが当該時間帯が欠損」（結果の欠損）を区別して返す（パス解決の `AMBIGUOUS_PATH` / `UNRESOLVED_MISSING_DATA` の判定に使う、D-09b）。
 
 ### 2-4. J-Quants Provider（抽象化の方針）
 
@@ -158,7 +162,9 @@ FxObservation   { pair, rate, observed_at, basis, source }
 | Free | **開発用**（公式: 直近12週間を除く2年分 = 遅延データ）。Production では使わない |
 | Light 以上 | **Production EOD の候補** |
 | Standard | 信用取引週末残高等を含む。**教師データで有効性が確認されるまで必須にしない** |
-| Premium / アドオン | 前場・後場四本値（Premium）、分足・ティック（アドオン）。分足の提供タイミングは確認した公式ページに記載がなく、`REALTIME_DECISION_JP` に使えるかは未確認（D-06b） |
+| Premium / アドオン | 前場・後場四本値（Premium）、分足・ティック（アドオン） |
+
+**分足・ティックの用途（監査 0.2 #2、公式の更新スケジュールで確認済み）**: 株価四本値・分足・ティックの更新は日次 16:30頃（確約ではない）で、リアルタイム配信ではない。したがって `JQuantsProvider` は `INTRADAY_HISTORY_JP` / `TRADES_HISTORY_JP`（Historical research / EOD / Replay / Teacher data）にのみ割り当て、**`REALTIME_DECISION_JP` には割り当てない**。場中用は別 Provider（D-06b）。
 
 `JQuantsProvider` はプランを設定値として持ち、`capabilities()` がプランに応じた `history_depth`・`latency_class`・利用可能 API を返す。
 

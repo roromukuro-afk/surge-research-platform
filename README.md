@@ -12,7 +12,8 @@
 | 段階 | 内容 | 状態 |
 |---|---|---|
 | Phase 0 | Requirements / architecture / repository setup | 完了（概ね合格） |
-| Phase 0.1 | 監査是正（ストレージ分離、interface 抽象化、Entry/Episode、Universe、ラベル、回帰テスト仕様） | **完了・ChatGPT 監査待ち** |
+| Phase 0.1 | 監査是正（ストレージ分離、interface 抽象化、Entry/Episode、Universe、ラベル、回帰テスト仕様） | 条件付き合格 |
+| Phase 0.2 | 最終是正（decision / entry 価格、Setup 分離、Horizon・Failure Line、USD Outcome、材料の利用可能時刻、corporate action、パス解決、v5.1 と addenda の分離） | **完了・ChatGPT 監査待ち** |
 | Phase 1〜12 | [docs/development-phases.md](docs/development-phases.md) | 未着手（**v5.1 原文の受領と監査通過が前提**） |
 
 ## 共同開発体制
@@ -32,6 +33,7 @@
 | [docs/requirements/implementation-instructions-v1.0.original.txt](docs/requirements/implementation-instructions-v1.0.original.txt) | 実装指示書 v1.0（原文） |
 | [docs/requirements/implementation-instructions-v1.0.formatted.md](docs/requirements/implementation-instructions-v1.0.formatted.md) | 同・閲覧用整形版（原文ではない） |
 | [docs/requirements/audit-2026-09-15-phase-0.1.original.txt](docs/requirements/audit-2026-09-15-phase-0.1.original.txt) | ChatGPT 監査 Phase 0.1（原文） |
+| [docs/requirements/audit-2026-09-15-phase-0.2.original.txt](docs/requirements/audit-2026-09-15-phase-0.2.original.txt) | ChatGPT 監査 Phase 0.2（原文） |
 | [docs/prompts/](docs/prompts/) | v5.1 原文（未受領）、MANIFEST（SHA-256）、addenda |
 
 ### 設計
@@ -52,7 +54,7 @@
 ### 仕様
 | ファイル | 内容 |
 |---|---|
-| [docs/specs/entry-and-episode-lifecycle.md](docs/specs/entry-and-episode-lifecycle.md) | SETUP_EOD / Watch / ENTRY / Episode / パス解決 |
+| [docs/specs/entry-and-episode-lifecycle.md](docs/specs/entry-and-episode-lifecycle.md) | Setup（技術／引け後材料）/ Watch / decision・entry 価格 / Episode / Horizon / Failure Line / Outcome / パス解決 |
 | [docs/specs/universe-definition-v1.0.0.md](docs/specs/universe-definition-v1.0.0.md) | Initial Tradable Universe `universe-1.0.0` |
 | [docs/specs/teacher-labels.md](docs/specs/teacher-labels.md) | Objective / Interpretive ラベル |
 | [docs/specs/regression-fixtures.md](docs/specs/regression-fixtures.md) | 投資ロジック回帰テスト fixture |

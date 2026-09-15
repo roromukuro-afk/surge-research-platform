@@ -17,10 +17,10 @@
 |---|---|
 | Security Master | 銘柄、識別子履歴、上場/廃止、Universe 定義版、取引カレンダー、コーポレートアクション |
 | FX | 為替観測値（系列が小さいため Postgres。観測時刻 `fx_observed_at` 付き） |
-| Material Event index | 文書メタデータ（URL・ハッシュ・時刻・ソース）、ノイズ判定、Material Event、Event↔文書、Entity Link、材料属性 |
+| Material Event index | 文書メタデータ（URL・ハッシュ・ソース・`source_published_at` / `system_first_seen_at` / `ingested_at` / `available_to_model_at`）、ノイズ判定、Material Event、Event↔文書、Entity Link、材料属性 |
 | Runs / 監査 | runs、job_requests、run_errors、source_fetch_log、coverage_snapshots、dataset_manifests |
 | 候補・分析 | 当日の候補集合、Stage 2 判定結果（候補のみ）、LLM分析のメタデータと構造化出力 |
-| Production | SETUP_EOD、Watch、Prediction、Prediction Episode、State Transition（append-only） |
+| Production | Setup（TECHNICAL_SETUP_EOD / POST_CLOSE_CATALYST_SETUP）、Watch、Prediction、Prediction Episode、risk line 更新、State Transition（append-only） |
 | Outcomes | Prediction/Episode の Outcome、パス解決結果 |
 | Labels | Objective / Interpretive ラベル、見逃しレビュー |
 | Model versions | model_registry、評価結果サマリ |
@@ -31,7 +31,8 @@
 | データセット | 粒度 | 対象 |
 |---|---|---|
 | `curated/ohlcv_daily` | 銘柄×日 | 全 Universe（無調整価格 + 調整係数） |
-| `curated/ohlcv_minute` | 銘柄×分 | **Stage 2・Watch・SETUP_EOD・ENTRY 候補・Open Episode の銘柄のみ**（全銘柄の分足は保存しない） |
+| `curated/ohlcv_minute` | 銘柄×分 | **Stage 2・Setup・Watch・ENTRY 候補・Open Episode の銘柄のみ**（全銘柄の分足は保存しない。raw） |
+| `curated/trades` | 約定単位 | パス解決で最小足が曖昧になった時間帯、`entry_reference_price` の算出に必要な時間帯のみ（raw） |
 | `curated/universe_eligibility` | 銘柄×日 | 全銘柄の3,000円判定・除外理由の履歴 |
 | `features/daily` | 銘柄×日×feature_version | 全 Eligible 銘柄の Technical Feature 履歴 |
 | `features/stage1_routes` | 銘柄×日×rule_version | Route A〜H の条件ごとの判定詳細（全 Eligible 銘柄） |

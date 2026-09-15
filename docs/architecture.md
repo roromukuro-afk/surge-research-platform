@@ -1,7 +1,8 @@
 # アーキテクチャ案
 
-状態: **草案 v0.1（Phase 0.1 監査是正後）** — 2026-09-15
-変更点: ストレージ分離（#3）、Runner 抽象化（#4）、Vercel 制約更新（#5）、SETUP_EOD と場中 ENTRY 判断（#6〜#8）、Provider 抽象化（#14・#15）
+状態: **草案 v0.2（Phase 0.2 監査是正後）** — 2026-09-15
+変更点（0.1）: ストレージ分離（#3）、Runner 抽象化（#4）、Vercel 制約更新（#5）、Setup と場中 ENTRY 判断（#6〜#8）、Provider 抽象化（#14・#15）
+変更点（0.2）: Setup の2種別、decision / entry 価格、ENTRY 時の3,000円再判定、材料の利用可能時刻、J-Quants 分足・ティックを場中判断に使わない
 
 ## 1. 全体像
 
@@ -12,9 +13,9 @@
         ▼                                                ▼
  ┌──────────────────────────── Workers（Python、Job 単位）──────────────────────────────┐
  │  EOD jobs:    master → daily bars → FX → Universe/3000円 → features → Stage1          │
- │               (Technical ∪ Material) → Stage2(分足) → Stage3 EOD → SETUP_EOD/WATCH   │
+ │               (Technical ∪ Material) → Stage2(分足) → Stage3 EOD → SETUP*/WATCH      │
  │  Intraday:    entry_decision / watch_monitor（分足・リアルタイム価格）→ ENTRY/Episode │
- │  Collectors:  news / disclosure（first_seen_at）→ noise → event → entity link       │
+ │  Collectors:  news / disclosure（4 timestamps）→ noise → event → entity link       │
  │  Post:        outcome/path resolution → labels → exports                           │
  │  Research:    replay / walk-forward / training（Production と分離）                  │
  └──────────────▲──────────────────────────────┬────────────────────────────────────────┘
@@ -50,7 +51,8 @@
 | 6b | Material 候補（Technical と独立） | Postgres 候補 | × |
 | 7 | 候補集合 = Technical ∪ Material | Postgres | × |
 | 8 | Stage 2（候補のみ分足取得、知識ベース照合、チャート画像） | Postgres 結果 + Parquet/画像 | × |
-| 9 | Stage 3 EOD 分析 → `SETUP_EOD` / `WATCH_*` / `REJECT`（**ENTRY は出さない**） | Postgres | ○ |
+| 9 | Stage 3 EOD 分析（材料は `available_to_model_at <= price_cutoff_at` のみ）→ `TECHNICAL_SETUP_EOD` / `WATCH_*` / `REJECT`（**ENTRY は出さない**） | Postgres | ○ |
+| 9b | 引け後の材料分析（引け後に利用可能になった新規材料）→ `POST_CLOSE_CATALYST_SETUP`（EOD 価格に対する未織り込み評価はしない） | Postgres | ○ |
 | 10 | Outcome 追跡・パス解決（Episode / 全 Eligible） | Postgres / Parquet | × |
 | 11 | Excel Export | Object Storage | × |
 
@@ -58,13 +60,13 @@
 
 | # | Job | 内容 | LLM |
 |---|---|---|---|
-| 1 | `entry_decision` | 次の取引可能時点で `SETUP_EOD` 銘柄を再分析。`REALTIME_DECISION_*` Provider の価格と当日分足、`first_seen_at <= decision_cutoff_at` の材料を使う。ENTRY なら `entry_reference_price` を観測して Prediction・Episode | ○ |
+| 1 | `entry_decision` | 次の取引可能時点で Setup（両種別）の銘柄を再分析。`REALTIME_DECISION_*` Provider の `decision_price` と当日分足、`available_to_model_at <= decision_cutoff_at` の材料を使う。`decision_price` で3,000円を再判定。ENTRY なら判断後に `entry_reference_price` を観測して Prediction・Episode | ○ |
 | 2 | `watch_monitor` | Watch 銘柄の分足を監視し、条件到達で `TRIGGER_HIT` → `REANALYSIS` を要求 | 再分析時のみ |
 | 3 | `episode_monitor` | Open Episode の Target / Failure 到達を記録 | × |
 
 ### 2-3. 材料（常時）
 
-収集（`first_seen_at` 記録）→ 重複排除・同一出来事の統合 → `market_relevance` によるノイズ判定 → Entity Linking（`relation_type`、マクロは因果経路必須）→ 材料属性（Feature として保存）。
+収集（`source_published_at` / `system_first_seen_at` / `ingested_at` を記録）→ 重複排除・同一出来事の統合 → `market_relevance` によるノイズ判定 → Entity Linking（`relation_type`、マクロは因果経路必須）→ 材料属性（Feature として保存）。
 
 ## 3. 技術選定と根拠（2026-09-15 時点の公式ドキュメント確認に基づく）
 
@@ -101,7 +103,8 @@ Vercel Functions の実行時間上限（Fluid Compute 有効時、公式ドキ�
 
 - 役割（マスタ / EOD / 分足履歴 / リアルタイム判断 / FX）ごとに Provider を割り当てる。
 - JP の EOD は J-Quants（Free = 開発用、Light 以上 = Production 候補）。
-- **JP のリアルタイム価格の入手手段は未確認**（D-06b）。場中 ENTRY 判断の前提なので、Phase 8 より前に調査する。
+- **J-Quants の分足・ティックは日次 16:30頃の更新（公式）なので、場中の ENTRY 判断には使わない。** Historical research / EOD / Replay / Teacher data 用。
+- **JP の場中用リアルタイム Provider は未選定**（D-06b）。場中 ENTRY 判断の前提なので、Phase 8 より前に調査する。
 - 比較は [provider-comparison.md](provider-comparison.md)。
 
 ### 3-6. LLM / ML
@@ -119,10 +122,10 @@ Vercel Functions の実行時間上限（Fluid Compute 有効時、公式ドキ�
 
 ## 5. データリーク防止
 
-1. すべてのデータに「出来事の時刻」と「システムの取得時刻（`fetched_at` / `first_seen_at` / manifest `created_at`）」を持たせる。
+1. すべてのデータに「出来事の時刻」と「システム側の時刻（`fetched_at` / `system_first_seen_at` / `available_to_model_at` / manifest `created_at`）」を持たせる。材料は `available_to_model_at <= decision_cutoff_at` のみ使う。backfill は実行時刻で記録する。
 2. 読み取りは `as_of` を指定する共通の入口を通す（Postgres・Parquet とも）。
 3. 無調整価格を正本とし、調整係数は `known_at` 付きで別に持つ。
-4. 価格と材料のカットオフを分けて記録する（`price_cutoff_at` / `material_cutoff_at` / `decision_cutoff_at`）。
+4. カットオフを分けて記録する（`price_cutoff_at` / `decision_cutoff_at` / `decision_completed_at`）。価格は `decision_price`（判断時）と `entry_reference_price`（判断後）を分ける。Outcome は raw を保存したうえで分割・併合を換算した系列で計算する。
 5. LLM 入力はハッシュ付きで保存し再現可能にする。
 6. 上場廃止銘柄を残す。学習・評価は walk-forward のみ。
 
