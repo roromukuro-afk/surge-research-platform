@@ -1,35 +1,78 @@
-# secrets
+# このリポジトリは Public。秘密情報・研究データ・Raw データは絶対に commit しない（CLAUDE.md §4）
+
+# --- secrets / credentials ---
 .env
 .env.*
 !.env.example
 *.pem
+*.key
+*.p12
+*.pfx
+*.crt
 service-account*.json
+credentials*.json
+*credentials*.json
+secrets.*
+.secrets/
+.npmrc
+.pypirc
+.netrc
 
-# node / next
+# --- node / next ---
 node_modules/
 .next/
 out/
 .vercel/
 
-# python
+# --- python ---
 __pycache__/
 *.py[cod]
 .venv/
+venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
-# local data (正本はDB/オブジェクトストレージ。ローカル生成物はコミットしない)
-data/
-exports/
+# --- research / raw / market data（正本は Private な Supabase / Object Storage） ---
+/data/
+/local-data/
+/exports/
+/artifacts/
+/raw/
 *.parquet
+*.feather
+*.arrow
+*.duckdb
+*.duckdb.wal
+*.db
+*.sqlite
+*.sqlite3
+*.zst
+*.csv.gz
+*.jsonl.gz
 *.xlsx
+*.xls
 
-# supabase local
+# --- database dumps ---
+*.dump
+*.backup
+*.bak
+*.sql.gz
+dump*.sql
+backup*.sql
+
+# --- supabase local ---
 supabase/.branches/
 supabase/.temp/
+.supabase/
 
-# os / editor
+# --- logs ---
+*.log
+logs/
+
+# --- os / editor ---
 .DS_Store
 Thumbs.db
 .vscode/

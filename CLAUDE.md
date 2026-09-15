@@ -20,7 +20,7 @@ Claude Code はこのプロジェクトの**主任開発エージェント**で�
 
 ### 1-1. 完全新規プロジェクト
 - 既存のプロジェクト・リポジトリ・Vercel Project・Supabase Project・既存サイトを**使用・流用・改造しない**。
-- 既存の似たプロジェクト（例: `C:\Users\rorom\jp_surge_radar`）のコードをコピー・統合しない。読みに行かない。
+- 既存の似たプロジェクト（例: `jp_surge_radar`）のコードをコピー・統合しない。読みに行かない。変更もしない。
 
 ### 1-2. 原文保存
 - v5.1 は、**会話内でユーザーが確定させた全文そのものを Canonical Source とする**（別の「元ファイル」を待たない）。受領したら `docs/prompts/short-surge-v5.1.original.md` に一字一句変更せず保存し、保存時点の SHA-256 を `docs/prompts/MANIFEST.md` に記録する。formatting / normalization / typo correction をしない。
@@ -150,7 +150,10 @@ Phase 完了報告（指示書 §49）:
 - Web: `apps/web`（Next.js / TypeScript）。Worker: `workers/`（Python 3.12）。
 - ジョブは冪等に作り、`run_id` / `idempotency_key` 単位で再実行できるようにする。
 - DB スキーマ変更は `supabase/migrations/` のマイグレーションで行う。
-- 秘密情報はコミットしない。
+- **このリポジトリは Public。** 公開してよいのはコード・設計文書・Prompt・Schema・Test 等のみ。
+- **絶対に commit しない**: API key / secret / token、`.env` / `.env.local` 等、Supabase service role key、Provider の認証情報、利用規約上再配布できない Raw ニュース等のデータ、Raw market data の大量ダンプ、Production DB dump、Object Storage 内の研究データ、Prediction の実データ、その他の認証情報。
+- 研究データ・Prediction 実データ・Raw 取得データは Private な Supabase / Object Storage 側にのみ保持する。テスト fixture は合成データのみ。
+- `.gitignore` と GitHub の secret scanning / push protection を前提にし、commit 前に `git status` と差分で対象ファイルを確認する。ローカルパス・個人のメールアドレスも書かない。
 - 各データソースの利用規約を確認してから取得コードを書く。
 - テストは本番 DB・実データの保存先に書き込まない。
 - 外部に影響する操作（リポジトリ作成・push・クラウドリソース作成・有料契約）はユーザー確認後に行う。
