@@ -7,7 +7,7 @@
 | 項目 | 方針 |
 |---|---|
 | 対象 | v5.1 プロンプト、実装指示書、ChatGPT 監査結果など「後から判断の根拠になる文書」 |
-| 保存場所 | プロンプト: `docs/prompts/short-surge-v5.1.md`（以後 v5.2 …）。要件・監査: `docs/requirements/*.original.txt` |
+| 保存場所 | プロンプト: `docs/prompts/short-surge-v5.1.original.md`（以後 v5.2 …も `*.original.md`）。要件・監査: `docs/requirements/*.original.txt` |
 | 内容 | 受け取った本文を**一字一句そのまま**。要約・短縮・リライト・条件削除・配点変更・**整形**をしない |
 | 整形版 | **原文と呼ばない。** 必要な場合のみ `*.formatted.md` として別ファイルにし、冒頭に「整形版・原文ではない」と明記する |
 | 改変検知 | `docs/prompts/MANIFEST.md` に SHA-256 を記録。CI で一致を検査（登録済みファイルのハッシュが変われば失敗） |
@@ -16,13 +16,13 @@
 | 由来の記録 | MANIFEST に「受領日・受領経路（ファイル / チャット本文の転記）」を書く。原文ファイル自体には注記を書き込まない |
 
 **現状**
-- v5.1 原文: **未受領**（Phase 1 の前提条件）。**原文ファイルとして受け取ってから登録する**（監査 0.2 #12）
+- v5.1 原文: **未受領**（Phase 1 の前提条件）。**会話内でユーザーが確定させた全文そのものを Canonical Source とし、別の「元ファイル」は待たない**（監査 0.2 最終パッチ #8）。受領時に `short-surge-v5.1.original.md` へ一字一句変更せず保存し、保存時点の SHA-256 を MANIFEST に記録する。formatting / normalization / typo correction をしない
 - 実装指示書 v1.0 / 監査 Phase 0.1 / 監査 Phase 0.2: チャット本文を転記した `.original.txt` を保存済み。元ファイルとのバイト一致は未確認（D-22）
 
 ## 2. 追加仕様（addenda）
 
 - **Canonical v5.1 と post-v5.1 decisions を混ぜない**（監査 0.2 #12）。
-  - v5.1 本体: immutable original（`short-surge-v5.1.md`。受領したファイルのバイト列そのまま）
+  - v5.1 本体: immutable original（`short-surge-v5.1.original.md`。会話内で確定した全文をそのまま）
   - post-v5.1 decisions: versioned addenda（`addenda/` 配下の別ファイル）
   - v5.1 ファイルに addendum の見出し・文言・注記を書き込まない。
 - v5.1 以後に確定した仕様は `docs/prompts/addenda/` に別ファイルで置く。

@@ -60,7 +60,7 @@
 
 | # | Job | 内容 | LLM |
 |---|---|---|---|
-| 1 | `entry_decision` | 次の取引可能時点で Setup（両種別）の銘柄を再分析。`REALTIME_DECISION_*` Provider の `decision_price` と当日分足、`available_to_model_at <= decision_cutoff_at` の材料を使う。`decision_price` で3,000円を再判定。ENTRY なら判断後に `entry_reference_price` を観測して Prediction・Episode | ○ |
+| 1 | `entry_decision` | 次の取引可能時点で Setup（両種別）の銘柄を再分析。`REALTIME_DECISION_*` Provider の `decision_price` と当日分足、`available_to_model_at <= decision_cutoff_at` の材料を使う。`decision_price` で3,000円を再判定。ENTRY なら判断後に `entry_reference_price` を観測し、それでも3,000円以下なら Prediction・Episode、超過なら `ENTRY_ABORTED_PRICE_LIMIT`（研究ログ） | ○ |
 | 2 | `watch_monitor` | Watch 銘柄の分足を監視し、条件到達で `TRIGGER_HIT` → `REANALYSIS` を要求 | 再分析時のみ |
 | 3 | `episode_monitor` | Open Episode の Target / Failure 到達を記録 | × |
 
@@ -87,7 +87,7 @@ Vercel Functions の実行時間上限（Fluid Compute 有効時、公式ドキ�
 ### 3-2. PostgreSQL: Supabase（新規 Project）
 
 - Postgres・認証・行レベルセキュリティ・トリガー（append-only の強制）を1サービスで使える。
-- 大量の履歴データを Postgres に置かない設計にしたので、DB 容量の問題は小さくなった。一方、Free プランは7日間低アクティビティで自動停止する。プランは D-03a。
+- 大量の履歴データを Postgres に置かない設計にしたので、DB 容量の問題は小さくなった。一方、Free プランは7日間低アクティビティで自動停止する。**Phase 1 開発は Free で開始する（監査で許可）。Production Architecture は Free の上限に合わせて縮小せず、Production 開始前にプランを再評価する**（D-03c）。
 
 ### 3-3. Object Storage: 未選定
 

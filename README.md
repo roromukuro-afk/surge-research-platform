@@ -13,8 +13,9 @@
 |---|---|---|
 | Phase 0 | Requirements / architecture / repository setup | 完了（概ね合格） |
 | Phase 0.1 | 監査是正（ストレージ分離、interface 抽象化、Entry/Episode、Universe、ラベル、回帰テスト仕様） | 条件付き合格 |
-| Phase 0.2 | 最終是正（decision / entry 価格、Setup 分離、Horizon・Failure Line、USD Outcome、材料の利用可能時刻、corporate action、パス解決、v5.1 と addenda の分離） | **完了・ChatGPT 監査待ち** |
-| Phase 1〜12 | [docs/development-phases.md](docs/development-phases.md) | 未着手（**v5.1 原文の受領と監査通過が前提**） |
+| Phase 0.2 | 最終是正（decision / entry 価格、Setup 分離、Horizon・Failure Line、USD Outcome、材料の利用可能時刻、corporate action、パス解決、v5.1 と addenda の分離） | 概ね合格 |
+| Phase 0.2 最終パッチ | PRIOR_SURGE_HIGH の制約緩和、Outcome 二層、見逃し3分類、entry 価格での3,000円再確認、Horizon 表記、v5.1 Canonical の定義 | **完了** |
+| Phase 1〜12 | [docs/development-phases.md](docs/development-phases.md) | 未着手（**v5.1 Canonical 登録後に Phase 1 開始可**。Phase 1 終了時に監査） |
 
 ## 共同開発体制
 
@@ -34,6 +35,7 @@
 | [docs/requirements/implementation-instructions-v1.0.formatted.md](docs/requirements/implementation-instructions-v1.0.formatted.md) | 同・閲覧用整形版（原文ではない） |
 | [docs/requirements/audit-2026-09-15-phase-0.1.original.txt](docs/requirements/audit-2026-09-15-phase-0.1.original.txt) | ChatGPT 監査 Phase 0.1（原文） |
 | [docs/requirements/audit-2026-09-15-phase-0.2.original.txt](docs/requirements/audit-2026-09-15-phase-0.2.original.txt) | ChatGPT 監査 Phase 0.2（原文） |
+| [docs/requirements/audit-2026-09-15-phase-0.2-final-patch.original.txt](docs/requirements/audit-2026-09-15-phase-0.2-final-patch.original.txt) | ChatGPT 監査 Phase 0.2 最終パッチ（原文） |
 | [docs/prompts/](docs/prompts/) | v5.1 原文（未受領）、MANIFEST（SHA-256）、addenda |
 
 ### 設計

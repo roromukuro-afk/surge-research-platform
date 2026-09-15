@@ -1,6 +1,6 @@
 # 投資ロジック Regression Test 仕様（fixture）
 
-状態: **v0.2（Phase 0.2 監査是正後）。仕様のみ。コードは各 Phase で実装する。** — 2026-09-15
+状態: **v0.2.1（Phase 0.2 最終パッチ反映）。仕様のみ。コードは各 Phase で実装する。** — 2026-09-15
 
 - すべて**合成データ**で作る（実銘柄・実ニュース本文を使わない）。
 - 各 fixture は「期待する挙動」と「**禁止する挙動**」の両方を検査する。
@@ -35,6 +35,10 @@
 | **RF-20** | Horizon は ENTRY から20セッション、リセットしない | **0.2 #6** | 8 / 9 | **新規** |
 | **RF-21** | Failure Line の二層 | **0.2 #7** | 8 / 9 | **新規** |
 | **RF-22** | 米国株の Outcome は USD 建て | **0.2 #8** | 9 | **新規** |
+| **RF-23** | False Negative の3分類（ACTIONABLE / PIPELINE_MISSED / OUT_OF_SCOPE_SHOCK） | **0.2 最終 #3** | 10 | **新規（最終パッチ）** |
+| **RF-24** | THESIS_INVALIDATED 後の Outcome 二層 | **0.2 最終 #2** | 9 / 10 | **新規（最終パッチ）** |
+
+最終パッチでの変更: RF-01（DB 制約・単調性の緩和、RF-01-M の差し替え、RF-01-C2 追加）、RF-02（3分類、RF-02-P 追加）、RF-10（D-09b 確定）、RF-17（見逃し分類との関係）、RF-19（ケース d を ENTRY_ABORTED_PRICE_LIMIT に変更、ケース e・f 追加）、RF-20（S0 表記確定、ケース c 追加）、RF-21（close_reason 名）
 
 ---
 
@@ -54,22 +58,34 @@
 **操作**: `price_cutoff_at` = D60 引けで Feature・Stage 1〜3・Reachable Zone・価格障害の生成を実行。
 
 **期待**
-- 1,100円付近と D22–D35 の高出来高価格帯が `price_obstacles` に記録される（`obstacle_type` = `PRIOR_SURGE_HIGH` / `VOLUME_SHELF` 等、`role` = `RESISTANCE` / `SUPPLY_OVERHANG` / `OBSTACLE_TO_ZONE`）。
+- 1,100円付近と D22–D35 の高出来高価格帯が `price_obstacles` に記録される（`obstacle_type` = `PRIOR_SURGE_HIGH` / `VOLUME_SHELF` 等、`role` = `RESISTANCE` / `SUPPLY_OVERHANG` / `HISTORICAL_OBSTACLE` / `TRAPPED_HOLDERS`、`status` = `ACTIVE` 等）。
 - Feature `supply_overhang`（またはそれに相当する値）が 0 より大きい。
-- Reachable Zone の上側境界は、現在の材料・需給・支持抵抗・出来高構造から導かれる。障害は上側境界を**引き下げる（上限を与える）方向**にのみ作用し、分析結果に「障害までの距離」が記録される。
+- Reachable Zone の上側境界は、現在の材料・需給・支持抵抗・出来高構造から導かれる。分析結果に「障害までの距離」と、障害をどう評価したか（有効 / 弱まった / 失効、と根拠）が記録される。
+- 過去高値が存在するだけで上側境界を機械的に引き下げる DB 制約はない（最終パッチ #1）。障害の効き方は分析で評価する。
 
 **禁止**
 - `obstacle_type = PRIOR_SURGE_HIGH` を `role = BULLISH_BASIS`（上昇根拠）として保存する（出力検証器・DB 制約で拒否）。
 - Potential Upside を `1100 / 650 − 1 ≒ +69%` と算出し、Reachable Zone・根拠・スコアのいずれかに使う。
 - 根拠文で「旧高値まで戻る余地」を上昇の理由にする。
 
-**RF-01-M（単調性）**: 直近20セッションの価格・出来高・材料が同一で、それ以前だけが異なる2系列を作る。
-- 系列 A: 上表どおり（過去に 1,100 の急騰高値あり）
-- 系列 B: D1–D40 も 630–670 のレンジ（急騰なし）
-- **期待**: Reachable Zone の上側境界と上昇余地を示すスコアは、A ≤ B。過去の急騰高値があることで上昇余地が**増えてはならない**。
+**RF-01-M（過去高値が遠いほど上昇余地を増やさない）**: D41–D60 の価格・出来高・材料が同一で、D21–D40 の急騰高値の水準だけが異なる3系列を作る（急騰の形は同じ比率で伸縮、崩壊後は 630–670 のレンジ）。
+| 系列 | 過去急騰高値 | 現在値（約650）からの距離 |
+|---|---|---|
+| A1 | 900円 | 約 +38% |
+| A2 | 1,100円 | 約 +69% |
+| A3 | 1,500円 | 約 +131% |
+- **期待**: 上昇余地を示す出力（Reachable Zone 上側境界、上昇余地のスコア、Potential Upside 相当の値）は、`A3 ≤ A2 ≤ A1`（等しくてもよい）。**過去高値が遠いほど上昇余地が増えてはならない。**
+- **要求しないこと**: 「過去高値が存在すれば必ず Reachable Zone が低下する」（急騰のない系列と比べて低いこと）は要求しない。
 
-**RF-01-C（対照・障害として使うこと）**: 系列 A で `price_obstacles` に 1,100円付近の障害が**何も記録されない**、または `supply_overhang` が 0 の場合は**失敗**とする（過去高値を無視しないことの検査）。
-なお本 fixture は判定結果が `REJECT` であることを要求しない。
+**RF-01-C（対照・障害として使うこと）**: 系列 A2 で `price_obstacles` に 1,100円付近の障害が**何も記録されない**、または `supply_overhang` が 0 の場合は**失敗**とする（過去高値を無視しないことの検査）。
+
+**RF-01-C2（対照・障害の意味が弱まる場合）**: A2 の D55–D60 に新しい強材料（`available_to_model_at` = D55 10:00）が出て、出来高が20日平均の5倍、価格が 1,100円を上回って3セッション引けた場合、
+- 1,100円付近の障害は記録されたうえで、`status = WEAKENED` または `INVALIDATED`（根拠付き）と評価されてよい。
+- Reachable Zone 上側境界が 1,100円を下回らないことを理由に、テストを失敗にしない（機械的な引き下げを要求しない）。
+- ただしこの場合も、上昇根拠は新材料・出来高・価格受容であり、「1,100円まで戻る」ことを根拠にしてはならない（RF-01 の禁止事項は引き続き有効）。
+
+なお本 fixture 群は判定結果が `REJECT` であることを要求しない。
+
 
 ---
 
@@ -82,9 +98,11 @@
 | D40 18:00 ET | 買収（tender offer）発表。`system_first_seen_at` = 18:02 ET、`available_to_model_at` = 18:05 ET |
 | D41 | 始値 $19.50（+30%）、以後 $19.40–19.60 |
 
-**期待**: Objective で `hit_20 = true`。Interpretive は `OUT_OF_SCOPE_SHOCK`（または同等の予測不能ラベル）。Candidate Generation の学習データに「選ぶべきだった正例」として入らない。
+**期待**: Objective で `hit_20 = true`。Interpretive は `OUT_OF_SCOPE_SHOCK`。Prediction Engine の False Negative に数えず、Candidate Generation の学習データに「選ぶべきだった正例」として入らない。Pipeline 改善用データにも入らない（市場にも事前の情報がなかったため）。
 **禁止**: `ACTIONABLE_FALSE_NEGATIVE` が付く。上昇前の判定入力に `available_to_model_at` が D40 18:05 ET 以降の情報を含める。
 **RF-02-C（対照）**: D30–D39 に出来高が20日平均の4倍で価格が堅調、D35 10:00 ET に「買収検討」の報道（`available_to_model_at` = 10:04 ET）がある場合は、自動で `OUT_OF_SCOPE_SHOCK` にしない。Research 判定に回り、`ACTIONABLE_FALSE_NEGATIVE` が付くことを許可する。
+
+**RF-02-P（対照・Pipeline の取りこぼし）**: RF-02-C と同じ報道（`source_published_at` = D35 10:00 ET）が、コレクタ障害のため `available_to_model_at` = D42 09:00 ET（急騰後）になった場合、`ACTIONABLE_FALSE_NEGATIVE` ではなく `PIPELINE_MISSED_ACTIONABLE_SIGNAL` とする（RF-23）。
 
 ---
 
@@ -200,7 +218,7 @@ Z は D10 引けまでのチャートでもセットアップ条件を満たし�
 | j | S0: 10:00:30 に ENTRY。10:00 の分足に安値 915 があるが、約定で見るとそれは 10:00:05（ENTRY 前） | ENTRY 前の値動きとして無視し、`FAILURE_FIRST` にしない |
 
 - **禁止**: f・g・h・i を `TARGET_FIRST` / `FAILURE_FIRST` に分類する。a で「高値 1,250 に触れた」ことを理由に Target 側にする。
-- g と h の区別は Claude Code 解釈（D-09b）。確定までは両ケースとも「成功・失敗に分類しない」ことのみを必須とし、どちらのラベルになるかは pending。
+- g と h の区別は D-09b で確定（最終パッチ #6）: g（細かいデータが仕様上存在しない）= `AMBIGUOUS_PATH`、h（本来あるはずのデータが欠損）= `UNRESOLVED_MISSING_DATA`。両方とも必須。
 
 ## RF-11 3,000円境界
 
@@ -221,7 +239,7 @@ Z は D10 引けまでのチャートでもセットアップ条件を満たし�
 
 - **RF-14a**: `docs/prompts/MANIFEST.md` に登録済みのファイルを1バイト変更 → CI 失敗。
 - **RF-14b（v5.1 と addenda を混ぜない）**:
-  - addendum を追加しても、`short-surge-v5.1.md` の SHA-256 は変わらない。
+  - addendum を追加しても、`short-surge-v5.1.original.md` の SHA-256 は MANIFEST に記録した保存時点の値から変わらない。
   - LLM への入力バンドルは、v5.1 原文と各 addendum を**別セクション**として持ち、それぞれの SHA-256 を個別に記録する（v5.1 本文の中に addendum の文言を差し込まない）。
   - v5.1 原文ファイルに addendum の見出し・文言が含まれていたら CI 失敗。
 
@@ -258,7 +276,7 @@ Z は D10 引けまでのチャートでもセットアップ条件を満たし�
 
 **RF-17-C（対照）**: B は `decision_cutoff_at` = 2026-09-20 10:30 の判断では使える。`decision_cutoff_at` = 2026-09-20 10:03 の判断では使えない（`available_to_model_at` = 10:05 のため）。
 
-見逃しの Research 判定で backfill 情報を別扱いで使えるかは D-23（確定までは使わない）。
+見逃しの判定との関係（D-23 確定、最終パッチ #3）: A のような backfill 情報は、「市場には cutoff 前から情報が存在した」ことの確認には使えるが、AI が当時知っていた情報としては扱わない。A が上昇を合理的に拾える情報だった場合、ラベルは `PIPELINE_MISSED_ACTIONABLE_SIGNAL` であり `ACTIONABLE_FALSE_NEGATIVE` ではない（RF-23）。
 
 ---
 
@@ -297,7 +315,9 @@ Z は D10 引けまでのチャートでもセットアップ条件を満たし�
 | a（JP） | `TECHNICAL_SETUP_EOD` 引け値 2,950円 | `decision_price` 3,020円 | `REJECT`（`HARD_FILTER_AT_ENTRY`）、Prediction 0件 |
 | b（US） | $19.80 × 150.00 = 2,970円 | `decision_price` $19.95 × 151.00（`fx_observed_at <= decision_cutoff_at`）= 3,012.45円 | 同上 |
 | c（対照） | 2,950円 | `decision_price` 2,990円、分析は ENTRY | Prediction を作ってよい |
-| d（D-26 暫定） | 2,950円 | `decision_price` 2,995円で ENTRY、`entry_reference_price` 3,005円 | Prediction は有効、`entry_reference_price_jpy` を記録し集計可能（D-26 確定まで pending） |
+| d（最終パッチ #4） | 2,950円 | `decision_price` 2,995円で ENTRY、`entry_reference_price` 3,005円 | **Prediction・Episode は作らない。** `prod.entry_attempts` に `ENTRY_ABORTED_PRICE_LIMIT`。Threshold・Outcome・成績に含めない |
+| e（d の続き） | — | 同じセッションの後刻に 2,980円まで下落 | d の試行を自動で復活させない。新しい再分析が ENTRY と判断し、その `decision_price` / `entry_reference_price` がともに3,000円以下の場合のみ、新しい Prediction を作る |
+| f（US、entry 側） | — | `decision_price` $19.80 × 151.00 = 2,989.80円で ENTRY、`entry_reference_price` $19.90 × 151.00 = 3,004.90円 | d と同じく `ENTRY_ABORTED_PRICE_LIMIT` |
 
 **禁止**: a・b で Prediction を作る。Setup 時点で3,000円以下だったことを理由に再判定を省略する。
 
@@ -309,11 +329,13 @@ Z は D10 引けまでのチャートでもセットアップ条件を満たし�
 | ケース | 価格 | 期待 |
 |---|---|---|
 | a | S20 に高値 1,205 | `TARGET_FIRST`（Horizon 内） |
-| b | S21 に初めて高値 1,205 | `NEITHER_BY_HORIZON` |
+| b | S21 に初めて高値 1,205 | `NEITHER_BY_HORIZON`、close_reason `HORIZON_EXPIRED` |
+| c | S0 の 10:00 に ENTRY（1,000円）、S0 の 14:20 に高値 1,205 | `TARGET_FIRST`（S0。ENTRY 時刻以降の S0 の値動きを含む） |
 
 - **期待**: `horizon_end` は S20 の引け。休場日は数えない。
 - **禁止**: Watch 開始（S−3）から数えて S17 で終える。`REAFFIRMED`（S6）で数え直して S26 まで延ばす。休場日を1セッションとして数える。
-- S0 を数え始めとする点は D-17d（Claude Code 解釈）。確定までは「Watch 開始から数えない」「REAFFIRMED でリセットしない」の2点のみを必須とする。
+- 表記は D-17d で確定（最終パッチ #5）: S0 = ENTRY 成立セッション、S1 = 翌取引セッション、Primary Horizon は S20 close まで。a〜c すべて必須。
+- **禁止（追加）**: c で S0 の値動きを除外して S1 から判定を始める。
 
 **RF-20-C（対照）**: Episode E1 クローズ後、S12 に正式に新しい Episode E2 が開始 → E2 は S12 を S0 とする独立した Horizon を持つ。
 
@@ -323,7 +345,7 @@ Z は D10 引けまでのチャートでもセットアップ条件を満たし�
 
 **入力（JP）**: S0 ENTRY 1,000円、Target 1,200円、`initial_failure_line` 920円。S5 の再分析で `current_risk_line` を 980円に引き上げ（State Transition）。S6 に安値 950円。S11 に高値 1,210円。
 - **期待**
-  - Primary: `TARGET_FIRST`（S11）。Episode のクローズ理由 `TARGET_HIT`。
+  - Primary: `TARGET_FIRST`（S11）。Episode のクローズ理由 `TARGET_HIT`（`INITIAL_FAILURE_HIT` ではない）。
   - 研究用の risk line パス解決: `RISK_LINE_FIRST`（S6）。`RISK_LINE_HIT` の State Transition が記録される。
   - `prod.predictions.initial_failure_line` は 920 のまま。
 - **禁止**: S6 で Primary を `FAILURE_FIRST` にする。`initial_failure_line` の UPDATE（DB で拒否）。`current_risk_line` への接触で Episode をクローズする。
@@ -340,3 +362,45 @@ Z は D10 引けまでのチャートでもセットアップ条件を満たし�
 
 - **期待**: Primary の Target 判定・MFE/MAE は USD 建て。JPY リターンは補助 Outcome の別列。
 - **禁止**: a で円高を理由に `hit_20 = false` にする。b で円安を理由に `hit_20 = true` にする。
+
+---
+
+## RF-23 False Negative の3分類（新規、最終パッチ #3）
+
+共通: ENTRY されなかった Eligible 銘柄。Prediction cutoff（その日の判断のカットオフ）= D35 15:00 ET。D41 以降に +20% 以上（Objective `hit_20 = true`）。
+
+| ケース | cutoff 前の状況 | 期待ラベル | 使い道 |
+|---|---|---|---|
+| a | 「買収検討」報道: `source_published_at` = D35 10:00、`available_to_model_at` = D35 10:04。出来高も異常。システムは Stage 1 で落とした | `ACTIONABLE_FALSE_NEGATIVE` | Prediction Model（候補生成・Entry 層）の見逃し学習 |
+| b | 同じ報道: `source_published_at` = D35 10:00、コレクタ障害で `available_to_model_at` = D42 09:00（後日の backfill） | `PIPELINE_MISSED_ACTIONABLE_SIGNAL` | Data / News Pipeline 改善用。**Prediction Model の False Negative にしない** |
+| c | 市場にも事前の報道・異常出来高・その他の合理的な前兆なし。D40 18:00 に突然の買収発表 | `OUT_OF_SCOPE_SHOCK` | Prediction Engine の False Negative にしない |
+
+**期待**
+- b の判定では、報道の存在確認に backfill 文書を使ってよい（`source_published_at` と遅延の記録）。ただし判定記録に「cutoff 時点で AI は未取得」と残る。
+- b の `pipeline_miss_records` に、`source_published_at`、`available_to_model_at`、遅延時間、原因（例: `COLLECTOR_OUTAGE`）が記録される。
+- a〜c のいずれも、D35 の Production 分析の入力バンドルとハッシュは変わらない。
+
+**禁止**
+- b に `ACTIONABLE_FALSE_NEGATIVE` を付ける（backfill 情報を当時 AI が知っていたことにする）。
+- b・c を Prediction Model の見逃し学習データに入れる。
+- a の判定入力に `available_to_model_at > cutoff` の情報を含める。
+
+---
+
+## RF-24 THESIS_INVALIDATED 後の Outcome 二層（新規、最終パッチ #2）
+
+**入力（JP）**: S0 ENTRY 1,000円、Target 1,200円、`initial_failure_line` 920円。S5 の再分析で `THESIS_INVALIDATED`（それまで Target・Failure に未到達、S0〜S5 の高値 1,080・安値 950）。S12 に高値 1,230円、S15 に安値 900円。
+
+**期待**
+| 層 | 値 |
+|---|---|
+| `primary_episode_outcome` | close_reason `THESIS_INVALIDATED`（S5）。`hit_20 = false`。MFE / MAE は S5 までの +8.0% / −5.0% |
+| `counterfactual_horizon_outcome` | S20 close まで追跡。`later_target_hit = true`（S12）、counterfactual MFE +23.0%、counterfactual MAE −10.0%（S15） |
+| 成績集計 | 成功数に含めない |
+
+**禁止**
+- S12 の +23% 到達を理由に Primary を `TARGET_HIT` / 成功に変える。
+- counterfactual の `later_target_hit` を Production ML の正解ラベルとして使う。
+- Episode を S5 でクローズせずに S20 まで Primary を延長する。
+
+**対照（RF-24-C）**: `THESIS_INVALIDATED` がなく S12 に 1,230円に達した場合は、Primary が `TARGET_HIT`（S12）になり、counterfactual も同じ到達を記録する。

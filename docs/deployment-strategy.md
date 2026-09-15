@@ -7,7 +7,7 @@
 | リソース | 用途 | 作成タイミング | 決定事項 |
 |---|---|---|---|
 | Git リポジトリ（リモート） | ソース管理・CI | Phase 1 開始時（ユーザー確認後） | 現在はローカル Git のみ |
-| PostgreSQL（Supabase 新規 Project） | 状態・索引・結果・認証 | Phase 1 開始時 | プラン D-03a |
+| PostgreSQL（Supabase 新規 Project） | 状態・索引・結果・認証 | Phase 1 開始時（ユーザー確認後） | Phase 1 は Free（D-03a）。Production 前に再評価（D-03c） |
 | Object Storage（新規バケット） | Parquet・raw・画像・成果物 | Phase 2 まで（Phase 1 はローカル実装） | プロバイダ D-03b |
 | Web（Vercel 新規 Project） | 閲覧用 UI | 画面ができてから | プラン D-04 |
 | JobRunner の実行環境 | 日次バッチ / 場中監視 / 収集 | 日次は Phase 1〜2、常駐型は Phase 4・8 まで | D-05a |

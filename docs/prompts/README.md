@@ -6,7 +6,7 @@
 
 | ファイル | 状態 |
 |---|---|
-| `short-surge-v5.1.md` | **未受領**（**原文ファイルとして**受け取り次第、無加工で保存し MANIFEST に SHA-256 を登録する。addenda の内容を混ぜない） |
+| `short-surge-v5.1.original.md` | **未受領**（会話内でユーザーが確定させた全文を受け取り次第、一字一句変更せず保存し、保存時点の SHA-256 を MANIFEST に登録する。formatting / normalization / typo correction をしない。addenda の内容を混ぜない） |
 | [MANIFEST.md](MANIFEST.md) | 原文ファイル（プロンプト・要件・監査）と addenda の SHA-256 |
 | [addenda/](addenda/) | v5.1 以後の確定追加仕様の所在一覧（v5.1 原文より優先） |
 

@@ -1,6 +1,6 @@
 # データモデル草案
 
-状態: **草案 v0.2（Phase 0.2 監査是正後）** — 2026-09-15
+状態: **草案 v0.2.1（Phase 0.2 最終パッチ反映）** — 2026-09-15
 列名・型は Phase ごとのマイグレーションで確定する。投資ロジックに関わる列は v5.1 原文受領後に見直す。
 
 ## 0. 共通規約
@@ -76,10 +76,11 @@
 |---|---|
 | llm_analyses | analysis_id, run_id, security_id, **analysis_kind (STAGE3_EOD / POST_CLOSE_MATERIAL / ENTRY_DECISION / REANALYSIS / MATERIAL / RESEARCH)**, price_cutoff_at, decision_cutoff_at, decision_completed_at, prompt_version, rule_version, feature_version, llm_provider, llm_model, input_object_key, input_sha256, prompt_original_sha256, prompt_addenda_sha256s, output, decision, created_at |
 | llm_derived_features | analysis_id, novelty_score, material_duration, market_psychology, priced_in, supply_overhang, reachable_zone_quality, chart_meaning |
-| price_obstacles | analysis_id（またはルール層の run_id）, security_id, price_level, obstacle_type (PRIOR_SURGE_HIGH / VOLUME_SHELF / RESISTANCE / GAP_FILL / …), **role (RESISTANCE / SUPPLY_OVERHANG / TRAPPED_HOLDERS / OBSTACLE_TO_ZONE)**, evidence |
-| reachable_zones | analysis_id, bound (LOWER / UPPER), price, anchor_type, **anchor_role (BULLISH_BASIS / CAP_BY_OBSTACLE / SUPPORT)**, obstacle_ref, evidence |
+| price_obstacles | analysis_id（またはルール層の run_id）, security_id, price_level, obstacle_type (PRIOR_SURGE_HIGH / VOLUME_SHELF / RESISTANCE / GAP_FILL / …), **role (RESISTANCE / SUPPLY_OVERHANG / HISTORICAL_OBSTACLE / TRAPPED_HOLDERS)**, **status (ACTIVE / WEAKENED / INVALIDATED)**, status_evidence（新材料・出来高・価格受容・高値突破など）, evidence |
+| reachable_zones | analysis_id, bound (LOWER / UPPER), price, anchor_type, **anchor_role (BULLISH_BASIS / OBSTACLE_CONSIDERED / SUPPORT)**, obstacle_ref, evidence |
 
-- CHECK: `anchor_type = 'PRIOR_SURGE_HIGH'` のとき `anchor_role <> 'BULLISH_BASIS'`。過去の急騰高値は上限（CAP_BY_OBSTACLE）としてのみ境界に関与できる。
+- CHECK: `anchor_type = 'PRIOR_SURGE_HIGH'` のとき `anchor_role <> 'BULLISH_BASIS'`（過去高値まで戻ることを上昇根拠にしない）。
+- **過去高値が存在するだけで Reachable Zone の上限を機械的・単調に引き下げる DB 制約は設けない**（最終パッチ #1）。障害の効き方は `price_obstacles.status` と分析で評価する。
 
 ### prod（append-only）
 | テーブル | 主な列 |
@@ -87,9 +88,10 @@
 | setups | setup_id, **setup_type (TECHNICAL_SETUP_EOD / POST_CLOSE_CATALYST_SETUP)**, analysis_id, security_id, signal_cutoff_at, signal_reference_price, triggering_material_event_ids, priced_in_status, valid_until（D-20）, created_at |
 | watches | watch_id, analysis_id, security_id, watch_type, trigger_condition, invalidation_condition, expires_at, reference_price_at_watch（評価基準に使わない） |
 | predictions | 下記 |
+| entry_attempts | attempt_id, analysis_id, security_id, source_setup_ids, source_watch_id, decision_cutoff_at, decision_price, decision_price_observed_at, decision_price_jpy, decision_completed_at, entry_reference_price, entry_price_observed_at, entry_price_method, entry_reference_price_jpy, fx_observation_ids, **status (PREDICTION_CREATED / ENTRY_ABORTED_PRICE_LIMIT / …)**, prediction_id（作成時のみ）, created_at。**研究ログ。ABORTED は成績に含めない** |
 | actual_fills | prediction_id, actual_fill_price, actual_fill_at, broker_ref（自動売買導入まで空で可） |
 | prediction_episodes | episode_id, security_id, thesis_key, opening_prediction_id (unique), opened_at, **horizon_start_session_date (S0), horizon_end_session_date (S20)** |
-| episode_closures | episode_id (unique), close_reason (TARGET_HIT / FAILURE_HIT / THESIS_INVALIDATED / HORIZON_END / AMBIGUOUS_PATH / UNRESOLVED_MISSING_DATA), closed_at, evidence, run_id |
+| episode_closures | episode_id (unique), close_reason (TARGET_HIT / INITIAL_FAILURE_HIT / THESIS_INVALIDATED / HORIZON_EXPIRED / AMBIGUOUS_PATH / UNRESOLVED_MISSING_DATA / CORPORATE_ACTION_SUSPECTED), closed_at, closed_session_index, evidence, run_id |
 | risk_line_updates | update_id, episode_id, current_risk_line, effective_at, transition_id, analysis_id（初期行 = initial_failure_line） |
 | state_transitions | transition_id, subject_type (setup / watch / episode), subject_id, security_id, from_state, to_state (TECHNICAL_SETUP_EOD / POST_CLOSE_CATALYST_SETUP / WATCH_* / TRIGGER_HIT / REANALYSIS / ENTRY / REAFFIRMED / DOWNGRADED / RISK_LINE_UPDATED / RISK_LINE_HIT / THESIS_INVALIDATED / FAILED_BREAKOUT / EXPIRED / REJECT …), cause, evidence, analysis_id, occurred_at, detected_at, run_id |
 
@@ -105,7 +107,7 @@
 | **decision_cutoff_at**（= data_cutoff）, decision_completed_at | |
 | **decision_price, decision_price_observed_at**, decision_price_basis, decision_price_provider_id, decision_price_latency_class | `decision_price_observed_at <= decision_cutoff_at` |
 | fx_rate, fx_observed_at, fx_observation_id, **decision_price_jpy** | 3,000円再判定に使用。`fx_observed_at <= decision_cutoff_at`、`decision_price_jpy <= 3000` |
-| **entry_reference_price, entry_price_observed_at, entry_price_method**, entry_price_provider_id, entry_reference_price_jpy | `entry_price_observed_at >= decision_completed_at` |
+| **entry_reference_price, entry_price_observed_at, entry_price_method**, entry_price_provider_id, entry_reference_price_jpy | `entry_price_observed_at >= decision_completed_at`、**`entry_reference_price_jpy <= 3000`**（超過時は Prediction を作らず `entry_attempts` に ABORTED） |
 | price_currency | JPY / USD |
 | **target_price** | `= entry_reference_price × 1.20`（CHECK） |
 | **initial_failure_line**, failure_distance | 変更不可 |
@@ -119,8 +121,9 @@
 ### outcomes
 | テーブル | 主な列 |
 |---|---|
-| episode_outcomes | episode_id, horizon_days (1/3/5/10/20), computed_at, price_currency, price_basis (COMPARABLE), corporate_action_ids_applied, close_return, mfe, mae, hit_10, hit_20, hit_30, days_to_20, failure_line_hit, hit_20_before_failure, failure_before_20, outcome_status (FINAL / CORPORATE_ACTION_SUSPECTED / …), delisted_flag |
-| episode_path_resolution | episode_id, line_kind (PRIMARY_INITIAL / RESEARCH_RISK_LINE), path_resolution, resolution_granularity (SESSION_OPEN / DAY / INTRADAY_BAR / TRADE), resolved_session_index, resolved_at_ts, label_version |
+| primary_episode_outcomes | **正式評価。Episode 終了時点まで。** episode_id, close_reason, closed_session_index, computed_at, price_currency, price_basis (COMPARABLE), corporate_action_ids_applied, close_return, mfe, mae, hit_10, hit_20, hit_30, days_to_20, failure_line_hit, hit_20_before_failure, failure_before_20, outcome_status (FINAL / CORPORATE_ACTION_SUSPECTED / …), delisted_flag |
+| counterfactual_horizon_outcomes | **研究用。当初の S20 close まで（Episode 終了に関係なく）。** episode_id, horizon_days (1/3/5/10/20), computed_at, price_currency, corporate_action_ids_applied, counterfactual_mfe, counterfactual_mae, later_target_hit, later_target_hit_session_index, close_return |
+| episode_path_resolution | episode_id, scope (PRIMARY_EPISODE / COUNTERFACTUAL_HORIZON), line_kind (PRIMARY_INITIAL / RESEARCH_RISK_LINE), path_resolution, resolution_granularity (SESSION_OPEN / DAY / INTRADAY_BAR / TRADE), resolved_session_index, resolved_at_ts, label_version |
 | auxiliary_outcomes | episode_id, horizon_days, jpy_return（米国株）, fx_at_entry, fx_at_evaluation, dividend_inclusive_return |
 
 ### labels / research / ml / exports / serving
@@ -132,7 +135,8 @@ v0.1 から変更なし（[teacher-labels.md](specs/teacher-labels.md) に Objec
 | labels.objective_labels | label_id, subject_type, subject_id, label, value, label_version, computed_at |
 | labels.interpretive_labels | label_id, subject_type, subject_id, label, labeler_model_version, confidence, evidence, human_review_status, information_cutoff_at, input_sha256, objective_label_ref, supersedes_label_id, created_at |
 | labels.label_admission_policies | policy_version, rules, created_at |
-| labels.false_negative_reviews | review_id, security_id, surge_start_at, information_cutoff_at, analysis_id, verdict, interpretive_label_id |
+| labels.false_negative_reviews | review_id, security_id, surge_start_at, prediction_cutoff_at, analysis_id, **verdict (ACTIONABLE_FALSE_NEGATIVE / PIPELINE_MISSED_ACTIONABLE_SIGNAL / OUT_OF_SCOPE_SHOCK / OUT_OF_SCOPE_LATE)**, available_info_doc_ids, late_info_doc_ids, interpretive_label_id |
+| labels.pipeline_miss_records | review_id, document_id, source_id, source_published_at, available_to_model_at, delay_seconds, cause (COLLECTOR_OUTAGE / FETCH_DELAY / BACKFILL / …), created_at。Pipeline 改善用（Prediction Model の学習には使わない） |
 | research.replay_runs / replay_predictions / replay_outcomes | prod 系と同形 + replay_run_id（prod とは別テーブル）。材料は `available_to_model_at <= decision_cutoff_at` のみ |
 | ml.model_registry / model_evaluations | v0.1 と同じ |
 | exports.excel_exports | export_id, run_id, created_at, scope, object_key, row_counts |
@@ -155,4 +159,4 @@ v0.1 から変更なし（[teacher-labels.md](specs/teacher-labels.md) に Objec
 
 ## 3. 関係する未決事項
 
-D-01a / D-01b / D-02a / D-09b / D-17a / D-17b / D-17d / D-17e / D-20 / D-21 / D-23 / D-24 / D-26 / D-13a / D-13b（[unresolved-decisions.md](unresolved-decisions.md)）
+D-01a / D-01b / D-02a / D-17a / D-17b / D-20 / D-21 / D-24 / D-31 / D-32 / D-33 / D-13a / D-13b（[unresolved-decisions.md](unresolved-decisions.md)）

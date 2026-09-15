@@ -153,7 +153,7 @@ FxObservation   { pair, rate, observed_at, basis, source }
 4. `latency_class` を Prediction に保存する。ENTRY 判断ジョブは、許可された遅延区分以外の Provider を拒否する（許可範囲は D-21）。`capabilities().update_schedule` が日次の Provider は `REALTIME_DECISION_*` に割り当てられない（設定検証で拒否）。
 5. 利用規約上の用途（個人・非プロ・内部利用など）を capabilities に持ち、設定時に確認できるようにする。
 6. `decision_price` と `entry_reference_price` は別の呼び出しで観測する。前者は `at_or_before = decision_cutoff_at`、後者は判断完了後の観測（算出方式 `entry_price_method` は D-01a）。
-7. `capabilities().trades` は「構成上提供しない」（`NOT_SUPPORTED`）と「提供するが当該時間帯が欠損」（結果の欠損）を区別して返す（パス解決の `AMBIGUOUS_PATH` / `UNRESOLVED_MISSING_DATA` の判定に使う、D-09b）。
+7. `capabilities().trades` は「構成上提供しない」（`NOT_SUPPORTED`）と「提供するが当該時間帯が欠損」（結果の欠損）を区別して返す（パス解決の `AMBIGUOUS_PATH` / `UNRESOLVED_MISSING_DATA` の判定に使う、D-09b 確定）。
 
 ### 2-4. J-Quants Provider（抽象化の方針）
 

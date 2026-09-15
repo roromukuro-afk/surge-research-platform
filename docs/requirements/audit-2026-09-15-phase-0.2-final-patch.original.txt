@@ -1,0 +1,170 @@
+## ChatGPT監査結果 — Phase 0.2 最終パッチ
+
+Phase 0.2は概ね合格です。
+全面的なPhase 0.3は不要です。
+
+以下4点を修正し、v5.1 Canonical本文を登録した後はPhase 1へ進んでよいものとします。
+
+### 1. PRIOR_SURGE_HIGHの制約を弱める
+
+「過去急騰高値まで戻ること」をPotential UpsideまたはReachable Zoneの強気根拠として使用することは禁止する。
+
+ただしPRIOR_SURGE_HIGHは、
+
+- Resistance
+- Supply Overhang
+- Historical obstacle
+- 高値掴み保有者の存在可能性
+
+として保存・評価する。
+
+PRIOR_SURGE_HIGHが存在するだけでReachable Zone上限を機械的・単調に引き下げるDB制約は設けない。
+
+新しい強材料、出来高、価格受容、過去高値突破等によってSupply Overhangの意味が失効・低下する場合があるためである。
+
+RF-01-Mも、
+
+「過去高値が遠いほど上昇余地を増加させてはいけない」
+
+ことを検査するものへ変更し、
+
+「過去高値が存在すれば必ずReachable Zoneが低下する」
+
+ことまでは要求しない。
+
+
+### 2. THESIS_INVALIDATED後のOutcomeを二層化する
+
+正式なPrediction評価：
+
+primary_episode_outcome
+
+研究用：
+
+counterfactual_horizon_outcome
+
+を分離する。
+
+Primary Episodeは、
+
+- TARGET_HIT
+- INITIAL_FAILURE_HIT
+- THESIS_INVALIDATED
+- HORIZON_EXPIRED
+
+等で終了する。
+
+THESIS_INVALIDATED後に株価が+20%へ到達しても、Primary Prediction Successへ戻してはいけない。
+
+ただしResearch目的で、当初Horizon終了まで株価を追跡し、
+
+- counterfactual MFE
+- counterfactual MAE
+- later target hit
+
+等を保存してよい。
+
+
+### 3. Backfill / False Negativeを3種類に分ける
+
+ACTIONABLE_FALSE_NEGATIVE:
+Prediction cutoff時点でシステムが実際に利用可能だった情報から合理的に拾えたにもかかわらず、Screening/AIが落とした。
+
+PIPELINE_MISSED_ACTIONABLE_SIGNAL:
+市場にはPrediction cutoff以前から情報が存在していたが、Collector障害・取得遅延等でavailable_to_model_atがcutoff後になったもの。
+Prediction ModelのFalse Negativeにはしない。
+Data/News Pipeline改善用の教師データとする。
+
+OUT_OF_SCOPE_SHOCK:
+市場にも事前に合理的な前兆が存在しなかった突発イベント。
+Prediction EngineのFalse Negativeにはしない。
+
+Backfillされた情報を、当時AIが知っていたことにしてはいけない。
+
+
+### 4. entry_reference_priceでも3,000円Hard Filterを再確認する
+
+decision_price <= 3,000円相当でENTRY判断していても、
+
+entry_reference_price > 3,000円相当
+
+になった場合、正式Prediction Episodeを開始してはいけない。
+
+状態例：
+
+ENTRY_ABORTED_PRICE_LIMIT
+
+として研究ログには残してよい。
+
+正式な20% Threshold、Outcome、Prediction成績には含めない。
+
+後に再び3,000円以下になった場合は、その時点で再分析して新しいENTRY判断を行う。
+
+
+### 5. Horizon表記を確定する
+
+S0 = ENTRY成立セッション。
+ENTRY timestamp以降のS0価格変化もOutcomeへ含める。
+
+S1 = ENTRY翌取引セッション。
+
+Primary HorizonはS20 closeまで。
+
+State Update / REAFFIRMEDではHorizonをリセットしない。
+
+
+### 6. D-09bは現在案を採用
+
+より細かいデータが仕様上存在しないため順序不明：
+AMBIGUOUS_PATH
+
+本来利用できるはずの細粒度データが欠損：
+UNRESOLVED_MISSING_DATA
+
+
+### 7. Supabase
+
+Phase 1開発はFreeで開始してよい。
+
+ただしProduction ArchitectureをFree上限に合わせて縮小してはいけない。
+
+Bulk historical dataをParquet/Object Storageに分離する現在方針を維持する。
+
+Production開始前にプランを再評価する。
+
+
+### 8. v5.1 Canonical Source
+
+v5.1について別の「元ファイル」を待つ必要はない。
+
+ユーザーが会話内で確定させたv5.1全文そのものをCanonical Sourceとする。
+
+ユーザーから全文を受領したら、
+
+docs/prompts/short-surge-v5.1.original.md
+
+へ一字一句変更せず保存し、その保存時点のSHA-256をMANIFESTへ記録する。
+
+formatting / normalization / typo correctionを行わない。
+
+v5.1後の決定はaddendaとして別管理する。
+
+
+### 9. Phase 1開始条件
+
+上記修正
++
+v5.1 Canonical登録
+
+が完了すればPhase 1へ進んでよい。
+
+日本株場中リアルタイムProvider未決はPhase 1のblockerではない。
+Phase 8までのblockerとして管理する。
+
+Phase 1:
+Security Master + Universe
+
+へ進むこと。
+
+ただしPhase 1終了時には必ず停止し、
+ChatGPT監査を受けてからPhase 2へ進むこと。

@@ -1,6 +1,6 @@
 # テスト戦略
 
-状態: **v0.2（Phase 0.2 監査是正後）** — 2026-09-15
+状態: **v0.2.1（Phase 0.2 最終パッチ反映）** — 2026-09-15
 
 ## 1. レイヤー
 
@@ -16,11 +16,11 @@
 
 ## 2. 投資ロジック回帰テスト
 
-仕様: **[specs/regression-fixtures.md](specs/regression-fixtures.md)**（RF-01〜RF-22）
+仕様: **[specs/regression-fixtures.md](specs/regression-fixtures.md)**（RF-01〜RF-24）
 
 - 監査で必須とされた6件（RF-01〜RF-06）を含む。
 - 実行可能になる Phase より前は `pending` として CI に登録し、削除しない。
-- 規則を広げすぎていないこと・必要な参照をしていることを確かめる対照ケース（RF-01-C / RF-01-M / RF-02-C / RF-04-C / RF-05-C / RF-06-C / RF-17-C / RF-19c / RF-20-C）も必ず実装する。
+- 規則を広げすぎていないこと・必要な参照をしていることを確かめる対照ケース（RF-01-C / RF-01-C2 / RF-01-M / RF-02-C / RF-02-P / RF-04-C / RF-05-C / RF-06-C / RF-17-C / RF-19c / RF-19e / RF-20-C / RF-24-C）も必ず実装する。
 
 ## 3. Interface の共通保証テスト
 

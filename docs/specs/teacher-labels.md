@@ -1,6 +1,6 @@
 # 教師ラベル仕様（Objective / Interpretive）
 
-状態: **v0.2（Phase 0.2 監査是正後）。個々のラベル基準は Phase 10 前に確定（D-13a / D-13b）** — 2026-09-15
+状態: **v0.2.1（Phase 0.2 最終パッチ反映）。個々のラベル基準は Phase 10 前に確定（D-13a / D-13b）** — 2026-09-15
 
 ## 1. 2層構造
 
@@ -20,7 +20,8 @@
 | 価格系列 | comparable path（分割・併合を ENTRY 時点の株数ベースに換算。配当は加算しない） |
 | Failure | `initial_failure_line`（`current_risk_line` ではない） |
 | Horizon | ENTRY 成立セッションを S0 として S20 の引けまで。REAFFIRMED 等でリセットしない |
-| 打ち切り | `THESIS_INVALIDATED` で Episode を運用上クローズしても、Horizon 終了まで計算を続ける（D-17e 暫定） |
+| 二層 | **Primary（`primary_episode_outcome`）は Episode の終了（TARGET_HIT / INITIAL_FAILURE_HIT / THESIS_INVALIDATED / HORIZON_EXPIRED 等）で止める。** 研究用の `counterfactual_horizon_outcome` は S20 close まで追跡する。Teacher Label の Objective 値は Primary を使う（D-17e 確定） |
+| Horizon の表記 | S0 = ENTRY 成立セッション（ENTRY 時刻以降の値動きを含む）、S1 = 翌取引セッション、S20 close まで |
 
 ### 2-2. ラベル
 
@@ -34,6 +35,7 @@
 | `failure_line_hit` | `initial_failure_line` に到達したか |
 | `hit_20_before_failure` / `failure_before_20` | `path_resolution` から導出。AMBIGUOUS_PATH・UNRESOLVED_MISSING_DATA のときは両方 `null` |
 | 補助（研究用） | `risk_line_path_resolution`（`current_risk_line` 基準）、米国株の `jpy_return`、配当込みリターン |
+| counterfactual（研究用） | `later_target_hit`、counterfactual MFE / MAE（当初 S20 close まで）。**Primary の成功・失敗や Production ML の正解には使わない** |
 
 ### 2-3. 実装指示書 §29 のラベルのうち Objective 側に分類する候補（暫定、D-13a）
 
@@ -55,10 +57,12 @@
 | `FALSE_PULLBACK` | — |
 | `ACTIONABLE_FALSE_NEGATIVE` | ENTRY されなかった銘柄で hit_20 |
 | `OUT_OF_SCOPE_SHOCK` | ENTRY されなかった銘柄で hit_20 |
+| `PIPELINE_MISSED_ACTIONABLE_SIGNAL` | ENTRY されなかった銘柄で hit_20、かつ根拠情報の `source_published_at <= cutoff < available_to_model_at`（§4） |
 | `OUT_OF_SCOPE_LATE` | ENTRY されなかった銘柄で hit_20 |
 
 - 整合性制約に反する Interpretive ラベルは保存時に拒否する。
 - `AMBIGUOUS_PATH` / `UNRESOLVED_MISSING_DATA` / `CORPORATE_ACTION_SUSPECTED` の Episode には成功系・失敗系の Interpretive ラベルを付けない。
+- Primary が `THESIS_INVALIDATED` の Episode に成功系ラベル（`PREDICTIVE_SUCCESS` / `STATE_CONFIRMED_SUCCESS` / `PRICE_SUCCESS_EXOGENOUS`）を付けない。counterfactual の到達は理由にならない（RF-24）。
 
 ### 3-1. 保存項目（必須）
 
@@ -84,7 +88,17 @@
 
 1. 対象: ENTRY されなかった Eligible 銘柄のうち、Objective で `hit_20` になったもの。
 2. `information_cutoff_at` を上昇開始前（または上昇初期）に置く。定義は D-13a。
-3. 判定者には `available_to_model_at <= information_cutoff_at` の情報だけを渡す。**backfill された情報（`available_to_model_at` が後日）は使わない。** 別扱いで使えるようにするかは D-23。
-4. 出力: `ACTIONABLE_FALSE_NEGATIVE` / `OUT_OF_SCOPE_SHOCK` / `OUT_OF_SCOPE_LATE` と根拠。
-5. `ACTIONABLE_FALSE_NEGATIVE` のみを見逃し学習に使う。事前の兆候がない突発急騰は `ACTIONABLE_FALSE_NEGATIVE` にしない。
+3. **3分類（D-23 確定、最終パッチ #3）**。次の順で判定する。
+
+   | 順 | 確認すること | 使ってよい情報 | 該当すれば |
+   |---|---|---|---|
+   | A | cutoff 時点で**システムが実際に利用可能だった情報**（`available_to_model_at <= cutoff`）から、合理的に拾えたか | `available_to_model_at <= cutoff` の情報のみ | `ACTIONABLE_FALSE_NEGATIVE` — Screening / AI が落とした。Prediction Model の見逃し学習に使う |
+   | B | A では拾えないが、**市場には cutoff 前から存在した情報**（`source_published_at <= cutoff`）で、Collector 障害・取得遅延・backfill 等のため `available_to_model_at > cutoff` になったものがあり、それがあれば合理的に拾えたか | 上記に加え、`source_published_at <= cutoff < available_to_model_at` の情報（存在確認のため） | `PIPELINE_MISSED_ACTIONABLE_SIGNAL` — **Prediction Model の False Negative にしない。** Data / News Pipeline 改善用の教師データ |
+   | C | 市場にも事前に合理的な前兆がなかったか | 同上 | `OUT_OF_SCOPE_SHOCK` — Prediction Engine の False Negative にしない |
+   | — | 前兆はあったが、合理的に Entry できる時点を過ぎていた | — | `OUT_OF_SCOPE_LATE` |
+
+4. **backfill された情報を、当時 AI が知っていたことにしない。** B で使う情報は「存在した」ことの確認であり、A の判定入力や過去の分析の入力には加えない。
+5. `ACTIONABLE_FALSE_NEGATIVE` のみを Prediction Model の見逃し学習に使う。`PIPELINE_MISSED_ACTIONABLE_SIGNAL` は `labels.pipeline_miss_records`（文書、ソース、`source_published_at`、`available_to_model_at`、遅延、原因）として Pipeline 改善に使う。
+   - `source_published_at` はソース側の申告値であり、誤りうる。B の判定では根拠文書と時刻の信頼性も evidence に残す。
+   - 収集対象にしていなかったソースの情報を B に含めるかは D-33。
 6. 事象の種類（TOB など）だけで一律に除外しない。事前の兆候の有無で判定する（RF-02-C）。

@@ -1,7 +1,7 @@
 # Entry / Setup / Watch / Episode ライフサイクル仕様
 
-状態: **v0.2（Phase 0.2 監査是正後）** — 2026-09-15
-根拠: [Phase 0.2 監査原文](../requirements/audit-2026-09-15-phase-0.2.original.txt) > [Phase 0.1 監査原文](../requirements/audit-2026-09-15-phase-0.1.original.txt) > [実装指示書 v1.0 原文](../requirements/implementation-instructions-v1.0.original.txt) > v5.1
+状態: **v0.2.1（Phase 0.2 最終パッチ反映）** — 2026-09-15
+根拠: [Phase 0.2 最終パッチ原文](../requirements/audit-2026-09-15-phase-0.2-final-patch.original.txt) > [Phase 0.2 監査原文](../requirements/audit-2026-09-15-phase-0.2.original.txt) > [Phase 0.1 監査原文](../requirements/audit-2026-09-15-phase-0.1.original.txt) > [実装指示書 v1.0 原文](../requirements/implementation-instructions-v1.0.original.txt) > v5.1
 本書で「Claude Code 解釈（要確認）」と書いた箇所は、監査・ユーザー承認前の暫定仕様である。
 
 ---
@@ -41,6 +41,7 @@
 - 米国株の円換算: `fx_observed_at <= decision_cutoff_at`（ENTRY 時）、`fx_observed_at <= price_cutoff_at`（EOD の Universe 判定時）
 - 分析に使う材料: `available_to_model_at <= decision_cutoff_at`（EOD 分析では `<= price_cutoff_at`。§3）
 - `signal_reference_price` と `decision_price` は、Threshold の計算に使わない
+- Prediction が作られるのは `decision_price_jpy <= 3000` かつ `entry_reference_price_jpy <= 3000` の場合のみ（§6）
 
 ## 2. 判定状態
 
@@ -97,7 +98,9 @@
                                                TRIGGER_HIT → REANALYSIS ────────▶ 判断
                                                                                  ├─ 3,000円再判定（§6）で超過 → REJECT
                                                                                  ├─ ENTRY → decision_price 記録 → entry_reference_price 観測
-                                                                                 │          → Prediction → Episode OPEN
+                                                                                 │          → entry_reference_price で3,000円再確認
+                                                                                 │              ├─ 3,000円以下 → Prediction → Episode OPEN
+                                                                                 │              └─ 超過 → ENTRY_ABORTED_PRICE_LIMIT（研究ログのみ）
                                                                                  ├─ WATCH_* / REJECT / FAILED_BREAKOUT
                                                                                  └─ EXPIRED（D-20）
 ```
@@ -119,11 +122,15 @@
 
 **日本株の場中データの注意**: J-Quants の分足・ティックは日次更新でリアルタイム配信ではない（公式ヘルプ）。**場中の ENTRY 判断・Watch 監視には使わない。** 用途は Historical research / EOD / Replay / Teacher data（パス解決を含む）に限る。場中用の Provider は別に選ぶ（D-06b）。
 
-## 6. 3,000円 Hard Filter の ENTRY 時再判定（D-18 確定）
+## 6. 3,000円 Hard Filter の ENTRY 時再判定（D-18・D-26 確定）
 
 - Universe（EOD）: 引け値（無調整）で判定。米国株は `fx_observed_at <= price_cutoff_at` の USD/JPY で円換算。
 - **ENTRY 判断時: `decision_price`（米国株は `fx_observed_at <= decision_cutoff_at` の USD/JPY で円換算）で再判定する。3,000円を超えていれば正式 Prediction を作らない**（`REJECT`、理由 `HARD_FILTER_AT_ENTRY`）。Setup/Watch 時点で3,000円以下だったかは関係ない。
-- Claude Code 解釈（要確認 D-26）: 判断後に観測する `entry_reference_price` が3,000円を超えていた場合でも、判定は `decision_price` で確定しているため Prediction は取り消さない。`entry_reference_price_jpy` を記録し、件数を集計できるようにする。
+- **`entry_reference_price` でも再確認する**（監査 0.2 最終パッチ #4）。`decision_price` が3,000円以下で ENTRY と判断しても、`entry_reference_price`（米国株は `entry_price_observed_at` 以前の USD/JPY で円換算）が3,000円を超えた場合は、**正式な Prediction・Episode を作らない。**
+  - `prod.entry_attempts` に `status = ENTRY_ABORTED_PRICE_LIMIT` として研究ログを残す（decision / entry の両価格、観測時刻、FX を含む）。
+  - 正式な +20% Threshold・Outcome・Prediction 成績には含めない。
+  - 後に再び3,000円以下になった場合、自動で復活させない。その時点で再分析し、新しい ENTRY 判断として扱う。
+- ENTRY 判断は、Prediction を作ったかどうかにかかわらず `prod.entry_attempts` に1件ずつ記録する（`PREDICTION_CREATED` / `ENTRY_ABORTED_PRICE_LIMIT` / その他）。`entry_reference_price` を観測できなかった場合の扱いは D-31。
 
 ## 7. Prediction Episode
 
@@ -137,13 +144,17 @@
 - WATCH・Setup の開始日から数えない。
 - `REAFFIRMED` などの State Update では**リセットしない**。
 - 新しい Episode が正式に開始されたときだけ、新しい Horizon を持つ。
-- セッションの数え方（Claude Code 解釈・要確認 D-17d）: ENTRY が成立したセッションを S0 とし、その後の取引セッションを S1, S2, … と数え、**S20 の引けで Horizon を終える**。指示書 §28 の 1D/3D/5D/10D/20D（1D = S1 の引け）と揃えるため。休場日は数えない。
+- **表記（D-17d 確定、監査 0.2 最終パッチ #5）**:
+  - **S0 = ENTRY 成立セッション。** ENTRY 時刻（`entry_price_observed_at`）以降の S0 の値動きも Outcome に含める。
+  - **S1 = ENTRY の翌取引セッション。** 以後 S2, S3, … と取引セッションだけを数える（休場日は数えない）。
+  - **Primary Horizon は S20 の close まで。**
+  - 指示書 §28 の 1D/3D/5D/10D/20D は S1/S3/S5/S10/S20 の close に対応する。
 
 ### 7-3. Failure Line の二層（監査 Phase 0.2 #7）
 
 | 列 | 置き場所 | 変更 | 用途 |
 |---|---|---|---|
-| `initial_failure_line` | `prod.predictions` | **Prediction 作成時に固定。変更禁止** | Primary Outcome・Teacher Label・Episode の `FAILURE_HIT` |
+| `initial_failure_line` | `prod.predictions` | **Prediction 作成時に固定。変更禁止** | Primary Outcome・Teacher Label・Episode の `INITIAL_FAILURE_HIT` |
 | `current_risk_line` | `prod.risk_line_updates`（append-only、State Transition と対応） | 再分析で変更可（初期値 = `initial_failure_line`） | 運用上のリスク管理の研究 |
 
 - `current_risk_line` に触れても Episode はクローズしない（`RISK_LINE_HIT` の State Transition として記録）。
@@ -151,9 +162,18 @@
 
 ### 7-4. クローズ
 
-`close_reason`: `TARGET_HIT` / `FAILURE_HIT`（initial_failure_line）/ `THESIS_INVALIDATED` / `HORIZON_END` / `AMBIGUOUS_PATH` / `UNRESOLVED_MISSING_DATA`
+`close_reason`: `TARGET_HIT` / `INITIAL_FAILURE_HIT` / `THESIS_INVALIDATED` / `HORIZON_EXPIRED`（S20 close）/ `AMBIGUOUS_PATH` / `UNRESOLVED_MISSING_DATA` / `CORPORATE_ACTION_SUSPECTED`（未確定のため保留）
 
-- Claude Code 解釈（要確認 D-17e）: `THESIS_INVALIDATED` で Episode を運用上クローズしても、**Primary Outcome（パス解決・hit_20 等）は Horizon の終わりまで計算を続ける**。途中の判断で結果の計測を打ち切ると、教師データが判断に依存して偏るため。
+### 7-4-1. Outcome の二層（D-17e 確定、監査 0.2 最終パッチ #2）
+
+| 層 | 名前 | 範囲 | 用途 |
+|---|---|---|---|
+| 正式 | `primary_episode_outcome` | ENTRY から **Episode の終了まで**（TARGET_HIT / INITIAL_FAILURE_HIT / THESIS_INVALIDATED / HORIZON_EXPIRED 等） | Prediction 評価・成績・Teacher Label |
+| 研究 | `counterfactual_horizon_outcome` | ENTRY から**当初の S20 close まで**（Episode の終了に関係なく追跡） | counterfactual MFE / MAE、later target hit など |
+
+- **`THESIS_INVALIDATED` 後に株価が +20% に到達しても、Primary の成功に戻さない。** その事実は `counterfactual_horizon_outcome.later_target_hit` にだけ記録する。
+- `TARGET_HIT` / `INITIAL_FAILURE_HIT` / `HORIZON_EXPIRED` で終わった Episode は、両層の到達判定が一致する（counterfactual 側は S20 まで MFE/MAE を追い続ける）。
+- counterfactual の値を Primary の成績・Production ML の教師データの正解として使わない。研究で使う場合は、そうと分かる列名・データセットに分ける。
 
 ### 7-5. Episode 中の再評価
 
@@ -203,7 +223,8 @@
 | 4 | 約定データは通常提供されているが、その時間帯が欠損している | `UNRESOLVED_MISSING_DATA` | — |
 | 5 | S20 の引けまでどちらにも触れない | `NEITHER_BY_HORIZON` | — |
 
-- 手順 4 の「提供していない」と「欠損」の区別は Claude Code 解釈（要確認 D-09b）。前者は細かく降りる手段が構造的にない状態、後者はデータ取得の失敗である。
+- 手順 3・4 の区別（D-09b 確定、監査 0.2 最終パッチ #6）: **より細かいデータが仕様上存在しないため順序不明 → `AMBIGUOUS_PATH`**。**本来利用できるはずの細かいデータが欠損 → `UNRESOLVED_MISSING_DATA`**。
+- Primary（`primary_episode_outcome`）のパス解決は Episode の終了時点で止める。counterfactual は S20 close まで同じ手順で続ける（§7-4-1）。
 - `AMBIGUOUS_PATH` / `UNRESOLVED_MISSING_DATA` を成功・失敗のどちらにも寄せない。件数は別に集計する。
 
 保存: `path_resolution`、`resolution_granularity`、`resolved_session_index`、`resolved_at_ts`、`corporate_action_ids_applied`、`label_version`。
