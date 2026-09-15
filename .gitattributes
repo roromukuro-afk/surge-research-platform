@@ -1,0 +1,5 @@
+* text=auto eol=lf
+
+# プロンプト原文はバイト単位で保存（改行変換でSHA-256が変わるのを防ぐ）
+docs/prompts/*.md -text
+docs/prompts/addenda/*.md -text
