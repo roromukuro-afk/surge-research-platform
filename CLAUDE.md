@@ -7,7 +7,7 @@ Claude Code はこのプロジェクトの**主任開発エージェント**で�
 
 | 優先 | 文書 |
 |---|---|
-| 1 | 最新の ChatGPT 監査原文 — [Phase 0.2 最終パッチ](docs/requirements/audit-2026-09-15-phase-0.2-final-patch.original.txt) > [Phase 0.2](docs/requirements/audit-2026-09-15-phase-0.2.original.txt) > [Phase 0.1](docs/requirements/audit-2026-09-15-phase-0.1.original.txt) |
+| 1 | 最新の ChatGPT 監査原文 — [Phase 1 開始条件（2026-09-16）](docs/requirements/audit-2026-09-16-phase-1-start-conditions.original.txt) > [Phase 0.2 最終パッチ](docs/requirements/audit-2026-09-15-phase-0.2-final-patch.original.txt) > [Phase 0.2](docs/requirements/audit-2026-09-15-phase-0.2.original.txt) > [Phase 0.1](docs/requirements/audit-2026-09-15-phase-0.1.original.txt) |
 | 2 | 実装指示書 v1.0 原文 — [docs/requirements/implementation-instructions-v1.0.original.txt](docs/requirements/implementation-instructions-v1.0.original.txt) |
 | 3 | v5.1 原文 — `docs/prompts/short-surge-v5.1.original.md`（**未受領。会話内でユーザーが確定させた全文を受領後に登録**） |
 | 詳細仕様 | [docs/specs/](docs/specs/)（lifecycle / universe / teacher-labels / regression-fixtures） |
@@ -149,7 +149,10 @@ Phase 完了報告（指示書 §49）:
 
 - Web: `apps/web`（Next.js / TypeScript）。Worker: `workers/`（Python 3.12）。
 - ジョブは冪等に作り、`run_id` / `idempotency_key` 単位で再実行できるようにする。
-- DB スキーマ変更は `supabase/migrations/` のマイグレーションで行う。
+- DB は本プロジェクト専用の Cloud Supabase（Free）。`loop-vocabulary`（Pause 中、削除禁止）・`kaiji-radar` を流用しない。
+- **`supabase/migrations/` が DB 設計の唯一の正本。** Dashboard の手作業を正本にしない。Cloud に適用した DDL と Git 上の migration を一致させる。
+- ローカル Supabase（Docker）は migration 検証・integration test・オフライン開発の補助であり、Phase の blocker にしない。
+- 接続情報は Supabase CLI・ローカル環境変数・GitHub Secrets に置く。hard-code・commit・チャット出力・service role key のログ出力を禁止。
 - **このリポジトリは Public。** 公開してよいのはコード・設計文書・Prompt・Schema・Test 等のみ。
 - **絶対に commit しない**: API key / secret / token、`.env` / `.env.local` 等、Supabase service role key、Provider の認証情報、利用規約上再配布できない Raw ニュース等のデータ、Raw market data の大量ダンプ、Production DB dump、Object Storage 内の研究データ、Prediction の実データ、その他の認証情報。
 - 研究データ・Prediction 実データ・Raw 取得データは Private な Supabase / Object Storage 側にのみ保持する。テスト fixture は合成データのみ。

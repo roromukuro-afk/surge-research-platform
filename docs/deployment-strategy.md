@@ -19,7 +19,8 @@
 
 | 環境 | Web | DB | Object Storage | Job 実行 |
 |---|---|---|---|---|
-| local | `next dev` | ローカル Supabase（Docker、`supabase start`） | ローカルファイルシステム実装 | `LocalRunner` |
+| development（正式） | `next dev` | **専用 Cloud Supabase（Free、Phase 1 以降の正式な開発 DB）** | ローカルファイルシステム実装 | `LocalRunner` |
+| local（補助、任意） | `next dev` | ローカル Supabase（Docker、`supabase start`）。migration のローカル検証・integration test・オフライン開発用。Phase 1 の blocker ではない | ローカルファイルシステム実装 | `LocalRunner` |
 | production | Vercel（認証必須） | Supabase Production | 選定したプロバイダ | 選定した Runner（複数可） |
 
 ステージング環境は当面持たない（D-14）。
@@ -47,7 +48,8 @@
 
 ## 5. マイグレーション
 
-- `supabase/migrations/` で管理。本番適用はユーザー確認後。
+- **`supabase/migrations/` が DB 設計の唯一の正本。** Dashboard 上の手作業を正本にしない。Cloud 側に適用した DDL と Git 上の migration が一致する状態を維持する（乖離が見つかったら migration 側を直してから再適用）。
+- Cloud への適用は Supabase CLI（`supabase db push`）で行い、接続情報は CLI の認証・ローカル環境変数・GitHub Secrets のいずれかに置く。本番相当の運用開始後はユーザー確認後に適用。
 - `prod` の append-only トリガー、Episode の一意制約、Prediction の CHECK 制約はマイグレーションで定義する。これらを外すマイグレーションは監査対象。
 
 ## 6. 監視・障害時

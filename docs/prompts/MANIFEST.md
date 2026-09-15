@@ -14,5 +14,6 @@ CI（Phase 1 で実装）はこの表の SHA-256 と実ファイルを照合し�
 | `docs/prompts/addenda/v5.1-addendum-2026-09-15-phase0.2-audit.md` | addendum（所在一覧） | `dd9724381e41038782a50456ff896c9e508ef0f51eb43193b427e1ad54d9fbf6` | — | 2026-09-15 | Claude Code 作成。一部は phase0.2-final-patch addendum で置き換え |
 | `docs/requirements/audit-2026-09-15-phase-0.2-final-patch.original.txt` | 監査原文 | `26386dafdb0090c1f1833f4f86031ac14d5308167742101dd88711bc32c59ad1` | 4774 | 2026-09-15 | 会話内の本文を保存時点で登録（UTF-8、LF） |
 | `docs/prompts/addenda/v5.1-addendum-2026-09-15-phase0.2-final-patch.md` | addendum（所在一覧） | `10b0b6186cfacd26fc7a68417123f58a61d314ede78c385d12c6db13b486f249` | — | 2026-09-15 | Claude Code 作成 |
+| `docs/requirements/audit-2026-09-16-phase-1-start-conditions.original.txt` | 監査原文（運用・開始条件。投資ロジックの変更なし） | `5af52996f594c6af99502251bcd8db5dc3efdd7720674b98bcb308e9d16271de` | 3574 | 2026-09-16 | 会話内の本文を保存時点で登録（UTF-8、LF） |
 
 整形版（`docs/requirements/implementation-instructions-v1.0.formatted.md`）は原文ではないため登録しない。

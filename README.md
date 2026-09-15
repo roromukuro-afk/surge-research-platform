@@ -15,7 +15,7 @@
 | Phase 0.1 | 監査是正（ストレージ分離、interface 抽象化、Entry/Episode、Universe、ラベル、回帰テスト仕様） | 条件付き合格 |
 | Phase 0.2 | 最終是正（decision / entry 価格、Setup 分離、Horizon・Failure Line、USD Outcome、材料の利用可能時刻、corporate action、パス解決、v5.1 と addenda の分離） | 概ね合格 |
 | Phase 0.2 最終パッチ | PRIOR_SURGE_HIGH の制約緩和、Outcome 二層、見逃し3分類、entry 価格での3,000円再確認、Horizon 表記、v5.1 Canonical の定義 | **完了** |
-| Phase 1〜12 | [docs/development-phases.md](docs/development-phases.md) | 未着手（**v5.1 Canonical 登録後に Phase 1 開始可**。Phase 1 終了時に監査） |
+| Phase 1〜12 | [docs/development-phases.md](docs/development-phases.md) | 未着手（**開始条件は v5.1 Canonical 登録のみ**。専用 Cloud Supabase 作成済み。Phase 1 終了時に監査） |
 
 ## 共同開発体制
 

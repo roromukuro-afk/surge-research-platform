@@ -1,0 +1,143 @@
+## ChatGPT監査 — Supabase Cloud作成後のPhase 1開始条件更新
+
+Supabase Cloud Project作成までの対応を承認します。
+
+専用の新規Cloud Supabase ProjectがACTIVEになったため、
+これまでPhase 1開始条件としていた「Local Supabase / Docker Desktopの起動確認」は解除します。
+
+### 1. Supabaseの位置付け
+
+本プロジェクト専用に作成した新規Cloud Supabaseを、
+Phase 1以降の正式な開発DBとして使用して構いません。
+
+既存の、
+
+- loop-vocabulary
+- kaiji-radar
+
+を本プロジェクトへ流用しない方針は維持してください。
+
+loop-vocabularyはPauseのままで構いません。
+削除しないでください。
+
+
+### 2. Local Supabase
+
+Local Supabase / Docker Desktopは、
+
+- migrationのローカル検証
+- integration test
+- offline development
+
+等の補助環境として利用して構いませんが、
+Phase 1のblockerではありません。
+
+Docker Desktopの不具合解消を待つ必要はありません。
+
+
+### 3. DB変更のSource of Truth
+
+Cloud Supabaseを直接使う場合でも、
+Dashboard上の手作業をDB設計のSource of Truthにしないでください。
+
+すべてのschema変更は、
+
+supabase/migrations/
+
+等のversion管理されたmigrationを正本としてください。
+
+Cloud側へ行ったDDLとGit上のmigrationが一致する状態を維持してください。
+
+
+### 4. Secrets
+
+Phase 1開始時に接続情報が必要になった場合は、
+Supabase CLI / ローカル環境変数 / GitHub Secrets等の適切なsecret storeを使用してください。
+
+以下は禁止です。
+
+- source codeへのhard-code
+- Public GitHubへのcommit
+- チャットへのsecret value出力
+- logへのservice role key出力
+
+`.env.example`には現在どおりキー名のみを置いてください。
+
+
+### 5. Public Repository
+
+現在のPublic GitHub運用を承認します。
+
+コード・Schema・Migration・Test・Prompt・研究方法論は公開して構いません。
+
+Raw market data、
+再配布制限のあるNews、
+Production DB data、
+credentials、
+内部研究データ等はcommitしない現在方針を維持してください。
+
+
+### 6. v5.1
+
+Phase 1開始前に残っている必須条件は、
+v5.1 Canonical登録のみです。
+
+v5.1は2026-09-15の元会話に存在する完全版本文を使用してください。
+
+記憶からの再生成・要約・近似復元は禁止します。
+
+元本文を受領したら、
+
+docs/prompts/short-surge-v5.1.original.md
+
+へ無加工で保存し、
+SHA-256をMANIFESTへ登録してください。
+
+
+### 7. Phase 1開始条件を更新
+
+旧条件：
+
+1. v5.1 Canonical登録
+2. Local Supabase起動
+
+から、
+
+新条件：
+
+1. v5.1 Canonical登録・SHA-256確認
+
+の1件だけに変更してください。
+
+Cloud Supabaseは既に利用可能なので、
+Dockerの状態はPhase 1を妨げません。
+
+
+### 8. Phase 1
+
+v5.1登録後、
+
+Phase 1:
+Security Master + Universe
+
+を開始してください。
+
+予定範囲は、
+
+- versioned migrations
+- Security Master
+- Universe definition 1.0.0
+- provider interfaceの最小実装
+- DB role / access separation
+- prompt hash CI
+- RF-12 / RF-14a / RF-14b / RF-15
+
+です。
+
+Phase 1の範囲を超えて、
+価格スクリーニング・ニュース収集・AI分析等へ先行しないでください。
+
+Phase 1完了後は必ず停止し、
+Completed / Files changed / Tests / Universe coverage /
+Known limitations / Decisions / Risks
+を報告してChatGPT監査を受けてください。
