@@ -1,57 +1,63 @@
-# デプロイ・運用方針（草案）
+# デプロイ・運用方針
+
+状態: **草案 v0.1（Phase 0.1 監査是正後）** — 2026-09-15
 
 ## 1. 新規リソース（すべて新規作成、既存流用禁止）
 
-| リソース | 用途 | 作成タイミング | 備考 |
+| リソース | 用途 | 作成タイミング | 決定事項 |
 |---|---|---|---|
-| GitHub プライベートリポジトリ | ソース管理・Actions | Phase 1 開始時（ユーザー確認後） | 現在はローカル Git のみ |
-| Supabase プロジェクト（本番） | DB / Storage / Auth | Phase 1 開始時 | Free 枠の空き（2プロジェクト上限）を確認（D-03） |
-| Vercel プロジェクト | Web UI | Phase 1 後半（画面が出来てから） | プラン D-04 |
-| Collector 実行環境 | ニュース高頻度収集 | Phase 4 | D-05 |
-| 各データAPI契約 | J-Quants / 米国価格 / ニュース | Phase 1〜4 | D-06, D-07, D-12 |
+| Git リポジトリ（リモート） | ソース管理・CI | Phase 1 開始時（ユーザー確認後） | 現在はローカル Git のみ |
+| PostgreSQL（Supabase 新規 Project） | 状態・索引・結果・認証 | Phase 1 開始時 | プラン D-03a |
+| Object Storage（新規バケット） | Parquet・raw・画像・成果物 | Phase 2 まで（Phase 1 はローカル実装） | プロバイダ D-03b |
+| Web（Vercel 新規 Project） | 閲覧用 UI | 画面ができてから | プラン D-04 |
+| JobRunner の実行環境 | 日次バッチ / 場中監視 / 収集 | 日次は Phase 1〜2、常駐型は Phase 4・8 まで | D-05a |
+| 市場データ・ニュースの契約 | Provider | Phase 1〜8 の必要時 | D-06a / D-06b / D-07a / D-12 |
 
-クラウドリソース作成・有料プラン契約は、Claude Code が勝手に行わずユーザー確認後に実施する。
+クラウドリソースの作成・有料契約は、ユーザー確認後に行う。
 
 ## 2. 環境
 
-| 環境 | Web | DB | Worker |
-|---|---|---|---|
-| local | `next dev` | ローカル Supabase（Docker） | ローカル Python |
-| preview | Vercel Preview（認証必須） | 本番DB読み取り専用ロール or ステージングDB（D-14） | — |
-| production | Vercel Production（認証必須） | Supabase 本番 | GitHub Actions / Collector |
+| 環境 | Web | DB | Object Storage | Job 実行 |
+|---|---|---|---|---|
+| local | `next dev` | ローカル Postgres（Docker） | ローカルファイルシステム実装 | `LocalRunner` |
+| production | Vercel（認証必須） | Supabase Production | 選定したプロバイダ | 選定した Runner（複数可） |
 
-## 3. スケジュール（案）
+ステージング環境は当面持たない（D-14）。
 
-| ジョブ | 時刻（JST） | 実行環境 |
+## 3. Job 実行の構成
+
+実行環境は `JobRunner` / `Scheduler` interface の実装として差し替える（[interfaces.md §1](interfaces.md)）。
+
+| Job 群 | 性質 | 想定する Runner の種類（未選定） |
 |---|---|---|
-| JP 日次バッチ（Master→価格→フィルタ→Feature→Stage1〜3→判定） | 取引日 16:30 以降（データ提供時刻確認後に確定） | GitHub Actions |
-| US 日次バッチ | 取引日翌朝 7:00 以降（夏時間/冬時間で変動） | GitHub Actions |
-| Outcome 追跡 | 各日次バッチ末尾 | GitHub Actions |
-| Watch Monitor | 日次（分足導入時は場中、D-08） | GitHub Actions / Collector |
-| ニュース・開示収集 | 5〜15分間隔 | Collector |
-| 学習・評価（Phase 11 以降） | 週次 | GitHub Actions / ローカル |
-| Excel Export | 日次バッチ末尾 | GitHub Actions |
+| EOD バッチ（マスタ〜Stage 3、Outcome、Export） | 1日1〜2回、数十分 | バッチ型（例: `GitHubActionsRunner`） |
+| 場中 `entry_decision` / `watch_monitor` / `episode_monitor` | 取引時間中に数分間隔、低遅延 | 常駐型（`QueueWorkerRunner`） |
+| ニュース・開示の収集 | 常時、数分間隔 | 常駐型 |
+| 学習・Replay | 週次など、長時間 | バッチ型 |
 
-cron は取引カレンダーを参照し、休場日はスキップして `pipeline.runs` にスキップ理由を記録する。
+- スケジュールは実行環境から独立した定義（`config/schedules.yaml` 予定）に書き、取引カレンダーで休場日をスキップする。
+- 複数の Scheduler・Runner が同時に動いても、`idempotency_key` とリースにより二重実行しない。
+- Runner を切り替えても Job のコード・入出力・監査記録は変わらない。
 
 ## 4. 秘密情報
 
-- GitHub Secrets: Supabase service role キー、DB 接続文字列、各API キー、LLM キー。
-- Vercel 環境変数: Supabase URL・anon/publishable キー（RLS 前提）。service role キーは Web に置かない。
+- Runner 環境の secret: DB 接続（Production ロール / Research ロールを分ける）、Object Storage キー、Provider キー、LLM キー。
+- Web: DB の公開用キー（RLS 前提）と、読み取り専用の Object Storage 署名発行権限のみ。Production の書き込みロールは Web に置かない。
 - `.env.example` にキー名のみ記載。
 
 ## 5. マイグレーション
 
-- `supabase/migrations/` で管理。本番適用は CI またはユーザー確認後の手動実行。
-- `prod` スキーマの append-only トリガーはマイグレーションで定義し、削除マイグレーションは監査対象。
+- `supabase/migrations/` で管理。本番適用はユーザー確認後。
+- `prod` の append-only トリガー、Episode の一意制約、Prediction の CHECK 制約はマイグレーションで定義する。これらを外すマイグレーションは監査対象。
 
 ## 6. 監視・障害時
 
-- 日次バッチ失敗時: `pipeline.runs.status = failed`、Dashboard / Pipeline 画面に表示。通知手段は D-14。
-- 部分失敗（一部銘柄の価格欠損など）は失敗扱いにせず、欠損リストをカバレッジに記録。
-- 再実行は `run_id` 単位で冪等。Production Prediction の再生成は行わない（失敗した日の判定は「未実施」として記録）。
+- 失敗は `pipeline.runs.status` と Web の Pipeline 画面に表示。通知手段は D-14。
+- 一部銘柄の欠損は失敗扱いにせず、欠損リストをカバレッジに記録する。
+- 再実行は `idempotency_key` 単位。**Production の ENTRY 判断は後から作り直さない**（取引時間を過ぎた判断は「未実施」として記録）。
+- 場中 Runner が停止していた時間帯は、Watch 監視・ENTRY 判断の欠落としてカバレッジに記録する。
 
 ## 7. バックアップ
 
-- Supabase Pro の日次バックアップ（Pro 移行後）。
-- Raw Storage は再処理の正本なので削除しない。容量逼迫時の方針は D-03。
+- Object Storage の raw・Parquet は削除しない（上書きも禁止）。
+- Postgres のバックアップはプランに依存（D-03a）。manifest と `prod` を優先して保全する。

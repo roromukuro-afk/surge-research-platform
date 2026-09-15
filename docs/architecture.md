@@ -1,138 +1,138 @@
-# アーキテクチャ案（Phase 0 草案）
+# アーキテクチャ案
 
-状態: **草案・ChatGPT監査待ち**（2026-09-15 作成）
+状態: **草案 v0.1（Phase 0.1 監査是正後）** — 2026-09-15
+変更点: ストレージ分離（#3）、Runner 抽象化（#4）、Vercel 制約更新（#5）、SETUP_EOD と場中 ENTRY 判断（#6〜#8）、Provider 抽象化（#14・#15）
 
 ## 1. 全体像
 
 ```
-                ┌──────────────────────────────────────────────────────────┐
-                │                    外部データソース                         │
-                │ 価格(JP/US) FX 開示(TDnet/EDINET/EDGAR) ニュース 政府・商品    │
-                └───────────────┬───────────────────────────┬──────────────┘
-                                │ 日次バッチ                  │ 高頻度ポーリング
-                                ▼                            ▼
-┌───────────────────────────────────────────┐   ┌─────────────────────────────┐
-│ Batch Workers (Python, GitHub Actions)     │   │ Collector Worker (Python)    │
-│  universe → market data → FX → 3000円filter│   │  news/disclosure poller      │
-│  → features → Stage1 technical/material    │   │  first_seen_at を記録         │
-│  → candidates → Stage2 → Stage3 LLM        │   │  (常駐 or 短間隔ジョブ)        │
-│  → ENTRY/WATCH → watch monitor             │   └──────────────┬──────────────┘
-│  → outcome tracker → labels → export       │                  │
-│  → training / walk-forward (Research)      │                  │
-└───────────────┬───────────────────────────┘                  │
-                │                                                │
-                ▼                                                ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│ Supabase（新規プロジェクト）                                                    │
-│  Postgres: ref / market / pipeline / universe / features / materials /      │
-│            analysis / prod(append-only) / outcomes / labels / research / ml │
-│  Storage : raw documents, raw API responses, chart images, parquet archive, │
-│            LLM input bundles, Excel exports                                  │
-│  Auth    : 本人のみ（allowlist）                                              │
-└───────────────────────────────┬────────────────────────────────────────────┘
-                                │ 読み取り中心
-                                ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│ Web (Next.js / TypeScript, 新規 Vercel Project)                              │
-│  Dashboard / Universe / Materials / Stock Detail / Predictions / Watch /     │
-│  Results / Model Lab / Pipeline — スマホ対応、認証必須                          │
-└────────────────────────────────────────────────────────────────────────────┘
+ 外部データ ─────────────────────────────────────────────────────────────────────────────
+  価格(JP/US)・分足・FX・銘柄マスタ         開示(TDnet/EDINET/EDGAR)・ニュース・政府・商品
+        │  MarketDataProvider / FxProvider               │  Source collectors
+        ▼                                                ▼
+ ┌──────────────────────────── Workers（Python、Job 単位）──────────────────────────────┐
+ │  EOD jobs:    master → daily bars → FX → Universe/3000円 → features → Stage1          │
+ │               (Technical ∪ Material) → Stage2(分足) → Stage3 EOD → SETUP_EOD/WATCH   │
+ │  Intraday:    entry_decision / watch_monitor（分足・リアルタイム価格）→ ENTRY/Episode │
+ │  Collectors:  news / disclosure（first_seen_at）→ noise → event → entity link       │
+ │  Post:        outcome/path resolution → labels → exports                           │
+ │  Research:    replay / walk-forward / training（Production と分離）                  │
+ └──────────────▲──────────────────────────────┬────────────────────────────────────────┘
+                │ JobRequest                    │ 読み書き
+   Scheduler ───┤                               ▼
+   (取引カレンダー)  JobRunner          ┌──────────────────────┐   ┌──────────────────────────┐
+                 (GitHub Actions /     │ PostgreSQL（新規）     │   │ Object Storage（未選定）   │
+                  常駐 Worker / Local)  │ 状態・索引・監査・結果  │◀─▶│ Parquet: OHLCV/分足/Feature│
+                                       │ manifests             │   │ raw / images / llm_io     │
+                                       └──────────┬───────────┘   │ research / models / excel │
+                                                  │               └──────────────────────────┘
+                                                  ▼
+                                       ┌──────────────────────────────┐
+                                       │ Web（Next.js、新規 Vercel）    │
+                                       │ 認証必須・スマホ対応・読み取り中心│
+                                       └──────────────────────────────┘
 ```
 
-## 2. 処理パイプライン（日次）
+詳細: [storage-architecture.md](storage-architecture.md) / [interfaces.md](interfaces.md) / [specs/entry-and-episode-lifecycle.md](specs/entry-and-episode-lifecycle.md)
 
-| # | Step | 実装 | LLM |
+## 2. 処理フロー
+
+### 2-1. EOD（市場ごと、毎営業日）
+
+| # | Job | 出力 | LLM |
 |---|---|---|---|
-| 1 | Security Master 更新（上場・廃止・銘柄種別） | Python | 使わない |
-| 2 | 日足/必要な価格データ取得（全件） | Python | 使わない |
-| 3 | USD/JPY 取得（同時点基準） | Python | 使わない |
-| 4 | **3,000円 Hard Filter** → Eligible Universe | Python | 使わない |
-| 5 | 全 Eligible 銘柄の Technical Feature 計算 | Python (pandas/polars) | 使わない |
-| 6a | Stage 1 Technical Screening（v5.1 Route A〜H をコード化） | Python | 使わない |
-| 6b | Material Candidates（材料ルート、Technicalとは独立） | Python + 材料DB | 使わない（紐付けは Step 10 の結果を利用） |
-| 7 | 候補集合 = Technical ∪ Material | Python | 使わない |
-| 8 | Stage 2（チャート・需給の詳細 Feature、知識ベース照合、チャート画像生成） | Python | 使わない |
-| 9 | Stage 3 AI詳細分析 → ENTRY / WATCH_* / REJECT | Python + LLM | **使う（候補のみ）** |
-| 10 | 状態保存: Prediction（ENTRYのみ, append-only）/ Watch / State Transition | Python + DB | — |
-| 11 | Watch Monitor: 条件到達 → 再分析 → 新規 Snapshot | Python + LLM | 再分析時のみ |
-| 12 | Outcome Tracking（Prediction と Eligible Universe 全件） | Python | 使わない |
-| 13 | Teacher Label 付与（ルール + Research Mode） | Python (+LLM補助) | 補助のみ |
-| 14 | Excel Export（View用） | Python (openpyxl) | 使わない |
+| 1 | Security Master 更新（Universe 定義 `universe-1.0.0` 適用） | Postgres `ref.*` | × |
+| 2 | 全銘柄の日足取得（`EOD_UNIVERSE_*` Provider） | Parquet `curated/ohlcv_daily` | × |
+| 3 | USD/JPY 取得（`fx_observed_at <= price_cutoff_at`） | Postgres `ref.fx_observations` | × |
+| 4 | 3,000円 Hard Filter → Eligible Universe | Postgres current + Parquet 履歴 | × |
+| 5 | 全 Eligible 銘柄の Technical Feature | Parquet `features/daily` | × |
+| 6a | Stage 1 Technical（v5.1 Route A〜H をコード化） | Parquet 詳細 + Postgres 候補 | × |
+| 6b | Material 候補（Technical と独立） | Postgres 候補 | × |
+| 7 | 候補集合 = Technical ∪ Material | Postgres | × |
+| 8 | Stage 2（候補のみ分足取得、知識ベース照合、チャート画像） | Postgres 結果 + Parquet/画像 | × |
+| 9 | Stage 3 EOD 分析 → `SETUP_EOD` / `WATCH_*` / `REJECT`（**ENTRY は出さない**） | Postgres | ○ |
+| 10 | Outcome 追跡・パス解決（Episode / 全 Eligible） | Postgres / Parquet | × |
+| 11 | Excel Export | Object Storage | × |
 
-材料系（常時）:
+### 2-2. 場中（市場の取引時間）
 
-| # | Step | LLM |
-|---|---|---|
-| 10-1 | 収集（TDnet/EDINET/EDGAR/企業IR/ニュース/政府/商品…）→ raw保存・`first_seen_at` 記録 | 使わない |
-| 10-2 | 重複排除・同一出来事クラスタリング → `material_event` | 埋め込み等（Decision Needed） |
-| 10-3 | `market_relevance` 判定（ノイズ除去、キーワード単純除外は禁止） | 使う可能性あり |
-| 10-4 | Entity Linking（`relation_type`、マクロは因果経路必須） | 使う可能性あり |
-| 10-5 | 材料属性（新規性・サプライズ・直接性・インパクト・継続性・市場反応・未織り込み度） | 使う（Featureとして保存、真実扱いしない） |
+| # | Job | 内容 | LLM |
+|---|---|---|---|
+| 1 | `entry_decision` | 次の取引可能時点で `SETUP_EOD` 銘柄を再分析。`REALTIME_DECISION_*` Provider の価格と当日分足、`first_seen_at <= decision_cutoff_at` の材料を使う。ENTRY なら `entry_reference_price` を観測して Prediction・Episode | ○ |
+| 2 | `watch_monitor` | Watch 銘柄の分足を監視し、条件到達で `TRIGGER_HIT` → `REANALYSIS` を要求 | 再分析時のみ |
+| 3 | `episode_monitor` | Open Episode の Target / Failure 到達を記録 | × |
 
-## 3. 技術選定と根拠
+### 2-3. 材料（常時）
 
-2026-09-15 時点で各サービスの公式ドキュメントを確認した値に基づく。
+収集（`first_seen_at` 記録）→ 重複排除・同一出来事の統合 → `market_relevance` によるノイズ判定 → Entity Linking（`relation_type`、マクロは因果経路必須）→ 材料属性（Feature として保存）。
+
+## 3. 技術選定と根拠（2026-09-15 時点の公式ドキュメント確認に基づく）
 
 ### 3-1. Web: Next.js (TypeScript) on Vercel（新規 Project）
-- スマホから閲覧できる認証付きWeb UIとして十分。ユーザーの既存運用経験がある。
-- **制約**: Vercel Functions の最大実行時間は Hobby 300秒、Pro 800秒（beta で 1800秒）。Hobby の Cron は1日1回・±59分精度。
-  → 全市場バッチ・LLMバッチ・学習は Vercel に載せない（指示書 §38 と一致）。Web は DB 読み取りと軽い操作のみ。
-- Hobby プランは商用利用不可の規約があるが、本システムは非公開の個人研究用途。プラン選択は Decision Needed（D-04）。
 
-### 3-2. DB / Storage / Auth: Supabase（新規 Project）
-- Postgres・オブジェクトストレージ・認証を1サービスで賄え、監査用の外部キー・トリガー（append-only 強制）・RLS が使える。
-- **制約**: Free は DB 500MB で超過時 read-only、Storage 1GB、7日間低アクティビティで自動停止、Free プロジェクトは2つまで。Pro はディスク 8GB 込み・Storage 100GB 込み・自動停止なし。
-- **容量見積もり（概算）**: JP 約3,800 + US 約5,000〜6,000 普通株 ≒ 1万銘柄/日。日足だけで年約250万行、全 Eligible 銘柄の特徴量（数十列）を毎日保存すると年 数GB 規模。
-  → **Phase 2〜3 で Free の 500MB を超える見込みが高い**。Pro への移行時期は Decision Needed（D-03）。
-- 大容量・低頻度参照データ（生APIレスポンス、長期の全銘柄特徴量履歴）は Storage に Parquet で退避し、Postgres にはマニフェストと直近期間を置く構成も選べる（D-03 と合わせて決定）。
+Vercel Functions の実行時間上限（Fluid Compute 有効時、公式ドキュメント）:
 
-### 3-3. Batch Worker: Python 3.12 on GitHub Actions（新規プライベートリポジトリ）
-- 1ジョブ最大6時間、スケジュール実行・手動再実行・ログ保存が無料で揃う。ML（LightGBM 等）とデータ処理のエコシステムが Python に集中している。
-- **制約**: プライベートリポジトリの無料枠は月2,000分。JP/US 日次バッチ（各20〜40分想定）× 約21営業日 × 2市場 ≒ 月 840〜1,680分で無料枠に近い。cron は定刻どおりに起動しない場合がある。
-  → 日次バッチには適するが、**ニュースの高頻度ポーリングには不向き**。
+| プラン | 既定 | 最大 | Extended maximum |
+|---|---|---|---|
+| Hobby | 300秒 | 300秒 | — |
+| Pro | 300秒 | 800秒 | 1800秒（対応ランタイム: Node.js 20/22/24、Bun、Python 3.12〜3.14。公式ドキュメント上は Beta 表記） |
+| Enterprise | 300秒 | 800秒 | 1800秒（同上） |
 
-### 3-4. Collector Worker（ニュース・開示の高頻度収集）
-- `first_seen_at` の精度はポーリング間隔そのもの。15分間隔なら最大15分の誤差になる。
-- 候補: (a) 小型常駐VM/コンテナ（Fly.io 等）、(b) GitHub Actions の短間隔ジョブ（分数消費大・起動遅延あり）、(c) 自宅PC常駐（可用性低）。
-- **推奨は (a)**。ただし費用が発生するため Decision Needed（D-05）。Phase 4 までに決めればよい。
+- Hobby の Cron は1日1回・±59分の精度。
+- **本設計では、上限が延びても重い全市場処理・場中監視・学習を Vercel に移さない。** Web は Postgres の読み取りと軽い操作だけを行う。
+- プランは D-04。
 
-### 3-5. LLM
-- Stage 3 と材料解釈で使用。プロバイダ・モデルは抽象化し、`llm_provider` / `llm_model` / `prompt_version` を毎回保存。
-- 候補は Claude（Anthropic API）など。選定と月額上限は Decision Needed（D-11）。Phase 7 までに決めればよい。
+### 3-2. PostgreSQL: Supabase（新規 Project）
 
-### 3-6. ML
-- Phase 11 以降。LightGBM / XGBoost / CatBoost 等の tabular model から開始。Deep Learning からは始めない。
-- 学習は GitHub Actions またはローカルで実行し、モデル成果物は Storage、メタデータは `ml.model_registry` に保存。
+- Postgres・認証・行レベルセキュリティ・トリガー（append-only の強制）を1サービスで使える。
+- 大量の履歴データを Postgres に置かない設計にしたので、DB 容量の問題は小さくなった。一方、Free プランは7日間低アクティビティで自動停止する。プランは D-03a。
+
+### 3-3. Object Storage: 未選定
+
+- S3 互換 API を共通の最小仕様にし、`ObjectStore` interface で交換可能にする。候補比較は [storage-architecture.md §6](storage-architecture.md)（D-03b）。
+
+### 3-4. Job 実行: `JobRunner` / `Scheduler`（実装は未選定）
+
+- 日次バッチは `GitHubActionsRunner`（1ジョブ最大6時間、非公開リポジトリの無料枠は月2,000分）でも動かせる。
+- 場中の `entry_decision` / `watch_monitor` とニュース収集は、数分間隔・低遅延が必要なため常駐型（`QueueWorkerRunner`）が必要になる見込み。
+- どちらも同じ Job コード・同じ DB 上のリース/冪等性の仕組みで動く（D-05a）。
+
+### 3-5. 市場データ: `MarketDataProvider`（実装は未選定）
+
+- 役割（マスタ / EOD / 分足履歴 / リアルタイム判断 / FX）ごとに Provider を割り当てる。
+- JP の EOD は J-Quants（Free = 開発用、Light 以上 = Production 候補）。
+- **JP のリアルタイム価格の入手手段は未確認**（D-06b）。場中 ENTRY 判断の前提なので、Phase 8 より前に調査する。
+- 比較は [provider-comparison.md](provider-comparison.md)。
+
+### 3-6. LLM / ML
+
+- LLM は `LLMProvider` で抽象化し、`llm_provider` / `llm_model` / `prompt_version` / `input_sha256` を保存（D-11）。
+- ML は Phase 11 以降、LightGBM / XGBoost / CatBoost 等の tabular model から。学習データは Parquet、モデルは Object Storage、メタデータは Postgres。
 
 ## 4. 環境分離
 
-| 区分 | 内容 | 物理分離 |
+| 区分 | 内容 | 分離の方法 |
 |---|---|---|
-| Production | 採用済みルール/モデルでの日次運用。`prod` スキーマ、Prediction は append-only | Supabase 本番プロジェクト |
-| Research | Historical Replay、特徴量重要度、Challenger 学習、見逃し分析。`research` スキーマ（`replay_run_id` 必須） | 同一DB内の別スキーマ（初期）。容量次第で分離 |
-| Development | ローカル Supabase（Docker）+ テスト用データ | ローカル |
+| Production | 採用済みルール/モデルによる運用 | `prod` スキーマ（append-only）、書き込みは Production 用 DB ロールのみ |
+| Research | Historical Replay、学習、見逃し分析 | `research` スキーマ + `research/` プレフィックス。Research ロールは `prod` に書けない |
+| Development | ローカル | ローカル Postgres + ローカル ObjectStore |
 
-Production Prediction と Historical Replay は**テーブルを分ける**。Web UI でも別区分で表示する。
+## 5. データリーク防止
 
-## 5. データリーク防止の設計原則
-
-1. **二時間軸**: すべての取得データに「イベント時刻（published_at / trade_date）」と「システム取得時刻（fetched_at / first_seen_at）」を持たせる。
-2. **as-of 取得関数**: 特徴量・分析は `as_of(data_cutoff)` 経由でのみデータを読む。`fetched_at <= data_cutoff` を強制する共通関数を用意し、直接クエリを禁止する。
-3. **価格の二系統**: 実取引価格（無調整）と分割調整係数（`known_at` 付き）を分けて保存。3,000円判定は無調整価格。
-4. **LLM入力の固定**: LLMに渡した入力バンドル（Feature・OHLCV・材料時系列・画像）を内容ハッシュ付きで保存し、再現可能にする。
-5. **生存者バイアス**: 上場廃止銘柄も Security Master に残し、Outcome 追跡を廃止時点まで行う。
-6. **walk-forward**: 学習・評価は時系列分割のみ。
+1. すべてのデータに「出来事の時刻」と「システムの取得時刻（`fetched_at` / `first_seen_at` / manifest `created_at`）」を持たせる。
+2. 読み取りは `as_of` を指定する共通の入口を通す（Postgres・Parquet とも）。
+3. 無調整価格を正本とし、調整係数は `known_at` 付きで別に持つ。
+4. 価格と材料のカットオフを分けて記録する（`price_cutoff_at` / `material_cutoff_at` / `decision_cutoff_at`）。
+5. LLM 入力はハッシュ付きで保存し再現可能にする。
+6. 上場廃止銘柄を残す。学習・評価は walk-forward のみ。
 
 ## 6. 認証・非公開
 
-- Supabase Auth（メールOTP/マジックリンク等）+ 本人メールアドレスの allowlist。
-- 全テーブルで RLS を有効化し、匿名アクセスは拒否。Worker は service role キーを GitHub Secrets 経由で使用。
-- Vercel 側でも Deployment Protection を併用可能（D-04）。
-- Excel・ニュース・研究結果を公開URLに置かない（Storage は private バケットのみ、署名付きURLで一時取得）。
+- Supabase Auth + 本人メールアドレスの allowlist（D-14）。全テーブルで RLS を有効にし、匿名アクセスを拒否。
+- Object Storage は非公開バケットのみ。Web からは署名付き URL で一時取得。
 
 ## 7. 監査ログ
 
-- `pipeline.runs`: run_id / job名 / started_at / finished_at / data_cutoff / git commit SHA / 設定ハッシュ / 各version / status
-- `pipeline.run_errors`、`pipeline.source_fetch_log`（ソース別の取得件数・HTTPステータス・所要時間）
-- `pipeline.coverage_snapshots`（Universe件数・取得成功率・欠損銘柄）
-- 各結果テーブルは `run_id` を外部キーで持つ。
+- `pipeline.runs`（run_id / job / data_cutoff / git_sha / 設定ハッシュ / 各 version / provider_bindings / status）
+- `pipeline.job_requests`（冪等キー・リース）、`pipeline.run_errors`、`pipeline.source_fetch_log`、`pipeline.coverage_snapshots`
+- `storage.dataset_manifests`

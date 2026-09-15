@@ -1,0 +1,80 @@
+ChatGPT監査結果 — Phase 0.1 是正ラウンド
+Phase 0は概ね合格ですが、Phase 1への着手はまだ許可しません。以下をPhase 0.1として是正し、再度報告して停止してください。
+1. 既存プロジェクトには引き続き一切触れないこと。
+2. v5.1原文受領前はPhase 1へ進まないこと。
+`docs/prompts/short-surge-v5.1.md` に一字一句そのまま保存し、SHA-256を記録する設計にする。
+「整形したもの」は原文と呼ばない。整形版が必要なら別ファイルにする。
+3. Storage Architectureを修正すること。
+Supabase PostgreSQLを全Rawデータ保存先にしない。
+PostgreSQL：
+Security Master / Material Event index / Runs / Predictions / Watch / State Transition / Outcomes / Model versions / current state等。
+Bulk historical data：
+OHLCV / historical features / chart images / raw research artifacts等をParquet＋Object Storageへ保存できる設計にする。
+Object Storage providerは現段階で固定せず、R2等を候補として比較可能にする。
+4. Workerを抽象化すること。
+GitHub ActionsをProduction Job Runnerとして固定しない。
+`JobRunner` / Scheduler interfaceを設計し、GitHub Actions、常駐Worker等を交換可能にする。
+5. Vercel制約の記述を更新すること。
+Hobby 300秒。
+Pro/Enterprise Node/Pythonは現在Fluid Computeで最大1800秒のextended durationが存在する。
+ただし本設計では重い全市場処理をVercelへ移さない。
+6. Entryの意味を修正すること。
+`signal_reference_price`
+と
+`entry_reference_price`
+を分離する。
+EODでセットアップを発見しても、それだけで正式Predictionを作らない。
+`SETUP_EOD` / WATCHとして保存する。
+次の取引可能時点で再分析し、「現在価格からENTRY可能」と判断した場合のみ正式Predictionを作る。
++20% Thresholdは必ずその`entry_reference_price`から計算する。
+7. USD/JPYはEntry/判定時点と同期する。
+`fx_observed_at <= decision_cutoff_at`
+を必須にする。
+8. 分足を利用する設計にする。
+全Universeでは日足。
+Stage 2・Watch・ENTRY候補のみ分足を取得する。
+全銘柄の分足保存を前提にしない。
+9. 同一最小足の中でTargetとFailureの両方に触れ、順序が解決不能なら`AMBIGUOUS_PATH`とする。
+Success/Failureのどちらにも恣意的に分類しない。
+10. Initial Tradable Universeを以下で設計する。
+JP：Prime / Standard / Growth 普通株。
+US：NYSE / Nasdaq / NYSE American Common Stocks＋適格ADR。
+原則除外：ETF / REIT / Preferred / Warrant / Unit / Right / OTC / pre-merger SPAC / TOKYO PRO。
+Universe定義はversion管理する。
+11. 教師ラベルをObjectiveとInterpretiveに分ける。
+Objective：
+price pathからコードで確定。
+Interpretive：
+AI Research adjudication。
+Interpretive labelには
+`labeler_model_version`
+`confidence`
+`evidence`
+`human_review_status`
+を保存する。
+低confidenceラベルを無条件でProduction ML教師データへ入れない。
+12. Prediction Episodeを導入する。
+同一銘柄・同一仮説についてENTRYを毎日新規Predictionとして二重計上しない。
+初回ENTRYからTarget / Failure / Thesis invalidation / Horizon endまでを1 episodeとする。
+途中の再評価はState Transitionとして保存する。
+13. 重要投資ロジックのRegression Test仕様をPhase 0で追加する。
+最低限以下をfixtureとして文書化する。
+
+* 500→1100急騰→650暴落。新材料なし。旧高値1100を「上値余地」として採用してはいけない。
+* 事前前兆なしでTOB発表後即+30%。これをACTIONABLE_FALSE_NEGATIVEにしてはいけない。
+* WATCH_BREAKOUTが価格条件を満たしても、再分析なしでENTRYにしない。
+* 同一EventをReuters/日経/IRが報じても独立3材料として加点しない。
+* EOD cutoff後に出た材料をEOD価格の未織り込み評価へ使わない。
+* 同一Prediction Episodeを複数成功として数えない。
+
+14. 市場データProviderはPhase 0.1では固定しない。
+`MarketDataProvider` interfaceを設計する。
+Stage 1 EOD sourceと、Watch/ENTRYのreal-time sourceを別Providerにできること。
+米国候補についてはMassive / Alpaca / Tiingo等を公式仕様のみで比較する。第三者比較記事を採用根拠にしない。
+15. J-QuantsもProviderとして抽象化する。
+Freeは開発用の遅延データ、Production EODではLight以上を候補とする。
+Standardは信用データ等の有効性が教師データで確認されるまで必須にしない。
+16. Phase 0.1完了後、コード実装へ進まず停止する。
+報告形式：
+Completed / Files changed / Specification changes / Tests specified / Decisions resolved / Remaining decisions / Risks / Next proposed phase。
+Phase 1開始はChatGPT監査後とする。

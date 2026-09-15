@@ -1,77 +1,68 @@
-# データソース戦略（Phase 0）
+# データソース戦略
 
-状態: **草案**。各ソースは実装前に利用規約・API条件を再確認し、`materials.sources.terms_checked_at` に記録する。
+状態: **草案 v0.1（Phase 0.1 監査是正後）** — 2026-09-15
+各ソースは実装前に利用規約・API 条件を再確認し、`materials.sources.terms_checked_at` 等に記録する。
 
 ## 1. 基本方針
 
-1. **公式API・公式配布ファイル・RSSを優先**し、利用規約で自動取得が禁止されているサイトはスクレイピングしない。
+1. **公式 API・公式配布ファイル・RSS を優先**する。利用規約で自動取得が禁止されているサイトはスクレイピングしない。
 2. 全文保存が許されないソースは metadata / URL / snippet / content hash / 抽出特徴量のみ保存する。
-3. すべての取得について `published_at`（ソース記載時刻）・`fetched_at`（取得時刻）・`first_seen_at`（システムが初めて観測した時刻）を記録する。
-4. **情報源による固定序列は持たない**。ソース属性は「どこから来たか」の記録であり、材料の強さは材料属性（新規性・サプライズ等）で評価する。
-5. Discovery Source と Verification Source を分離する。
-6. 取得失敗・欠損は `pipeline.source_fetch_log` と `coverage_snapshots` に必ず残し、黙って欠損させない。
+3. すべての取得について `published_at`・`fetched_at`・`first_seen_at` を記録する。
+4. **情報源による固定序列は持たない。** 材料の強さは材料属性で評価する。Discovery Source と Verification Source を分離する。
+5. 取得の失敗・欠損は取得ログとカバレッジに必ず残す。
+6. **Provider・ソースの比較と選定の根拠は公式情報のみ。** 第三者の比較記事を採用根拠にしない。
+7. 市場データは `MarketDataProvider` の役割ごとに Provider を割り当てる（[interfaces.md §2](interfaces.md)）。どの Provider も固定しない。
 
-## 2. 価格・Universe
+## 2. 価格・銘柄マスタ
 
-### 日本株
-| 用途 | 候補 | 確認済み事項（2026-09-15） | 課題 |
-|---|---|---|---|
-| 上場銘柄一覧・日足・取引カレンダー | J-Quants API（JPX公式） | 全プランに上場銘柄一覧・日足OHLC・決算発表日・取引カレンダー。Free は「直近12週間を除く2年分」で**運用不可**。Light ¥1,650/月（5年・60件/分）、Standard ¥3,300/月（10年・120件/分、信用取引データ含む）、Premium ¥16,500/月（20年・500件/分、前場四本値・分足/TDnetはアドオン） | プラン選択（D-06）。日次更新タイミングの確認 |
-| 信用残など需給 | J-Quants Standard 以上 | 信用取引データは Standard+ | D-06 |
-| 分足・VWAP | J-Quants Premium アドオン等 | Premium 限定 | D-08 |
+比較表: [provider-comparison.md](provider-comparison.md)
 
-### 米国株
-| 用途 | 候補 | 確認済み事項 | 課題 |
-|---|---|---|---|
-| 上場銘柄一覧 | Nasdaq Trader Symbol Directory（`nasdaqlisted.txt` / `otherlisted.txt`） | ETFフラグ・Test Issueフラグ・Financial Status・取引所コードあり。優先株/ワラント/ユニットは Security Name から判別が必要 | 普通株判定ルールの確定（D-10） |
-| CIK 対応 | SEC `company_tickers.json` / `company_tickers_exchange.json` | 公式配布 | — |
-| 日足（全銘柄一括） | Massive（旧Polygon.io）grouped daily、Tiingo、EODHD 等 | 各社有料プランあり。価格は未確定 | ベンダー選定（D-07） |
-| 浮動株・発行済株式数 | SEC XBRL（dei:EntityCommonStockSharesOutstanding）＋ベンダー | 公式APIで取得可能だが更新は提出ベース | D-07 |
-
-### FX
-- USD/JPY。米国株の3,000円判定は「同時点」の為替を使うため、**どの時点のレートを使うか**を D-02 で決める。
+| 役割 | JP | US |
+|---|---|---|
+| 銘柄マスタ | J-Quants `equities/master`（`Mkt` / `ProdCat`） | Nasdaq Trader Symbol Directory、Provider のマスタ API、SEC の SIC（SPAC = 6770、REIT = 6798） |
+| 全銘柄日足（Stage 1） | J-Quants（Free は開発用、Production は Light 以上を候補） | 候補: Massive / Alpaca / Tiingo 等（D-07a） |
+| 分足履歴（Stage 2・パス解決） | J-Quants 分足アドオン（候補） | 候補: Massive / Alpaca / Tiingo 等 |
+| リアルタイム（ENTRY 判断・Watch 監視） | **未確認（D-06b）** | 候補: 遅延区分がリアルタイムのプラン（D-07a、D-21） |
+| 需給（信用残等） | J-Quants Standard 以上。**有効性が教師データで確認されるまで必須にしない** | — |
+| 発行済株式数・浮動株 | 未調査 | SEC XBRL、Provider（未調査） |
+| FX（USD/JPY） | 未選定（D-02a）。`fx_observed_at <= decision_cutoff_at` を満たす観測時刻付きのデータが必要 | 同左 |
 
 ## 3. 開示・一次情報
 
 | 地域 | ソース | アクセス方法 | 備考 |
 |---|---|---|---|
-| JP | TDnet | JPX公式「TDnet API サービス」（有料契約・利用規約同意が必要）/ J-Quants Premium アドオン / 非公式Web API | 非公式APIの利用可否は規約確認のうえ D-12 |
-| JP | EDINET | EDINET API v2（金融庁、APIキー発行制） | 仕様書 PDF を Phase 4 で精読 |
-| JP | 企業IR | 各社サイト/RSS | 規約・robots を個別確認 |
-| JP | 政府・省庁・日銀 | 公式サイト/RSS | — |
-| US | SEC EDGAR | data.sec.gov API、daily index | **最大 10 req/s、User-Agent に連絡先必須** |
-| US | Company IR | 各社サイト/RSS | 個別確認 |
-| US | Fed / Treasury / White House / DOE / DoD / FDA 等 | 公式サイト/RSS/API | — |
+| JP | TDnet | JPX 公式「TDnet API サービス」（有料契約・利用規約同意が必要）/ J-Quants のアドオン / 非公式 API | 非公式 API は規約確認のうえ D-12 |
+| JP | EDINET | EDINET API v2（金融庁） | 仕様書 PDF を Phase 4 で確認 |
+| JP | 企業 IR / 政府・省庁・日銀 | 公式サイト / RSS | 個別に規約確認 |
+| US | SEC EDGAR | data.sec.gov API、daily index | 最大 10 req/s、User-Agent に連絡先が必須 |
+| US | Company IR / Fed / Treasury / White House / DOE / DoD / FDA 等 | 公式サイト / RSS / API | 個別に規約確認 |
 
 ## 4. ニュース・金融メディア
 
 対象候補（指示書 §10）: 株探、フィスコ、Reuters、日経、Yahoo!ファイナンス、みんかぶ、アイフィス、トレーダーズ・ウェブ、米国金融ニュース ほか。
 
-- 多くは**有料・会員制・自動取得禁止**の可能性が高い。Phase 4 で各サイトの利用規約を個別に確認し、以下のいずれかに分類する。
-  - `API_LICENSED`: 公式API/有料ライセンスあり
-  - `RSS_HEADLINE`: RSS等で見出し・要約・URLのみ取得可
-  - `MANUAL_ONLY`: 自動取得不可（取得しない）
-- 分類結果と費用を D-12 として報告する。規約上不可のものを「取れるから」取得しない。
+Phase 4 で各社の利用規約を個別に確認し、次のいずれかに分類する（D-12）。
+
+| 分類 | 意味 |
+|---|---|
+| `API_LICENSED` | 公式 API / 有料ライセンスで取得 |
+| `RSS_HEADLINE` | RSS 等で見出し・要約・URL のみ |
+| `MANUAL_ONLY` | 自動取得しない |
 
 ## 5. マクロ・国際
 
-原油・天然ガス・金属・金利・為替・関税・戦争・制裁・AI・半導体・防衛・電力・原子力・データセンター・サプライチェーン・暗号資産 など。
+- 商品・金利・為替などの価格は数値系列として保存し、急変を材料候補として検知する。
+- 関税・制裁・紛争・政策などの出来事は `material_event` とし、銘柄への紐付けには因果経路を必須とする。
 
-- 価格系（商品・金利・為替）は数値系列として `market` に保存し、急変を材料候補イベントとして検知する。
-- 事象系（関税・制裁・紛争・政策）はニュース/公式発表から `material_event` 化し、**因果経路（causal_path）を必須**として銘柄に紐付ける。
+## 6. ノイズ除去
 
-## 6. ノイズ除去方針
-
-- キーワード単純除外は禁止。
-- 判定は `market_relevance`（市場・企業利益への接続性）で行い、判定理由と `filter_version` を保存。
-- 例: 通常の台風ニュースは除外候補だが、工場停止・港湾停止・電力設備・農産物・保険・原材料価格に接続すれば材料になり得る。
+- キーワードによる単純除外は禁止。`market_relevance`（市場・企業利益への接続性）で判定し、理由と `filter_version` を保存する。
 
 ## 7. 収集頻度（案）
 
-| 対象 | 頻度案 | 理由 |
+| 対象 | 頻度 | 実行 |
 |---|---|---|
-| JP 日足 | 取引日 15:30 JST 以降（データ提供時刻を確認） | 日次バッチ |
-| US 日足 | 取引日 16:00 ET 以降（JST 翌朝） | 日次バッチ |
-| 開示・ニュース | 5〜15分間隔（D-05） | `first_seen_at` 精度 |
-| Security Master | 日次 | 新規上場・廃止 |
-| マクロ価格 | 日次（急変検知は高頻度化を検討） | — |
+| JP 日足・マスタ | 取引日の引け後（提供時刻を確認して決める。マスタは公式に「翌営業日時点の情報は17時半以降」） | Scheduler → JobRunner |
+| US 日足 | 取引日の引け後 | 同上 |
+| 開示・ニュース | 数分間隔（`first_seen_at` の精度に直結） | 常駐型 Runner（D-05a） |
+| 場中の分足・リアルタイム価格 | SETUP_EOD / Watch / Open Episode の銘柄のみ、取引時間中 | 常駐型 Runner（D-05a） |

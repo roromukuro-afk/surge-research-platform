@@ -1,51 +1,60 @@
 # テスト戦略
 
+状態: **v0.1（Phase 0.1 監査是正後）** — 2026-09-15
+
 ## 1. レイヤー
 
 | レイヤー | ツール（案） | 対象 |
 |---|---|---|
-| Python ユニット | pytest | Feature 計算、3,000円判定、ルール判定、ラベル判定、Outcome 計算 |
-| Python 統合 | pytest + ローカル Supabase（Docker） | マイグレーション、as-of クエリ、append-only 制約、ジョブの冪等性 |
-| TypeScript ユニット | Vitest | Web の表示ロジック・データ整形 |
-| E2E | Playwright | 認証、主要画面、スマホ幅（375px） |
-| 契約テスト | 記録済みレスポンス（fixture） | 外部API のスキーマ変化検知。CI では実APIを叩かない |
-| データ品質 | 日次ジョブ内チェック | 件数急減、欠損率、価格異常値、重複 |
+| Python ユニット | pytest | Feature 計算、Universe 判定、3,000円判定、ルール判定、パス解決、ラベル判定 |
+| Python 統合 | pytest + ローカル Postgres + ローカル ObjectStore | マイグレーション、append-only / CHECK / 一意制約、as-of 読み取り、manifest、Job の冪等性とリース |
+| Interface 適合テスト | pytest（同じテストを全実装に対して実行） | `JobRunner` / `MarketDataProvider` / `ObjectStore` の各実装が共通の保証を満たすか |
+| 契約テスト | 記録済みレスポンス（fixture） | 外部 API の形式変化の検知。CI では実 API を呼ばない |
+| TypeScript ユニット | Vitest | Web の表示ロジック |
+| E2E | Playwright | 認証、主要画面、スマホ幅 |
+| データ品質 | 日次 Job 内のチェック | 件数の急減、欠損率、異常値、重複、`TYPE_UNKNOWN` 件数 |
 
-## 2. 本プロジェクト特有の必須テスト
+## 2. 投資ロジック回帰テスト
 
-### データリーク
-- **未来データ挿入テスト**: `data_cutoff` 以降の行を追加しても、その cutoff で計算した Feature・候補・判定入力が変わらないこと。
-- **取得時刻テスト**: `published_at` が cutoff 前でも `fetched_at` / `first_seen_at` が cutoff 後の文書は使われないこと。
-- **分割調整テスト**: 後から判明した分割係数が、過去時点の3,000円判定・Feature に混入しないこと。
-- **walk-forward テスト**: 学習データの最大日付 < 評価データの最小日付 を全 fold で検査。
-- **知識ベース事例テスト**: 事例の期間より前の予測に、その事例を参照させないこと。
+仕様: **[specs/regression-fixtures.md](specs/regression-fixtures.md)**（RF-01〜RF-16）
 
-### 投資ロジック上の不変条件
-- 3,000円境界値（2,999 / 3,000 / 3,001、米国株は FX 込み）。
-- `threshold_20 == entry_reference_price × 1.20`（Watch 開始時価格ではない）。
-- Watch 条件到達だけで ENTRY が生成されないこと（必ず REANALYSIS を経由）。
-- 過去高値が Reachable Zone の算出入力に使われないこと（入力 Feature の許可リスト検査）。
-- `WEAK_ASSOCIATION` 単独の紐付けが強材料フラグにならないこと。
-- マクロ系 relation_type で `causal_path` が空なら保存できないこと。
-- 突発急騰（事前兆候なし）に `ACTIONABLE_FALSE_NEGATIVE` が付かないこと。
-- Prediction の UPDATE/DELETE が DB で拒否されること。
-- Historical Replay の結果が `prod` テーブルに書き込めないこと。
+- 監査で必須とされた6件（RF-01〜RF-06）を含む。
+- 実行可能になる Phase より前は `pending` として CI に登録し、削除しない。
+- 規則を広げすぎていないことを確かめる対照ケース（RF-01-C / RF-02-C / RF-04-C / RF-06-C）も必ず実装する。
 
-### プロンプト原文
-- `docs/prompts/MANIFEST.md` 登録ファイルの SHA-256 が一致すること（CI）。
+## 3. Interface の共通保証テスト
 
-## 3. テストデータの隔離
+| Interface | 検査内容 |
+|---|---|
+| JobRunner / Scheduler | 同じ `idempotency_key` の二重投入で1回だけ実行される。リース切れで再取得できる。Runner を替えても Job の出力が同じ |
+| MarketDataProvider | `get_price_observation(at_or_before=T)` が T より後の観測を返さない。provenance と raw の保存。無調整価格の保持 |
+| FxProvider | `at_or_before` を超える観測を返さない（RF-09） |
+| ObjectStore | 既存 key への上書きを拒否。sha256 の一致 |
 
-- テストは本番DB・実プロジェクトのデータディレクトリに**一時的にも書き込まない**。
-- DB テストはローカル Supabase またはテスト専用スキーマ、ファイル系は一時ディレクトリを注入可能なパス引数で使う。
-- 価格・ニュースの fixture は合成データまたは利用規約上保存可能な範囲に限る。
+## 4. データリーク検査
 
-## 4. CI
+- **未来データ挿入**: cutoff 以降の行・manifest を追加しても、その cutoff で計算した Feature・候補・分析入力が変わらない。
+- **取得時刻**: `published_at` が cutoff 前でも `fetched_at` / `first_seen_at` が後なら使われない（RF-05）。
+- **後日訂正**: 訂正版 manifest は、作成時刻より前の as-of では読まれない（RF-16）。
+- **分割係数**: 後日公表の係数が過去の判定に混入しない（RF-11）。
+- **walk-forward**: 全 fold で 学習データの最大日付 < 評価データの最小日付。
+- **知識ベース事例**: `available_from` より前の判断で事例を参照しない。
+- **Research 判定の入力**: `information_cutoff_at` より後の情報が含まれない（RF-02）。
 
-- GitHub Actions: lint（ruff / eslint）、型検査（mypy or pyright / tsc）、pytest、vitest、プロンプトハッシュ検査。
-- E2E は main マージ前にプレビュー環境で実行（Phase 1 以降に整備）。
+## 5. 権限・分離
 
-## 5. カバレッジ方針
+- Research ロールで `prod.*` に書き込めない（RF-15）。
+- Web 用のキーで `prod.*` に書き込めない。
 
-- 数値目標より「不変条件テストが全部ある」ことを優先。
-- Feature 計算・ラベル判定・Outcome 計算は分岐網羅を目標にする。
+## 6. 原文の改変検知
+
+- `docs/prompts/MANIFEST.md` に登録されたファイルの SHA-256 を CI で検査する（RF-14）。
+
+## 7. テストデータの隔離
+
+- 本番 DB・本番バケット・実データの保存先に**一時的にも書き込まない**。ローカル DB・一時ディレクトリ・テスト用バケットを注入して使う。
+- fixture は合成データ、または利用規約上保存可能な範囲に限る。
+
+## 8. CI
+
+- lint（ruff / eslint）、型検査、pytest、vitest、原文ハッシュ検査、回帰 fixture（pending 含む一覧表示）。

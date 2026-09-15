@@ -1,26 +1,28 @@
 # 開発フェーズ
 
-各 Phase 完了時に停止し、CLAUDE.md の報告フォーマットで報告 → ChatGPT 監査 → ユーザー承認 → 次 Phase。
+状態: **v0.1（Phase 0.1 監査是正後）** — 2026-09-15
+各 Phase（または監査ラウンド）の完了時に停止 → 報告 → ChatGPT 監査 → ユーザー承認 → 次へ。
 
-| Phase | 名称 | 主な成果物 | 完了条件（案） | 前提となる Decision |
-|---|---|---|---|---|
-| 0 | Requirements / architecture / repository setup | README, CLAUDE.md, docs 一式, Git 初期化 | 監査で承認 | — |
-| 1 | Security Master + Universe | 新規 Supabase・マイグレーション基盤、`ref.securities`、JP/US 銘柄一覧取得、普通株判定、上場廃止履歴、`pipeline.runs`、Pipeline 画面の最小版、認証 | JP/US 全普通株が日次で取り込まれ、件数・除外理由がDBと画面で確認できる | v5.1受領, D-03, D-04, D-06, D-07, D-10, D-14 |
-| 2 | Market Data + 3000円 Hard Filter | 日足取得、FX 取得、`universe.daily_eligibility`、カバレッジ監視、Universe 画面 | 全銘柄の価格取得率と Eligible 件数が毎営業日記録され、境界値テストが通る | D-02, D-06, D-07 |
-| 3 | Stage 1 Technical Screening | Feature Engine（§15 の全 Feature）、v5.1 Route A〜H のコード化、as-of 取得層、リーク検査テスト | Route ごとの該当理由が再現可能。Feature 計算のゴールデンテスト合格 | v5.1 精読結果の監査 |
-| 4 | News / Disclosure Collection | ソース規約調査結果、コレクタ、raw 保存、`first_seen_at`、Materials 画面（一覧） | 規約確認済みソースから継続収集でき、取得ログとカバレッジが見える | D-05, D-12 |
-| 5 | Noise Filter + Entity Linking + Material Event | `market_relevance`、同一出来事クラスタリング、Discovery/Verification 分離、`relation_type`・因果経路、Material Candidates | 評価用サンプルでの精度報告。Technical と独立した材料ルートが候補を生成 | D-11 |
-| 6 | Chart Knowledge Base + Stage 2 | 知識ベース（定義〜失敗例）、チャート画像生成、Stage 2 判定 | 各概念に正例・失敗例・反例が登録され、Stage 2 結果が根拠付きで保存 | — |
-| 7 | LLM Stage 3 Analysis | 入力バンドル組み立て、プロンプト組み立て（原文+addenda）、LLM呼び出し抽象化、出力スキーマ検証、LLM派生 Feature 保存 | 候補集合に対し ENTRY/WATCH_*/REJECT と根拠が再現可能な形で保存 | D-11 |
-| 8 | ENTRY / WATCH / Prediction Snapshot | append-only Prediction、Watch、Watch Monitor、再分析、State Transition、Predictions/Watch 画面 | Watch 条件到達で自動 ENTRY にならず再分析されることをテストで証明 | D-01, D-08 |
-| 9 | Outcome Tracking + Excel Export | Prediction/Universe 全件の 1/3/5/10/20D 追跡、MFE/MAE 等、Results 画面、Excel 出力 | 分割・上場廃止・休場を含むケースで正しく計算 | D-09, D-15 |
-| 10 | Teacher Dataset | ラベル判定、見逃し Research Mode、State Transition 教師データ | ラベル基準が監査済みで、突発急騰が False Negative にならないことをテストで証明 | D-13 |
-| 11 | ML / Weight Learning | 4層の学習（候補生成・解釈・Entry・状態遷移）、walk-forward、条件付き Weight、Feature interaction | Champion/Challenger 比較レポートがリークなしで生成される | 教師データ量の十分性判断 |
-| 12 | Model Lab / Continuous Improvement | Model Lab 画面、Route/Driver/Feature 別成績、LLM評価精度、version 比較、昇格フロー | Challenger の昇格が監査ログ付きで行える | — |
+| Phase | 名称 | 主な成果物 | 完了条件（案） | 実装する回帰 fixture | 前提 |
+|---|---|---|---|---|---|
+| 0 | Requirements / architecture / setup | 文書一式、ローカル Git | 監査で概ね合格 | — | — |
+| **0.1** | 監査是正 | ストレージ分離、interface 設計、lifecycle / universe / labels / fixtures 仕様、Provider 比較 | 監査で承認 | 仕様のみ | — |
+| 1 | Security Master + Universe | 新規 Postgres・マイグレーション基盤、`JobRunner`/`Scheduler`/`ObjectStore`/`MarketDataProvider` の最小実装（Local + 1実装）、manifest、`universe-1.0.0` の実装、DB ロール分離、原文ハッシュの CI、認証付き Pipeline 画面の最小版 | JP/US の銘柄が Universe 定義どおりに取り込まれ、除外理由・`TYPE_UNKNOWN` の件数が DB と画面で確認できる | RF-12, RF-14, RF-15 | **v5.1 原文（D-00）**、監査通過、D-03a, D-06a（開発は Free で可）, D-07a（マスタ用）, D-10a〜e, D-14, D-22 |
+| 2 | Market Data + 3000円 Hard Filter | 全銘柄日足（Parquet）、FX（`fx_observed_at`）、Universe 判定履歴、カバレッジ監視、Universe 画面 | 取得率と Eligible 件数が毎営業日記録され、境界値・FX 同期・訂正データのテストが通る | RF-09（Universe 部分）, RF-11, RF-16 | D-02a, D-03b, D-07a（EOD 用） |
+| 3 | Stage 1 Technical Screening | Feature Engine（§15）、v5.1 Route A〜H のコード化、as-of 読み取り層 | Route ごとの該当理由が再現でき、Feature のゴールデンテストとリーク検査が通る | RF-01（Feature 部分） | v5.1 精読結果の監査 |
+| 4 | News / Disclosure Collection | ソース規約調査表、コレクタ（常駐型 Runner）、raw 保存、`first_seen_at`、Materials 画面 | 規約確認済みソースから継続収集でき、取得ログとカバレッジが見える | — | D-05a, D-12 |
+| 5 | Noise Filter + Entity Linking + Material Event | `market_relevance`、同一出来事の統合、Discovery/Verification、`relation_type`・因果経路、Material 候補、価格カットオフと材料の扱い | 評価用サンプルでの精度を報告。Technical と独立に候補を生成 | RF-04, RF-05（材料部分） | D-11, D-19 |
+| 6 | Chart Knowledge Base + Stage 2 | 知識ベース、候補の分足取得、チャート画像、Stage 2 判定 | 各概念に正例・失敗例・反例があり、Stage 2 の結果が根拠付きで保存される | — | D-08a |
+| 7 | LLM Stage 3 EOD Analysis | 入力バンドル、プロンプト組み立て（原文 + addenda）、出力検証器（Reachable Zone の根拠種類の検査を含む）、`SETUP_EOD`/`WATCH_*`/`REJECT` | 候補に対する判定と根拠が再現可能な形で保存される | RF-01（検証器部分）, RF-05（分析部分）, RF-08 | D-11 |
+| 8 | ENTRY 判断 / Watch / Prediction / Episode | 場中 Runner、リアルタイム Provider、`entry_decision`・`watch_monitor`、append-only の Prediction、Episode、State Transition、Predictions / Watch 画面 | Watch 到達だけで ENTRY にならない・Threshold が entry 価格基準・Episode の重複計上がないことをテストで示す | RF-03, RF-06, RF-07, RF-09（ENTRY 部分） | **D-06b**, D-01a, D-01b, D-17a〜c, D-18, D-20, D-21 |
+| 9 | Outcome Tracking + Excel Export | Episode と全 Eligible 銘柄の Outcome、パス解決、Results 画面、Excel | 分割・上場廃止・休場・分足欠損を含むケースで正しく計算される | RF-06（集計部分）, RF-10 | D-09a, D-15 |
+| 10 | Teacher Dataset | Objective / Interpretive ラベル、採用ポリシー、見逃しの Research 判定、状態遷移の教師データ | ラベル基準が監査済みで、突発急騰が ACTIONABLE_FALSE_NEGATIVE にならないことをテストで示す | RF-02, RF-13 | D-13a, D-13b |
+| 11 | ML / Weight Learning | 4層の学習、walk-forward、条件付き Weight、Feature interaction | Champion / Challenger 比較がリークなしで生成される | RF-15（Replay 部分） | 教師データ量の十分性の判断 |
+| 12 | Model Lab / Continuous Improvement | Model Lab 画面、Route/Driver/Feature 別成績、LLM 評価精度、version 比較、昇格フロー | Challenger の昇格が監査ログ付きで行える | — | — |
 
 ## 各 Phase 共通の Definition of Done
 
 - マイグレーション・コード・テストがコミットされている
-- `run_id` / `data_cutoff` / version / error log が保存される
-- テストが通り、リーク検査（該当 Phase）が通る
-- 未実装・妥協・データ制約が報告に明記されている
+- `run_id` / cutoff 類 / version / provider_bindings / error log が保存される
+- その Phase で実装すべき回帰 fixture が通る（未到達のものは pending のまま残す）
+- 未実装・妥協・データ制約が報告に書かれている
