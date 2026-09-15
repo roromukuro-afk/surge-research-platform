@@ -1,0 +1,36 @@
+# secrets
+.env
+.env.*
+!.env.example
+*.pem
+service-account*.json
+
+# node / next
+node_modules/
+.next/
+out/
+.vercel/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# local data (正本はDB/オブジェクトストレージ。ローカル生成物はコミットしない)
+data/
+exports/
+*.parquet
+*.xlsx
+
+# supabase local
+supabase/.branches/
+supabase/.temp/
+
+# os / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
