@@ -14,6 +14,7 @@
 | D-02 | USD/JPY の時点 | `fx_observed_at <= decision_cutoff_at` 必須 | 2026-09-15 / 監査 0.1 #7 | audit 0.1 #7 |
 | D-03 | ストレージ設計 | Postgres = 状態・索引・結果、大量の履歴 = Parquet + Object Storage | 2026-09-15 / 監査 0.1 #3 | audit 0.1 #3 |
 | D-03a | Supabase のプラン | **Phase 1 開発は Free で開始してよい。** Production Architecture を Free 上限に合わせて縮小しない。Bulk historical data の分離を維持。**Production 開始前にプランを再評価** | 2026-09-15 / 監査 0.2 最終 #7 | audit final #7 |
+| D-03d | Supabase Free 上限への対応 | 監査は当初 (c) ローカル Supabase を採用。その後ユーザー指示で `loop-vocabulary` を **Pause（削除しない）** し、空いた枠に本プロジェクト専用の新規 Free Project `surge-research-platform`（ap-northeast-1、$0/月）を作成。`kaiji-radar` は無変更。既存 Project の流用なし。有料化なし。ローカル Supabase は開発・テスト用に併用 | 2026-09-16 / ユーザー指示 | ユーザー指示（2026-09-16） |
 | D-05 | Worker 実行環境 | `JobRunner` / `Scheduler` で抽象化 | 2026-09-15 / 監査 0.1 #4 | audit 0.1 #4 |
 | D-06 | J-Quants の位置付け | Free = 開発用、Production EOD は Light 以上を候補、Standard は必須にしない。分足・ティックは日次16:30頃更新のため場中 ENTRY 判断に使わない | 2026-09-15 / 監査 0.1 #15、0.2 #2 | audit 0.2 #2、公式更新スケジュール |
 | D-07 | 米国株データの選び方 | `MarketDataProvider`、用途別 Provider、公式仕様のみで比較 | 2026-09-15 / 監査 0.1 #14 | audit 0.1 #14 |
@@ -47,7 +48,6 @@
 | ID | 種別 | 論点 | Claude Code の意見 |
 |---|---|---|---|
 | **D-00（登録）** | 前提 | **v5.1 全文の受領と Canonical 登録** | 受領したら無加工で `short-surge-v5.1.original.md` に保存し、SHA-256 を記録してから Phase 1 に進む |
-| **D-03d** | 費用/運用 | **Supabase Free プロジェクトを作成できない**（2026-09-15 作成を試行し、Free の上限「稼働中2件（ユーザー単位・組織横断）」で拒否。費用確認は $0/月）。選択肢: (a) ユーザーが既存の Free プロジェクトのどれかを一時停止する (b) 組織を有料プランにする (c) Phase 1 はローカル Supabase（Docker）で開発し、クラウドは後で作る | Claude Code は既存プロジェクトを停止しない（他システムへの影響があるため）。(c) なら Phase 1 は進められる（Docker Desktop の起動が必要）。新しい組織を作っても、上限はユーザー単位なので解決しない |
 
 ### B-2. Phase 1 中に決めればよい（pending で開始可）
 

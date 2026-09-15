@@ -7,7 +7,7 @@
 | リソース | 用途 | 作成タイミング | 決定事項 |
 |---|---|---|---|
 | Git リポジトリ（リモート） | ソース管理・CI | **2026-09-15 作成済み**（GitHub Public、`roromukuro-afk/surge-research-platform`） | Public。secret scanning と push protection を有効化済み。コード・設計文書・Prompt・Schema・Test のみ。秘密情報・研究データ・Raw データは commit しない |
-| PostgreSQL（Supabase 新規 Project） | 状態・索引・結果・認証 | Phase 1 開始時（作成はユーザー承認済み） | Phase 1 は Free（D-03a）。Production 前に再評価（D-03c）。**2026-09-15 の作成は Free 上限で失敗（D-03d）** |
+| PostgreSQL（Supabase 新規 Project） | 状態・索引・結果・認証 | **2026-09-16 作成済み**（Free、ap-northeast-1、本プロジェクト専用）。Project ID・URL・キーは `.env`（Git 管理外）にのみ置き、コードに hard-code しない | Phase 1 は Free（D-03a）。Production 前に再評価（D-03c）。開発・テストはローカル Supabase（Docker）を併用し、migration / schema / seed / test は Cloud にそのまま適用できる形で version 管理する |
 | Object Storage（新規バケット） | Parquet・raw・画像・成果物 | Phase 2 まで（Phase 1 はローカル実装） | プロバイダ D-03b |
 | Web（Vercel 新規 Project） | 閲覧用 UI | 画面ができてから | プラン D-04 |
 | JobRunner の実行環境 | 日次バッチ / 場中監視 / 収集 | 日次は Phase 1〜2、常駐型は Phase 4・8 まで | D-05a |
@@ -19,7 +19,7 @@
 
 | 環境 | Web | DB | Object Storage | Job 実行 |
 |---|---|---|---|---|
-| local | `next dev` | ローカル Postgres（Docker） | ローカルファイルシステム実装 | `LocalRunner` |
+| local | `next dev` | ローカル Supabase（Docker、`supabase start`） | ローカルファイルシステム実装 | `LocalRunner` |
 | production | Vercel（認証必須） | Supabase Production | 選定したプロバイダ | 選定した Runner（複数可） |
 
 ステージング環境は当面持たない（D-14）。
