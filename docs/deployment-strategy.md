@@ -6,8 +6,8 @@
 
 | リソース | 用途 | 作成タイミング | 決定事項 |
 |---|---|---|---|
-| Git リポジトリ（リモート） | ソース管理・CI | Phase 1 開始時（ユーザー確認後） | 現在はローカル Git のみ |
-| PostgreSQL（Supabase 新規 Project） | 状態・索引・結果・認証 | Phase 1 開始時（ユーザー確認後） | Phase 1 は Free（D-03a）。Production 前に再評価（D-03c） |
+| Git リポジトリ（リモート） | ソース管理・CI | **2026-09-15 作成済み**（GitHub Public、`roromukuro-afk/surge-research-platform`） | Public。secret scanning と push protection を有効化済み。コード・設計文書・Prompt・Schema・Test のみ。秘密情報・研究データ・Raw データは commit しない |
+| PostgreSQL（Supabase 新規 Project） | 状態・索引・結果・認証 | Phase 1 開始時（作成はユーザー承認済み） | Phase 1 は Free（D-03a）。Production 前に再評価（D-03c）。**2026-09-15 の作成は Free 上限で失敗（D-03d）** |
 | Object Storage（新規バケット） | Parquet・raw・画像・成果物 | Phase 2 まで（Phase 1 はローカル実装） | プロバイダ D-03b |
 | Web（Vercel 新規 Project） | 閲覧用 UI | 画面ができてから | プラン D-04 |
 | JobRunner の実行環境 | 日次バッチ / 場中監視 / 収集 | 日次は Phase 1〜2、常駐型は Phase 4・8 まで | D-05a |
