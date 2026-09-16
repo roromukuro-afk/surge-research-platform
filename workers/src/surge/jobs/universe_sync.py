@@ -133,6 +133,25 @@ def first_source_available_at(provenances: list[Provenance]) -> datetime:
     return min(provenance.available_at for provenance in provenances)
 
 
+def provider_bindings(provenances: list[Provenance]) -> dict[str, dict[str, Any]]:
+    """What was bound to what, keyed by the binding rather than the provider.
+
+    Keying by source_id lost one of the two SEC SIC lookups: the same provider
+    supplies blank-check and REIT membership through different endpoints, and a
+    JSON object cannot hold the same key twice.
+    """
+
+    bindings: dict[str, dict[str, Any]] = {}
+    for provenance in provenances:
+        binding = bindings.setdefault(
+            provenance.dataset,
+            {"provider": provenance.source_id, "endpoints": []},
+        )
+        if provenance.endpoint not in binding["endpoints"]:
+            binding["endpoints"].append(provenance.endpoint)
+    return bindings
+
+
 def canonical_config_hash(config: dict[str, Any]) -> str:
     """Stable fingerprint of the settings that can change a run's output."""
 
@@ -367,9 +386,7 @@ def run_universe_sync(
         "identity_version": IDENTITY_VERSION,
         "market_code": market_code,
         "sic_max_pages": sic_max_pages if market_code == "US" else None,
-        "sources": {
-            provenance.source_id: provenance.endpoint for provenance in provenances
-        },
+        "sources": provider_bindings(provenances),
     }
 
     return SyncResult(
@@ -531,7 +548,7 @@ def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | Non
                         "job_version": JOB_VERSION,
                     }
                 ),
-                Json({provenance.source_id: provenance.endpoint for provenance in result.provenances}),
+                Json(provider_bindings(result.provenances)),
                 Json(
                     {
                         "source_data_version": version,
@@ -552,6 +569,7 @@ def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | Non
         [
             str(result.run_id),
             provenance.source_id,
+            provenance.dataset,
             provenance.endpoint,
             provenance.requested_at,
             provenance.received_at,
@@ -569,6 +587,7 @@ def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | Non
         (
             "run_id",
             "source_id",
+            "dataset_key",
             "endpoint",
             "requested_at",
             "received_at",

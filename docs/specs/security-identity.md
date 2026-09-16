@@ -124,7 +124,28 @@ provenance（どこから来たか）と visibility（いつ知り得たか）�
 | `EDINET` / 法人番号 | `edinet_code_list`（record id = EDINET コード） | dependency max |
 | issuer name（LEGAL） | 名称を供給したレジストリ | dependency max |
 
-既存行の provenance は `ref.refresh_identifier_provenance` / `ref.refresh_issuer_name_matching` が修復する。**値と有効期間は変えない**（それは新しい version の仕事）。`available_at` は**後ろにしか動かさない**（早すぎた可視性は直すが、既に答えた as-of 読み出しから遡って隠さない）。
+既存行の provenance は `ref.refresh_identifier_provenance` / `ref.refresh_issuer_name_matching` が修復する。**値と有効期間は変えない**（それは新しい version の仕事）。`available_at` は**後ろにしか動かさない**（早すぎた可視性を直す方向にのみ動く）。
+
+### metadata correction は何を変え、何を変えないか（Phase 2.0 訂正）
+
+Phase 1.1c では「`available_at` を後ろへ動かしても retro-hide しない」と書いたが、これは不正確だった。**既に返した答えは変わらない**が、**同じ past-cutoff query をもう一度実行すれば答えは変わり得る**。訂正とはそういうものであり、それを隠すほうが誤りである。正しくは3層に分ける:
+
+| 対象 | 可変性 | 根拠 |
+|---|---|---|
+| publish された run の artifact（`pipeline.runs` / `source_fetches` / `run_errors` / `master_snapshot` / `universe.evaluations` / `universe.coverage`） | **不変**。INSERT / UPDATE / DELETE すべて拒否 | Phase 1.1c freeze trigger |
+| `ref` master の metadata（provenance: `source_id` / `source_record_id` / `observed_at` / `available_at` / `normalized_name`） | **訂正可能**。訂正後は将来の past-cutoff query の結果が変わり得る | `ref.refresh_*` |
+| 訂正そのもの | **追記のみ**。`ref.provenance_corrections` に before / after / 実行 run を記録 | Phase 2.0 |
+
+`ref.security_identifiers.last_provenance_run_id` / `ref.issuer_names.last_provenance_run_id` は「その行の provenance を最後に確認・訂正した run」であり、`ingestion_run_id`（その version を最初に作った run）とは別物である。
+
+**Historical Replay はどちらを読むかを必ず明示する。**
+
+| 目的 | 読む先 | 意味 |
+|---|---|---|
+| 当時システムが実際に何を結論したかの再現（Production の検証・成績の再計算） | publish された run の artifact | 訂正前の姿。Prediction の評価はこちら |
+| 当時「正しくは何を知り得たか」での再評価（研究・pipeline 改善） | 訂正後の `ref` master ＋ `ref.provenance_corrections` | 訂正後の姿。Production の成績に戻さない |
+
+どちらを使ったかは replay の記録に残す（[1-15] Production と Research の分離）。
 
 ## 5. どの run が Universe か（Phase 1.1b / 1.1c）
 
@@ -200,3 +221,8 @@ in-place 移行ができない変更は次の手順に限る。**migration を�
 | 1.1c-7 | snapshot 行の available_at は最後の source に合わせる | 同上 + `test_run_provenance.py` |
 | 1.1c-8 | `data_cutoff` は最初ではなく最後の source | `test_run_provenance.py` |
 | 1.1c-9 | Nasdaq の combined content hash が 64hex の SHA-256 | `test_providers_classification.py` |
+| 2.0-1 | 必須なのは provider ではなく dataset（SIC 6770 と 6798 は別々に必須） | `test_db_dataset_and_corrections.py` |
+| 2.0-2 | dataset_key を持たない fetch は endpoint から dataset を導出する（published run を書き換えない） | 同上 |
+| 2.0-3 | publication は通過した ruleset の版を記録する | 同上 |
+| 2.0-4 | 再確認は `ingestion_run_id` を動かさない（動くのは `last_provenance_run_id`） | 同上 |
+| 2.0-5 | provenance の訂正は `ref.provenance_corrections` に追記のみで記録される | 同上 |

@@ -44,6 +44,15 @@ class Provenance:
     observed_at: datetime
     available_at: datetime
     source_published_at: datetime | None = None
+    # One provider can supply several datasets that are required independently:
+    # the SEC SIC directory gives us blank-check (6770) and REIT (6798)
+    # membership through the same source_id. Validation has to be able to tell
+    # them apart, so a fetch names its dataset. Defaults to the source itself.
+    dataset_key: str | None = None
+
+    @property
+    def dataset(self) -> str:
+        return self.dataset_key or self.source_id
 
 
 @dataclass(frozen=True)

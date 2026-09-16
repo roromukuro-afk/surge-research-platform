@@ -186,3 +186,58 @@ def test_snapshot_rows_use_the_dependency_cutoff(tmp_path):
 
     assert observed_at == base, "observed_at stays the primary payload's read time"
     assert available_at == late, "available_at waits for the enrichment source"
+
+
+# ------------------------------------------- Phase 2.0: bindings by dataset
+def test_provider_bindings_are_keyed_by_dataset_not_by_provider():
+    """One provider serving two required datasets must not collapse into one."""
+
+    from datetime import UTC, datetime, timedelta
+
+    from surge.jobs.universe_sync import provider_bindings
+    from surge.models import Provenance
+    from surge.providers.sec_edgar import sic_dataset_key
+
+    base = datetime(2026, 9, 16, 7, 23, 41, tzinfo=UTC)
+
+    def fetch(seconds: int, source: str, endpoint: str, dataset_key: str | None = None) -> Provenance:
+        moment = base + timedelta(seconds=seconds)
+        return Provenance(
+            source_id=source, endpoint=endpoint, requested_at=moment, received_at=moment,
+            http_status=200, bytes=1, content_sha256="a" * 64, item_count=1,
+            observed_at=moment, available_at=moment, dataset_key=dataset_key,
+        )
+
+    provenances = [
+        fetch(0, "nasdaq_trader_symbol_directory", "ftp://nasdaqtrader"),
+        fetch(1, "sec_company_tickers", "https://sec.gov/tickers.json"),
+        fetch(32, "sec_sic_directory", "https://sec.gov/browse-edgar?SIC=6770", sic_dataset_key("6770")),
+        fetch(42, "sec_sic_directory", "https://sec.gov/browse-edgar?SIC=6798", sic_dataset_key("6798")),
+    ]
+
+    bindings = provider_bindings(provenances)
+
+    assert set(bindings) == {
+        "nasdaq_trader_symbol_directory",
+        "sec_company_tickers",
+        "SEC_SIC_6770",
+        "SEC_SIC_6798",
+    }
+    # both SIC datasets keep their own endpoint, and both name the same provider
+    assert bindings["SEC_SIC_6770"]["provider"] == "sec_sic_directory"
+    assert bindings["SEC_SIC_6798"]["provider"] == "sec_sic_directory"
+    assert bindings["SEC_SIC_6770"]["endpoints"] != bindings["SEC_SIC_6798"]["endpoints"]
+
+
+def test_a_fetch_without_a_dataset_key_is_its_own_dataset():
+    from datetime import UTC, datetime
+
+    from surge.models import Provenance
+
+    moment = datetime(2026, 9, 16, 7, 23, 41, tzinfo=UTC)
+    plain = Provenance(
+        source_id="jpx_listed_issues", endpoint="fixture://", requested_at=moment, received_at=moment,
+        http_status=200, bytes=1, content_sha256="a" * 64, item_count=1,
+        observed_at=moment, available_at=moment,
+    )
+    assert plain.dataset == "jpx_listed_issues"

@@ -31,10 +31,13 @@ pytestmark = [
 ]
 
 UNIVERSE_VERSION = "universe-1.0.0"
+# (source_id, dataset_key). One provider serves two independently required
+# datasets, so the fixture has to supply both or the run will not validate.
 REQUIRED_US_SOURCES = (
-    "nasdaq_trader_symbol_directory",
-    "sec_company_tickers",
-    "sec_sic_directory",
+    ("nasdaq_trader_symbol_directory", None),
+    ("sec_company_tickers", None),
+    ("sec_sic_directory", "SEC_SIC_6770"),
+    ("sec_sic_directory", "SEC_SIC_6798"),
 )
 
 
@@ -70,15 +73,25 @@ def _publishable_run(cur, market: str, observed_at, *, symbol: str, status: str 
         (status, observed_at, observed_at, str(run_id)),
     )
     # every source this market cannot be published without, each with a real digest
-    for index, source in enumerate(REQUIRED_US_SOURCES):
+    for index, (source, dataset_key) in enumerate(REQUIRED_US_SOURCES):
         cur.execute(
             """
-            insert into pipeline.source_fetches (run_id, source_id, endpoint, requested_at, received_at,
+            insert into pipeline.source_fetches (run_id, source_id, dataset_key, endpoint,
+                                                 requested_at, received_at,
                                                  http_status, item_count, bytes, content_sha256,
                                                  observed_at, available_at)
-            values (%s, %s, 'fixture://', %s, %s, 200, 1, 1, %s, %s, %s)
+            values (%s, %s, %s, 'fixture://', %s, %s, 200, 1, 1, %s, %s, %s)
             """,
-            (str(run_id), source, observed_at, observed_at, f"{index:064x}", observed_at, observed_at),
+            (
+                str(run_id),
+                source,
+                dataset_key,
+                observed_at,
+                observed_at,
+                f"{index:064x}",
+                observed_at,
+                observed_at,
+            ),
         )
     key = f"US:CIK:{uuid.uuid4().hex[:8]}:COMMON_STOCK:"
     _add_snapshot_row(cur, run_id, symbol=symbol, identity_key=key, observed_at=observed_at)

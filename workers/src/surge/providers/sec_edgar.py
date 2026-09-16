@@ -48,6 +48,12 @@ def _pad_cik(value: int | str) -> str:
     return str(int(value)).zfill(10)
 
 
+def sic_dataset_key(sic: str) -> str:
+    """One provider, several required datasets: name each one."""
+
+    return f"SEC_SIC_{sic}"
+
+
 def sic_membership_hash(sic: str, ciks: set[str] | frozenset[str]) -> str:
     """Deterministic fingerprint of one SIC membership list.
 
@@ -150,6 +156,7 @@ class SecSicDirectory:
         assert first_requested is not None and last_received is not None
         provenance = Provenance(
             source_id="sec_sic_directory",
+            dataset_key=sic_dataset_key(sic),
             endpoint=f"{self._url}?SIC={sic}",
             requested_at=first_requested,
             received_at=last_received,

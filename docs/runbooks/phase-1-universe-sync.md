@@ -108,6 +108,13 @@ psql "$SURGE_DB_URL" -v ON_ERROR_STOP=1 -c "select pipeline.publish_run('<run id
 `scripts/rebuild_security_master.sh <market> <git sha> [label]` runs the whole
 sequence.
 
+`publish_run` records the validation ruleset it passed under
+(`pipeline.validation_ruleset_version()`, currently `publication-1.1c.0`). Older
+publications keep the version they were made under, so a run published under
+`publication-1.0.0` is **not expected** to satisfy today's rules - that is the
+record of which rules it actually passed, not a defect. Pass a second argument
+only to record a version deliberately.
+
 ### Object storage (when the job cannot reach the database)
 
 The database can fetch the snapshot itself, and the loader accepts **only** a

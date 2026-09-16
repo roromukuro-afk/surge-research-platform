@@ -72,6 +72,11 @@
 | D-67 | publication の検証範囲 | 市場一致・source_data_version 単一かつ run と一致・identity_version / universe_version 一致・全 source に `available_at`・必須 source に 64hex digest・`data_cutoff >= max(available_at)`・critical source が truncated でないこと | 2026-09-16 / 監査 Phase 1.1c #8 | `20260916180200` |
 | D-68 | critical source の不完全取得 | SEC SIC（SPAC / REIT）の truncated は `CRITICAL_SOURCE_INCOMPLETE` とし **publication を拒否**する。一般の data quality 警告は拒否しない | 2026-09-16 / 監査 Phase 1.1c #8 | 同上 |
 | D-69 | content_sha256 の意味 | 64桁 hex の SHA-256 か NULL。複数ファイルを1つの source として読む場合は各 digest を連結して再度 SHA-256 する（成分は run notes に保持） | 2026-09-16 / 監査 Phase 1.1c #9 | `workers/src/surge/providers/nasdaq_trader.py` |
+| D-71 | 必須なのは provider ではなく dataset | 1つの provider が独立に必須な複数 dataset を供給する場合（SEC SIC 6770 / 6798）、`dataset_key` で dataset ごとに必須判定する。dataset_key を持たない既存 run は `pipeline.fetch_dataset_key` が endpoint から導出する（published run を書き換えない） | 2026-09-16 / 監査 Phase 2.0 (A) | `20260916190000` / `20260916190100` |
+| D-72 | provider_bindings の粒度 | `{dataset: {provider, endpoints[]}}`。source_id で束ねると同一 provider の複数 endpoint が1つしか残らない | 2026-09-16 / 監査 Phase 2.0 (B) | `workers/src/surge/jobs/universe_sync.py` |
+| D-73 | validation_version の由来 | `pipeline.validation_ruleset_version()`（現行 `publication-1.1c.0`）を publish 時の既定値にする。ruleset を変えたら上げる。**過去の publication は当時の版のまま**（`publication-1.0.0` の 2 run は現行 ruleset では validate しない。これは記録であって欠陥ではない） | 2026-09-16 / 監査 Phase 2.0 (C) | `20260916190000` |
+| D-74 | ingestion_run_id と last_provenance_run_id | 前者は「その version を最初に作った run」、後者は「provenance を最後に確認・訂正した run」。再確認で前者を動かさない | 2026-09-16 / 監査 Phase 2.0 (D) | `20260916190000` |
+| D-75 | metadata correction の意味 | published run の artifact は不変。`ref` master の provenance 訂正は**将来の past-cutoff query の結果を変え得る**（Phase 1.1c の「retro-hide しない」は不正確だった）。訂正そのものを `ref.provenance_corrections` に追記のみで記録し、Historical Replay はどちらを読むかを明示する | 2026-09-16 / 監査 Phase 2.0 (E) | `20260916190200` / [security-identity.md](specs/security-identity.md) §4 |
 
 ---
 
