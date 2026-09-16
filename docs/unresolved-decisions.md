@@ -92,7 +92,7 @@
 
 | ID | 種別 | 論点 | Claude Code の意見 |
 |---|---|---|---|
-| D-07a | 費用 | 米国株の役割ごとの Provider（Phase 1 はマスタ用） | 未確認項目を公式ドキュメント・API で確認してから |
+| D-07a | 費用 | 米国株の役割ごとの Provider（Phase 1 はマスタ用） | **調査完了・提案あり（ユーザー承認待ち）**: EODHD All World $19.99/月。根拠と対抗馬は [phase-2-provider-evaluation.md](research/phase-2-provider-evaluation.md) §2 |
 | D-10a | 投資ロジック | 「適格 ADR」の定義 | 判断しない。確定まで ADR は pending |
 | D-10b | 投資ロジック/技術 | JP の普通株判定（`ProdCat` の値）、東証上場の外国株式、出資証券・優先出資証券、`0109 その他` | Phase 1 の最初に値を確認して提示 |
 | D-10c | 投資ロジック/技術 | 米国 REIT の判定方法 | — |
@@ -106,18 +106,21 @@
 | ID | 種別 | 論点 | 必要な時期 | Claude Code の意見 |
 |---|---|---|---|---|
 | D-01a | 投資ロジック | `entry_price_method` | Phase 8 前 | 場中 Provider の能力を確認してから |
-| D-40 | 技術 | US の `PROVISIONAL` 証券 6,328 件（SEC `company_tickers_exchange.json` に CIK がない ETF・ワラント等）と `REGISTRY_ANCHORED` 6,909 件を、security-level の安定識別子（FIGI / share-class 識別子 / provider の安定 ID）で `STRONG` 化できるか。**Phase 2 の US Provider 選定時に取得可否を確認し、取得できた場合にのみ昇格する**（D-44） | Phase 2 の Provider 選定時 | ほぼ ETF・ユニット・ワラントで、`INCLUDED` には入らない。Phase 2 で `INCLUDED` ∪ `UNRESOLVED` を追跡する範囲では影響が小さい |
+| D-40 | 技術 | US の `PROVISIONAL` 証券 6,328 件（SEC `company_tickers_exchange.json` に CIK がない ETF・ワラント等）と `REGISTRY_ANCHORED` 6,909 件を、security-level の安定識別子（FIGI / share-class 識別子 / provider の安定 ID）で `STRONG` 化できるか。**Phase 2 の US Provider 選定時に取得可否を確認し、取得できた場合にのみ昇格する**（D-44） | Phase 2 の Provider 選定時 | **調査完了・提案あり**: FIGI（`shareClassFIGI` / `compositeFIGI`）はパブリックドメインで DB 保存も再配布も明示的に許諾されており、唯一採用できる share-class 識別子。CUSIP は規約が master DB 化を否定し $46,825/年、ISIN は US ISIN に埋め込まれた CUSIP の権利関係が未解決、SEC は証券レベルの識別子を発行していない。取得経路は OpenFIGI（無料）/ Massive `/v3/reference/tickers`（$0 プラン）/ EODHD ID Mapping（`filter[cik]` が使える）。**昇格は identity_version を伴う記録された migration として別途行う**。[評価記録](research/phase-2-provider-evaluation.md) §5 |
 | D-41 | 技術 | JP の `PROVISIONAL` 発行体 732 件（EDINET コード一覧に載らない ETF・REIT・出資証券等）の扱い | Phase 2 前 | 発行体の統合が必要になるのは主に普通株。EDINET 未突合は UNRESOLVED/EXCLUDED 側に偏っている |
 | D-42 | 投資ロジック/技術 | 同一 CIK に複数の証券がぶら下がる 640 CIK（クラス株・優先株・ワラント等）のうち、どこまでを「同一発行体の別クラス」として扱い、どこからを別発行体とみなすか | Phase 3 前 | 現状は CIK = 発行体、クラスは証券側で分離。例外（合併・持株会社化で CIK が変わる場合）の扱いは未定 |
 | D-43 | 技術 | US の identity collision 240 レコード / **67 distinct キー**（同一 CIK・同一種別・同一クラスに複数銘柄。最大は `US:CIK:0000927971:ETF:` の 42 銘柄）を、どの追加属性で分離するか | Phase 3 前 | 現状は両方を PROVISIONAL に降格し、`context` 付きで警告に残す。大半は ETN / レバレッジ ETF。discriminator を広げると 240 件の `security_id` が変わるため、rebuild としてしか実施できない |
 | D-70 | 規約/技術 | JP の5桁証券コードの公式定義（証券コード協議会の仕様書 PDF）を取得し、コード形ガードを「公式根拠あり」へ格上げするか | Phase 3 前（銘柄名が決定的なため blocker ではない） | 公式ファイルの実測（4桁=普通株 4,434件 / 5桁=特殊株式 7件）で代用している |
 | ~~D-53~~ | 技術 | **解決済み（A 表 D-53 参照）**: publication model を実装 | — | — |
 | D-01b | 投資ロジック | 「次の取引可能時点」の定義 | Phase 8 前 | 判断しない |
-| D-02a | 技術/投資ロジック | FX の Provider と許容遅延 | Phase 2 前 | — |
-| D-03b | 費用/技術 | Object Storage プロバイダ | Phase 2 前 | Phase 1 はローカル実装 |
+| D-02a | 技術/投資ロジック | FX の Provider と許容遅延 | Phase 2 前 | **調査完了・提案あり**: 一次 = ECB 参照レート（無料・訂正されない）、二次 = EODHD `USDJPY.FOREX`（US プランに同梱）。[評価記録](research/phase-2-provider-evaluation.md) §3。**場中 ENTRY 用のレート選択は未決**（ECB は日次1本） |
+| D-03b | 費用/技術 | Object Storage プロバイダ | Phase 2 前 | **調査完了・提案あり**: Cloudflare R2（egress 無料・バケット単位の資格情報）。Versioning が無いため write-once キー運用と Bucket Lock で代替。日本リージョン保証が要るなら S3 ap-northeast-1。[評価記録](research/phase-2-provider-evaluation.md) §4 |
 | D-03c | 費用 | Supabase の Production プラン（D-03a の再評価） | Production 開始前 | — |
 | D-05a | 費用/技術 | Production の Runner・Scheduler | Phase 4・8 前 | 場中とニュース収集は常駐型が必要な見込み |
-| D-06a | 費用 | J-Quants の Production プランと分足・ティックアドオン | Phase 2 前 | v5.1 が前場・後場の四本値を要求するかで判断 |
+| D-06a | 費用 | J-Quants の Production プランと分足・ティックアドオン | Phase 2 前 | **調査完了・提案あり**: EOD のみなら Standard ¥3,300/月（日足10年）。Light ¥1,650 は5年。配当は Premium ¥16,500 限定だが、1-9 により配当は +20% Target に加算しないため Phase 2 では不要。**ダウングレードすると上位プランでしか取れなかったデータの削除義務が生じる**点に注意。[評価記録](research/phase-2-provider-evaluation.md) §1 |
+| **D-76** | **規約** | **J-Quants の利用条件（本人の私的利用に限る／法人不可／学術不可／解約・ダウングレード時の削除義務）を本プロジェクトが恒久的に満たし続けるかの確認** | **Phase 2 の取得開始前（blocker）** | Claude Code は判断しない。現状（個人1名の私的研究、GitHub には**コードのみ**公開、生データは Private）は規約の範囲内に読めるが、閲覧者が増える・法人化する・分析結果を継続反復的に公開する場合は範囲外になる |
+| **D-77** | **技術/投資ロジック** | **US EOD の出来高が分割調整済みであることへの対処**（EODHD は OHLC が raw、Volume のみ split 調整済み）。splits フィードから raw 株数を復元するか、`volume_adjustment_state` を列として持って調整済みのまま扱うか | Phase 2 のスキーマ確定前 | 1-9 は「raw（取引された無調整価格）を保存」と定めており、出来高もその対象と読むのが自然。復元は分割履歴が完全な期間に限られる（EODHD は2018年より前の廃止銘柄の splits を持たない） |
+| **D-78** | **技術** | **EOD 公表時刻が公式に明示されない Provider（EODHD の US EOD、EODHD FX）について、`available_at` をどう決めるか** | Phase 2 の取得実装前 | 自分の取得時刻（`received_at`）を `available_at` とし、Provider の公表時刻を推定値として混ぜない。1-7 の「`source_published_at` を利用可能時刻の代わりにしない」と同じ原則 |
 | **D-06b** | 費用/技術 | **日本株の場中 ENTRY 判断・Watch 監視用リアルタイム Provider** | **Phase 8 までの blocker（Phase 1 の blocker ではない）** | 公式情報のみで候補を調査 |
 | D-08a | 投資ロジック | Stage 2 で取得する分足の期間 | Phase 6 前 | v5.1 を確認してから |
 | D-11 | 費用/技術 | LLM プロバイダ・モデル・月額上限 | Phase 5〜7 前 | — |
