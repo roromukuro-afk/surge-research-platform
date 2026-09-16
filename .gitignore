@@ -36,6 +36,7 @@ venv/
 htmlcov/
 
 # --- research / raw / market data（正本は Private な Supabase / Object Storage） ---
+/.local/
 /data/
 /local-data/
 /exports/

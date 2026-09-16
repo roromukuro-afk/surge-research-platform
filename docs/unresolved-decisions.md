@@ -38,6 +38,8 @@
 | D-28 | 分割・併合・配当 | raw を保存、Outcome は比較可能な系列、配当は Target に加算しない | 2026-09-15 / 監査 0.2 #10 | audit 0.2 #10 |
 | D-29 | 過去急騰高値の役割 | 上昇根拠・Potential Upside への使用は禁止。Resistance / Supply Overhang / Historical obstacle / 高値掴み保有者として保存・評価。**存在するだけで Reachable Zone 上限を機械的・単調に引き下げる DB 制約は設けない**（Supply Overhang の意味は失効・低下しうる） | 2026-09-15 / 監査 0.2 #1 → **0.2 最終 #1 で緩和** | audit 0.2 #1, final #1 |
 | D-30 | v5.1 の管理 | Canonical v5.1（immutable original）と post-v5.1 decisions（versioned addenda）を混ぜない | 2026-09-15 / 監査 0.2 #12、最終 #8 | audit 0.2 #12, final #8 |
+| D-00 | v5.1 Canonical の登録 | **RESOLVED**: `docs/prompts/short-surge-v5.1.original.md`（32,012 バイト、2,275行、LF、SHA-256 `32bf001e…f877a`）を ChatGPT が直接コミットし（`1a4f34e`）、Claude Code が実ファイルから SHA-256 を実測して MANIFEST に登録。post-v5.1 用語の混入がないことを確認（RF-14b） | 2026-09-16 / ユーザー + ChatGPT | audit 2026-09-16 引継ぎ |
+| D-10b（JP 判定ソース） | JP の普通株判定に使うソース | **JPX「東証上場銘柄一覧」（data_j.xlsx）の「市場・商品区分」を採用**（認証不要、市場区分と商品区分が1列）。J-Quants `ProdCat` は不使用。外国株式5件・出資証券2件は引き続き UNRESOLVED | 2026-09-16 / Claude Code（Phase 1 実装） | [universe-definition-v1.0.0.md](specs/universe-definition-v1.0.0.md) |
 
 ---
 
@@ -47,7 +49,7 @@
 
 | ID | 種別 | 論点 | Claude Code の意見 |
 |---|---|---|---|
-| **D-00（登録）** | 前提 | **v5.1 全文の受領と Canonical 登録**（Phase 1 の唯一の開始条件）。2026-09-16 の監査は「直前にユーザーが提示した全文」を Canonical と確定したが、**その本文は Claude Code 側のセッションには渡っていない**（ChatGPT 側の会話に存在すると考えられる）。捜索済み: 本セッションの文脈、全 Claude Code セッション記録（`v5.1` / `3000円以下限定` / `何銘柄を実際に評価できたか` / `織り込み判定` / `マルチスクリーニング` / `3段階ファネル` / `Dynamic Driver Score` / `Bigdata.com`）、Downloads / Documents / Desktop / OneDrive 配下、リポジトリ内。Google Drive コネクタは未認可で検索不可 | 記憶からの再生成・近似復元は禁止されているため作成しない。受領方法は (a) チャットへ全文貼り付け (b) ローカルにファイル保存してパスを伝える（バイト列をそのまま保持できるためこちらが確実）。受領後ただちに `short-surge-v5.1.original.md` へ無加工保存し、SHA-256 を MANIFEST に登録して D-00 を RESOLVED にし、Phase 1 に着手する |
+| ~~D-00（登録）~~ | 前提 | **解決済み（A 表 D-00 参照）**。以下は経緯の記録: v5.1 全文の受領と Canonical 登録（Phase 1 の唯一の開始条件）。2026-09-16 の監査は「直前にユーザーが提示した全文」を Canonical と確定したが、**その本文は Claude Code 側のセッションには渡っていない**（ChatGPT 側の会話に存在すると考えられる）。捜索済み: 本セッションの文脈、全 Claude Code セッション記録（`v5.1` / `3000円以下限定` / `何銘柄を実際に評価できたか` / `織り込み判定` / `マルチスクリーニング` / `3段階ファネル` / `Dynamic Driver Score` / `Bigdata.com`）、Downloads / Documents / Desktop / OneDrive 配下、リポジトリ内。Google Drive コネクタは未認可で検索不可 | 記憶からの再生成・近似復元は禁止されているため作成しない。受領方法は (a) チャットへ全文貼り付け (b) ローカルにファイル保存してパスを伝える（バイト列をそのまま保持できるためこちらが確実）。受領後ただちに `short-surge-v5.1.original.md` へ無加工保存し、SHA-256 を MANIFEST に登録して D-00 を RESOLVED にし、Phase 1 に着手する |
 
 ### B-2. Phase 1 中に決めればよい（pending で開始可）
 

@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install worker dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "workers[dev]"
+      - name: Lint
+        run: ruff check workers scripts
+      - name: Unit tests
+        run: pytest workers -q
+
+  canonical-prompt-hashes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # RF-14a / RF-14b: registered originals must not drift and the canonical
+      # v5.1 must not absorb post-v5.1 decisions.
+      - name: Verify MANIFEST hashes and addenda separation
+        run: python scripts/verify_manifest_hashes.py
+
+  migrations-and-db-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: surge_ci
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: surge_ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install client and test dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          python -m pip install --upgrade pip
+          pip install -e "workers[dev]" psycopg2-binary
+      - name: Apply migrations in order
+        run: |
+          set -euo pipefail
+          for file in $(ls supabase/migrations/*.sql | sort); do
+            echo "applying $file"
+            psql -v ON_ERROR_STOP=1 -f "$file"
+          done
+      - name: Re-apply migrations (idempotency check)
+        run: |
+          set -euo pipefail
+          for file in $(ls supabase/migrations/*.sql | sort); do
+            psql -v ON_ERROR_STOP=1 -f "$file" > /dev/null
+          done
+        continue-on-error: true
+      - name: Database separation tests (RF-15)
+        env:
+          SURGE_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/surge_ci
+        run: pytest workers -q -m integration
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The repository is public: no credentials, raw provider data or research
+      # data may ever land in history.
+      - name: gitleaks
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest \
+            detect --source=/repo --no-banner --redact --exit-code 1

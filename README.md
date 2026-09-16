@@ -15,7 +15,8 @@
 | Phase 0.1 | 監査是正（ストレージ分離、interface 抽象化、Entry/Episode、Universe、ラベル、回帰テスト仕様） | 条件付き合格 |
 | Phase 0.2 | 最終是正（decision / entry 価格、Setup 分離、Horizon・Failure Line、USD Outcome、材料の利用可能時刻、corporate action、パス解決、v5.1 と addenda の分離） | 概ね合格 |
 | Phase 0.2 最終パッチ | PRIOR_SURGE_HIGH の制約緩和、Outcome 二層、見逃し3分類、entry 価格での3,000円再確認、Horizon 表記、v5.1 Canonical の定義 | **完了** |
-| Phase 1〜12 | [docs/development-phases.md](docs/development-phases.md) | 未着手（**開始条件は v5.1 Canonical 登録のみ**。専用 Cloud Supabase 作成済み。Phase 1 終了時に監査） |
+| Phase 1 | Security Master + Universe（migrations / 識別子と履歴 / universe-1.0.0 / provider interface / DB ロール分離 / coverage / prompt hash CI） | **完了・ChatGPT 監査待ち** |
+| Phase 2〜12 | [docs/development-phases.md](docs/development-phases.md) | 未着手（Phase 1 監査通過後） |
 
 ## 共同開発体制
 
@@ -64,14 +65,14 @@
 ## リポジトリ構成（予定）
 
 ```
-apps/web/            Next.js (TypeScript) — 閲覧用 Web UI（軽量処理のみ）
-workers/             Python — ジョブ本体（収集・特徴量・スクリーニング・LLM分析・追跡・学習）
-supabase/migrations/ DB マイグレーション
-config/              スケジュール定義・Provider 割り当て
-docs/                設計・仕様・原文
+workers/             Python — Phase 1: Security Master + Universe のジョブ、Provider、universe 定義、テスト
+supabase/migrations/ DB マイグレーション（スキーマ変更の唯一の正本）
+scripts/             原文ハッシュ検証など
+docs/                設計・仕様・原文・Runbook
+apps/web/            Next.js（Phase 1 では未作成）
 ```
 
-現時点ではドキュメントのみ。コードは監査通過後の Phase 1 から追加する。
+Phase 1 の使い方は [docs/runbooks/phase-1-universe-sync.md](docs/runbooks/phase-1-universe-sync.md)。
 
 ## 注意
 
