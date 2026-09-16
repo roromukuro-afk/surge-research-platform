@@ -1,0 +1,82 @@
+ChatGPT監査・引継ぎ — v5.1 Canonical登録済み / Phase 1開始指示
+
+ユーザーが2026-09-16のChatGPT会話で再提示した「完全版プロンプト v5.1」を、ChatGPT側から本リポジトリへ直接登録した。
+
+Canonical file:
+docs/prompts/short-surge-v5.1.original.md
+
+Canonical追加コミット:
+1a4f34e15a3d7fab2971fceca1480c3a7ce52d49
+
+以後、v5.1を「未受領」「本文が届いていない」と扱ってはいけない。ユーザーへ再提出を要求しないこと。
+
+次にClaude Codeが行うこと：
+
+1. origin/mainをpullし、docs/prompts/short-surge-v5.1.original.mdの存在と内容を確認する。
+2. ファイルを変更・整形・正規化・誤字修正しない。
+3. ローカルの実ファイルからSHA-256とバイト数を計算する。
+4. docs/prompts/MANIFEST.mdのv5.1行を、実測したSHA-256・バイト数・受領日2026-09-16・由来「ユーザーがChatGPT会話で再提示したCanonical本文をChatGPTがGitHubへ直接登録」に更新する。
+5. D-00をRESOLVEDへ変更する。「未受領」「登録待ち」の記述が残っていないか検索して整合させる。
+6. RF-14aのCanonical prompt hash検証をPhase 1で実装する。
+7. Canonical v5.1本体にはpost-v5.1の仕様変更を混ぜない。後続仕様は既存addenda・最新監査を優先して適用する。
+8. 上記確認後、Phase 1: Security Master + Universeへ着手する。
+
+Phase 1では以下のみを実装する：
+- versioned Supabase migrations
+- Security Master
+- issuer / security / listing / exchange identity
+- symbol/ticker history
+- aliases / provider identifiers
+- listing status / delisted retention
+- JP / US Universe construction
+- universe-1.0.0
+- Universe coverage / unresolved / exclusion reasons
+- provider interfaceのPhase 1最小実装
+- data provenance / as-of validity
+- DB role / access separation
+- prompt hash CI
+- RF-12 / RF-14a / RF-14b / RF-15
+
+まだ実装しない：
+- 3000円価格スクリーニング本体
+- OHLCV大量取得
+- Stage 1 Routes A〜H
+- Technical Feature Engine
+- News Collector
+- Material Event / Entity Linking本体
+- LLM分析
+- ENTRY / WATCH Prediction Engine
+- Outcome Tracking
+- ML / Weight Learning
+- Web Dashboard本体
+
+重要な現行仕様：
+- 既存jp_surge_radar等を参照・コピー・流用しない。
+- 正式Predictionは現在価格からENTRY可能と再分析された場合のみ。WatchはPredictionではない。
+- 3000円Hard Filterはdecision_priceとentry_reference_price双方で確認する。
+- NewsとIRに予測上の固定序列を置かない。
+- 過去急騰高値をPotential Upsideにしない。Resistance / Supply Overhangとしては利用する。
+- 教師データは単純な20日以内+20%二値にしない。突発急騰を自動False Negativeにしない。
+- LLMだけでなくCandidate Generation / Screening / Interpretation / Entry / State Transition / Weight / Pipelineまで学習対象とする。
+- ProductionとResearchを分離し、as-of / available_to_model_atによる先読み防止を守る。
+
+Phase 1完了後はPhase 2へ進まず停止し、以下を報告する：
+
+Completed
+Files changed
+Migrations
+Tests
+Canonical v5.1（path / SHA-256 / MANIFEST / addenda分離）
+JP Universe coverage
+US Universe coverage
+Security Master statistics
+Provider / Source provenance
+Data quality findings
+Security / RLS review
+Known limitations
+Decisions made
+Decisions needed
+Risks
+Next proposed phase
+
+その後、ChatGPTがGitHub上のmigration・schema・tests・coverageを実装ベースで監査する。
