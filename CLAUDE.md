@@ -10,7 +10,7 @@ Claude Code はこのプロジェクトの**主任開発エージェント**で�
 | 1 | 最新の ChatGPT 監査原文 — [Phase 1 開始条件（2026-09-16）](docs/requirements/audit-2026-09-16-phase-1-start-conditions.original.txt) > [Phase 0.2 最終パッチ](docs/requirements/audit-2026-09-15-phase-0.2-final-patch.original.txt) > [Phase 0.2](docs/requirements/audit-2026-09-15-phase-0.2.original.txt) > [Phase 0.1](docs/requirements/audit-2026-09-15-phase-0.1.original.txt) |
 | 2 | 実装指示書 v1.0 原文 — [docs/requirements/implementation-instructions-v1.0.original.txt](docs/requirements/implementation-instructions-v1.0.original.txt) |
 | 3 | v5.1 原文 — `docs/prompts/short-surge-v5.1.original.md`（**未受領。会話内でユーザーが確定させた全文を受領後に登録**） |
-| 詳細仕様 | [docs/specs/](docs/specs/)（lifecycle / universe / teacher-labels / regression-fixtures） |
+| 詳細仕様 | [docs/specs/](docs/specs/)（lifecycle / universe / security-identity / teacher-labels / regression-fixtures） |
 
 `*.formatted.md` は閲覧用の整形版であり、原文として扱わない。
 
@@ -69,6 +69,14 @@ Claude Code はこのプロジェクトの**主任開発エージェント**で�
 
 ### 1-10. Universe 定義は版管理
 - 現行は `universe-1.0.0`。変更は新しい版のファイルで行う。種別を判定できない銘柄を黙って含めない。
+
+### 1-10b. 銘柄の同一性と履歴
+- **Ticker は同一性ではない。** 正規化した名称も同一性ではない。同一性は公的レジストリの識別子（US = SEC CIK、JP = EDINET コード、Security の JP = JPX ローカルコード）から作る。
+- 作れないときは `PROVISIONAL` として明示し、黙って推測しない。`STRONG` キーの衝突は統合せず両方を降格し、run 警告に残す。
+- Ticker・名称・識別子・上場区分/状態は SCD2 で持つ。変化したときだけ履歴行を開き、無変化の再観測は `last_confirmed_at` を進める。履歴を上書き・削除しない。
+- 過去時点の姿は `ref.listings_as_of()` と同じ規則（`available_at <= cutoff`）でのみ読む。
+- 同一性を変える再構築は [docs/specs/security-identity.md](docs/specs/security-identity.md) §4 の手順に従い、旧 → 新 ID を必ず残す。
+- **`UNRESOLVED` は「除外」ではない。** 下流の価格・FX 取得対象は `INCLUDED` ∪ `UNRESOLVED`。ENTRY 候補にはしない。
 
 ### 1-11. 過去高値
 - **過去の急騰高値まで戻ることを上昇根拠・Potential Upside にしない。**
@@ -153,6 +161,8 @@ Phase 完了報告（指示書 §49）:
 - **`supabase/migrations/` が DB 設計の唯一の正本。** Dashboard の手作業を正本にしない。Cloud に適用した DDL と Git 上の migration を一致させる。
 - ローカル Supabase（Docker）は migration 検証・integration test・オフライン開発の補助であり、Phase の blocker にしない。
 - 接続情報は Supabase CLI・ローカル環境変数・GitHub Secrets に置く。hard-code・commit・チャット出力・service role key のログ出力を禁止。
+- **DB から外部を取得する経路は、短命な署名 URL + host allowlist + https に限る。** DB に raw API key を渡さない。DB から任意 host へ Authorization ヘッダを送らない。
+- **Production の worker は専用の最小権限 LOGIN role で接続する**（DB owner で接続しない）。パスワードは DB 内で生成し Vault に保管する。
 - **このリポジトリは Public。** 公開してよいのはコード・設計文書・Prompt・Schema・Test 等のみ。
 - **絶対に commit しない**: API key / secret / token、`.env` / `.env.local` 等、Supabase service role key、Provider の認証情報、利用規約上再配布できない Raw ニュース等のデータ、Raw market data の大量ダンプ、Production DB dump、Object Storage 内の研究データ、Prediction の実データ、その他の認証情報。
 - 研究データ・Prediction 実データ・Raw 取得データは Private な Supabase / Object Storage 側にのみ保持する。テスト fixture は合成データのみ。

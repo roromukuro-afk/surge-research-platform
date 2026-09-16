@@ -64,6 +64,18 @@
 | pre-merger SPAC | SEC EDGAR submissions の SIC コード | SEC 公式 SIC 表で **6770 = BLANK CHECKS** を確認 |
 | REIT | SEC SIC コード | SEC 公式 SIC 表で **6798 = REAL ESTATE INVESTMENT TRUSTS** を確認。ただし SIC だけで全 REIT を網羅できるかは未確認（D-10c） |
 
+### 実装ノート（Phase 1.1、2026-09-16）— Depositary 系の判別
+
+「Depositary Shares」という語は **ADR（原株が外国株）** と **優先株の分割受益証券（Depositary Shares Each Representing a 1/1,000th Interest in a Share of … Preferred Stock）** の両方で使われる。Phase 1 の実装は後者を優先株として正しく除外する一方で、**Global Depositary Shares / Depositary Receipt / NY Registry Shares** を PREFERRED に寄せていた。
+
+Phase 1.1 で判別順を次のとおり明文化した（定義の変更ではなく、定義どおりに判別するための修正）。
+
+1. 名称が優先株を明示している（`preferred` を含む、または「… represent … Preferred Stock」）→ `PREFERRED`
+2. ADR / ADS / Global Depositary / Depositary Receipt / NY Registry → ADR として扱い、適格性は D-10a のため `UNRESOLVED` `ADR_ELIGIBILITY_UNDEFINED`
+3. Depositary とだけあり原資産が読み取れない → `UNKNOWN`（`TYPE_UNKNOWN` で `UNRESOLVED`。黙って除外しない）
+
+2026-09-16 実測の影響: 16 件が `EXCLUDED`（PREFERRED）から `UNRESOLVED` へ移動（`ADR_ELIGIBILITY_UNDEFINED` +1、`TYPE_UNKNOWN` +15）。`INCLUDED` は 4,877 のまま変わらない。
+
 ### 未決
 - D-10a: 適格 ADR の定義
 - D-10c: REIT の判定方法（SIC 6798 以外の REIT の拾い方）
@@ -85,3 +97,12 @@
 除外理由コード（案）: `NOT_TARGET_MARKET` / `NOT_COMMON_STOCK` / `ETF` / `REIT` / `PREFERRED` / `WARRANT` / `UNIT` / `RIGHT` / `OTC` / `SPAC_PRE_MERGER` / `TOKYO_PRO` / `TEST_ISSUE` / `DELISTED` / `TYPE_UNKNOWN` / `PRICE_ABOVE_3000` / `PRICE_MISSING` / `FX_MISSING`
 
 `TYPE_UNKNOWN`（種別が判定できない）は黙って含めず、件数をカバレッジに記録する。
+
+## 5. 下流工程での扱い（Phase 2 以降）
+
+`UNRESOLVED` は「除外」ではない。**価格・FX の取得対象は `INCLUDED` ∪ `UNRESOLVED`** とし、`UNRESOLVED` を取得対象から黙って落とさない。
+
+- 判定が付いてから価格を取り始めると、判定が付いた日より前の価格が欠落し、後追いで Prediction も Replay もできなくなる。
+- `UNRESOLVED` の銘柄は **ENTRY 候補にはしない**（Universe に含まれていないため）。取得だけ行い、判定が `INCLUDED` に変わった時点で候補に上がる。
+- 取得対象の件数・内訳（`INCLUDED` / `UNRESOLVED`）は run ごとにカバレッジへ記録する。
+- `EXCLUDED` は取得対象外。ただし理由コード別の件数はカバレッジに残す。

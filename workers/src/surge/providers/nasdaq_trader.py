@@ -30,10 +30,17 @@ EXCHANGE_MAP = {
 _ADR_PATTERNS = (
     "american depositary",
     "american depository",
+    "global depositary",
+    "global depository",
     "depositary receipt",
     "depository receipt",
     "new york registry shares",
 )
+
+# A depositary security over common/ordinary shares is a depositary receipt, not
+# a preferred share. Only the wording decides which one it is.
+_DEPOSITARY_OVER_COMMON = re.compile(r"represent\w*\s+[^.]*\b(common|ordinary)\b")
+_DEPOSITARY_TOKEN = re.compile(r"\bdeposit[ao]ry\b")
 
 # "ADS" / "ADR" as standalone tokens. The lookarounds keep company names such as
 # "ADS-TEC Energy" from being read as depositary receipts.
@@ -80,14 +87,16 @@ def classify_security_name(name: str, *, etf_flag: str | None) -> tuple[str, boo
         return "RIGHT", is_adr, evidence
     if re.search(r"\bunits?\b", lowered):
         return "UNIT", is_adr, evidence
-    # Preferred is checked before ADR so that a preferred ADS is classified as
-    # preferred, but "American Depositary Shares" on its own stays an ADR.
+    # Preferred is checked before the depositary rules so that a preferred ADS or
+    # a depositary share over preferred stock is classified as preferred.
     if "preferred" in lowered or re.search(r"\bpfd\b", lowered):
         return "PREFERRED", is_adr, evidence
-    if is_adr:
+    if is_adr or _DEPOSITARY_OVER_COMMON.search(lowered):
         return "ADR", True, evidence
-    if "depositary shares" in lowered:
-        return "PREFERRED", is_adr, evidence
+    if _DEPOSITARY_TOKEN.search(lowered):
+        # A depositary security whose underlying is not stated: do not guess.
+        evidence["depositary_underlying"] = "unstated"
+        return "UNKNOWN", is_adr, evidence
     if "exchange traded note" in lowered or re.search(r"\betns?\b", lowered):
         return "ETN", is_adr, evidence
     if any(token in lowered for token in ("notes due", "debenture", "subordinated note", "senior note")):

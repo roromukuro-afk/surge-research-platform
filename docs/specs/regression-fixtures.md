@@ -9,6 +9,8 @@
 - 価格の数値は、特記がなければ comparable path（[lifecycle §8](entry-and-episode-lifecycle.md)）で表す。
 - `entry_price_method`（D-01a）が未確定の間は、`entry_reference_price` を fixture の入力値として与える。
 
+Security Master の同一性・履歴・as-of・権限にかかわる fixture（Phase 1.1 監査の A〜G・I）は、投資ロジックの回帰とは別系統として [security-identity.md](security-identity.md) §5 に一覧があり、`workers/tests/test_identity_resolution.py` と `workers/tests/test_db_master_semantics.py` で実装済み。
+
 ## 一覧
 
 | ID | 内容 | 由来 | 実行可能 Phase | v0.2 での変更 |

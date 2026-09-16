@@ -40,6 +40,12 @@
 | D-30 | v5.1 の管理 | Canonical v5.1（immutable original）と post-v5.1 decisions（versioned addenda）を混ぜない | 2026-09-15 / 監査 0.2 #12、最終 #8 | audit 0.2 #12, final #8 |
 | D-00 | v5.1 Canonical の登録 | **RESOLVED**: `docs/prompts/short-surge-v5.1.original.md`（32,012 バイト、2,275行、LF、SHA-256 `32bf001e…f877a`）を ChatGPT が直接コミットし（`1a4f34e`）、Claude Code が実ファイルから SHA-256 を実測して MANIFEST に登録。post-v5.1 用語の混入がないことを確認（RF-14b） | 2026-09-16 / ユーザー + ChatGPT | audit 2026-09-16 引継ぎ |
 | D-10b（JP 判定ソース） | JP の普通株判定に使うソース | **JPX「東証上場銘柄一覧」（data_j.xlsx）の「市場・商品区分」を採用**（認証不要、市場区分と商品区分が1列）。J-Quants `ProdCat` は不使用。外国株式5件・出資証券2件は引き続き UNRESOLVED | 2026-09-16 / Claude Code（Phase 1 実装） | [universe-definition-v1.0.0.md](specs/universe-definition-v1.0.0.md) |
+| D-34 | Security / Issuer の同一性 | **公的レジストリ由来のキーのみを同一性とする**（US = SEC CIK、JP = EDINET コード、Security の JP = JPX ローカルコード）。Ticker と正規化名称は同一性にしない。作れないときは `PROVISIONAL` と明示。`STRONG` キーの衝突は統合せず両方を降格し、run 警告に残す | 2026-09-16 / 監査 Phase 1.1 #1〜#3 | [security-identity.md](specs/security-identity.md) |
+| D-35 | 属性変更の履歴 | Ticker・名称・識別子・上場区分/状態は **SCD2**（変化時のみ open 行を閉じて新規行、無変化は `last_confirmed_at` のみ前進、open 行は常に1行）。as-of 読み出しは `ref.listing_states` 経由 | 2026-09-16 / 監査 Phase 1.1 #4・#5 | 同上 |
+| D-36 | Object Storage からの一括読み込み | **短命な署名 URL のみ**受け付ける。https 必須、host allowlist 必須、DB へ raw API key を渡さない・DB は Authorization ヘッダを送らない。allowlist は環境設定であり migration では seed しない | 2026-09-16 / 監査 Phase 1.1 #6 | [phase-1-universe-sync.md](runbooks/phase-1-universe-sync.md) |
+| D-37 | Production worker の DB principal | 専用の LOGIN role `surge_worker_prod_app`（`surge_worker_prod` のメンバー）で接続する。パスワードは DB 内で生成し Supabase Vault に保管、チャット・ログ・Git に出さない。履歴テーブルへの DELETE と research スキーマへのアクセスを持たない | 2026-09-16 / 監査 Phase 1.1 #7 | 同上 |
+| D-38 | 下流工程の取得対象 | **価格・FX の取得対象は `INCLUDED` ∪ `UNRESOLVED`。** `UNRESOLVED` を黙って落とさない（落とすと判定確定前の価格が欠落して後追い評価ができない）。ただし `UNRESOLVED` は ENTRY 候補にしない | 2026-09-16 / 監査 Phase 1.1 #12 | [universe-definition-v1.0.0.md](specs/universe-definition-v1.0.0.md) §5 |
+| D-39 | 同一性を変える再構築の手順 | 旧 ID を `ref.identity_migration_map` に記録 → master/判定/coverage/staging を削除（`pipeline.runs`・`source_fetches` は保持）→ 公式ソースから再取得 → 新旧 ID 対応を埋める。手順は versioned migration と worker code に残す | 2026-09-16 / 監査 Phase 1.1 #10 | [security-identity.md](specs/security-identity.md) §4 |
 
 ---
 
@@ -69,6 +75,10 @@
 | ID | 種別 | 論点 | 必要な時期 | Claude Code の意見 |
 |---|---|---|---|---|
 | D-01a | 投資ロジック | `entry_price_method` | Phase 8 前 | 場中 Provider の能力を確認してから |
+| D-40 | 技術 | US の `PROVISIONAL` 証券 6,328 件（SEC `company_tickers_exchange.json` に CIK がない ETF・ワラント等）を、別の公式ソースで STRONG 化するか、PROVISIONAL のまま運用するか | Phase 2 前（`INCLUDED` に PROVISIONAL は 0 件のため blocker ではない） | ほぼ ETF・ユニット・ワラントで、`INCLUDED` には入らない。Phase 2 で `INCLUDED` ∪ `UNRESOLVED` を追跡する範囲では影響が小さい |
+| D-41 | 技術 | JP の `PROVISIONAL` 発行体 732 件（EDINET コード一覧に載らない ETF・REIT・出資証券等）の扱い | Phase 2 前 | 発行体の統合が必要になるのは主に普通株。EDINET 未突合は UNRESOLVED/EXCLUDED 側に偏っている |
+| D-42 | 投資ロジック/技術 | 同一 CIK に複数の証券がぶら下がる 640 CIK（クラス株・優先株・ワラント等）のうち、どこまでを「同一発行体の別クラス」として扱い、どこからを別発行体とみなすか | Phase 3 前 | 現状は CIK = 発行体、クラスは証券側で分離。例外（合併・持株会社化で CIK が変わる場合）の扱いは未定 |
+| D-43 | 技術 | US の identity collision 240 件（同一 CIK・同一種別・同一クラスに複数銘柄）を、どの追加属性で分離するか | Phase 3 前 | 現状は両方を PROVISIONAL に降格して警告に残す。大半は ETF 系 |
 | D-01b | 投資ロジック | 「次の取引可能時点」の定義 | Phase 8 前 | 判断しない |
 | D-02a | 技術/投資ロジック | FX の Provider と許容遅延 | Phase 2 前 | — |
 | D-03b | 費用/技術 | Object Storage プロバイダ | Phase 2 前 | Phase 1 はローカル実装 |

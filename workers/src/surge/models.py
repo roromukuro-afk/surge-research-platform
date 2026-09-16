@@ -66,6 +66,8 @@ class RawSecurityRecord:
     is_test_issue: bool = False
     listing_status: str = "LISTED"
     cik: str | None = None
+    edinet_code: str | None = None
+    corporate_number: str | None = None
     type_evidence: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

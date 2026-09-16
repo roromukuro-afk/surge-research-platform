@@ -53,10 +53,10 @@ def test_normalize_name_does_not_merge_different_issuers():
     assert normalize_name("Alpha Holdings") != normalize_name("Beta Holdings")
 
 
-def test_duplicate_provider_records_are_counted(monkeypatch):
+def test_duplicate_provider_records_are_counted():
     from datetime import UTC, datetime
 
-    from surge.jobs.universe_sync import SyncResult
+    from surge.jobs.universe_sync import SyncResult, resolve_identities
     from surge.models import Provenance, RawSecurityRecord, UniverseDecision
 
     now = datetime.now(UTC)
@@ -86,6 +86,7 @@ def test_duplicate_provider_records_are_counted(monkeypatch):
         cik="1",
     )
     second = RawSecurityRecord(**{**duplicate.__dict__, "source_record_id": "dup-2"})
+    issuers, securities, _ = resolve_identities([duplicate, second])
     result = SyncResult(
         run_id=deterministic_uuid("run|test"),
         market_code="US",
@@ -95,6 +96,8 @@ def test_duplicate_provider_records_are_counted(monkeypatch):
         decisions=[UniverseDecision("INCLUDED", "TARGET_MARKET_COMMON_STOCK")] * 2,
         provenances=[provenance],
         errors=[],
+        issuer_identities=issuers,
+        security_identities=securities,
     )
 
     assert result.duplicate_count == 1

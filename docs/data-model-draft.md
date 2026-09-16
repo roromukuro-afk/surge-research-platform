@@ -18,6 +18,8 @@
 
 ## 1. Postgres
 
+本ファイルは設計ドラフトであり、**実装済みスキーマの正本は `supabase/migrations/`**。Phase 1 / 1.1 で実装した `ref`（`issuers` / `securities` / `listings` / `listing_states` / `listing_symbols` / `security_names` / `security_identifiers` / `identity_migration_map`）の同一性キー・SCD2・as-of の規則は [specs/security-identity.md](specs/security-identity.md) を参照する。以下の `securities` 行のような「local_code/ticker を銘柄の identity として持つ」書き方は、Phase 1.1 で否定された（Ticker は属性）。
+
 ### ref
 | テーブル | 主な列 |
 |---|---|

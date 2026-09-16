@@ -1,9 +1,12 @@
 """Security master + universe synchronisation for one market.
 
-The job is deliberately boring: fetch official snapshots, normalise them,
-classify each record against a versioned universe definition, and emit the SQL
-that loads the snapshot. Every output carries the run id, the source content
-hash and the times the data was observed and became usable.
+The job fetches official snapshots, resolves issuer and security identity from
+stable registry identifiers, classifies every record against a versioned
+universe definition, and emits the snapshot for bulk loading. Every output
+carries the run id, the source content hash and the times the data was observed
+and became usable.
+
+Identity is never derived from a ticker: see surge.identity.
 """
 
 from __future__ import annotations
@@ -12,15 +15,17 @@ import hashlib
 import json
 import uuid
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 from surge import JOB_VERSION
 from surge.config import Settings, load_settings
+from surge.identity import Identity, demote_colliding_identities, issuer_identity, security_identity
 from surge.models import FetchResult, Provenance, RawSecurityRecord, UniverseDecision
 from surge.normalize import normalize_name
+from surge.providers.edinet import EdinetCodeList, jpx_code_to_securities_code
 from surge.providers.jpx_listed import JpxListedIssuesProvider
 from surge.providers.nasdaq_trader import NasdaqTraderProvider
 from surge.providers.sec_edgar import SIC_BLANK_CHECK, SIC_REIT, SecCompanyTickers, SecSicDirectory
@@ -40,6 +45,8 @@ class SyncResult:
     decisions: list[UniverseDecision]
     provenances: list[Provenance]
     errors: list[str]
+    issuer_identities: list[Identity] = field(default_factory=list)
+    security_identities: list[Identity] = field(default_factory=list)
     expected_population: dict[str, int] = field(default_factory=dict)
     notes: dict[str, Any] = field(default_factory=dict)
 
@@ -52,6 +59,14 @@ class SyncResult:
         return dict(Counter(decision.reason_code for decision in self.decisions))
 
     @property
+    def identity_counts(self) -> dict[str, int]:
+        return dict(Counter(identity.source for identity in self.security_identities))
+
+    @property
+    def issuer_identity_counts(self) -> dict[str, int]:
+        return dict(Counter(identity.source for identity in self.issuer_identities))
+
+    @property
     def duplicate_count(self) -> int:
         keys = [(record.exchange_id, record.local_code) for record in self.records]
         return len(keys) - len(set(keys))
@@ -62,6 +77,39 @@ def _sources_data_version(provenances: list[Provenance]) -> str:
 
     parts = "|".join(f"{p.source_id}:{p.content_sha256}" for p in provenances if p.content_sha256)
     return hashlib.sha256(parts.encode()).hexdigest()[:24] if parts else "unversioned"
+
+
+def resolve_identities(records: list[RawSecurityRecord]) -> tuple[list[Identity], list[Identity], list[str]]:
+    """Issuer and security identity for each record, with collision fallback."""
+
+    issuers = [
+        issuer_identity(
+            market_code=record.market_code,
+            normalized_name=normalize_name(record.name),
+            cik=record.cik,
+            edinet_code=record.edinet_code,
+        )
+        for record in records
+    ]
+    securities = [
+        security_identity(
+            market_code=record.market_code,
+            exchange_id=record.exchange_id,
+            local_code=record.local_code,
+            symbol=record.symbol,
+            name=record.name,
+            security_type=record.security_type,
+            cik=record.cik,
+        )
+        for record in records
+    ]
+    securities, notes = demote_colliding_identities(
+        securities,
+        exchange_ids=[record.exchange_id for record in records],
+        symbols=[record.symbol for record in records],
+        local_codes=[record.local_code for record in records],
+    )
+    return issuers, securities, notes
 
 
 def run_universe_sync(
@@ -83,6 +131,26 @@ def run_universe_sync(
         records = list(fetched.records)
         provenances.append(fetched.provenance)
         errors.extend(fetched.errors)
+
+        edinet_map, edinet_provenance = EdinetCodeList(user_agent=settings.user_agent).fetch_map()
+        provenances.append(edinet_provenance)
+        matched = 0
+        enriched: list[RawSecurityRecord] = []
+        for record in records:
+            issuer = edinet_map.get(jpx_code_to_securities_code(record.local_code))
+            if issuer is None:
+                enriched.append(record)
+                continue
+            matched += 1
+            enriched.append(
+                replace(record, edinet_code=issuer.edinet_code, corporate_number=issuer.corporate_number)
+            )
+        records = enriched
+        notes["edinet"] = {
+            "code_list_size": len(edinet_map),
+            "matched": matched,
+            "unmatched": len(records) - matched,
+        }
         context = UniverseContext()
         expected = {f"MARKET:{market_code}": fetched.provenance.item_count}
 
@@ -94,23 +162,23 @@ def run_universe_sync(
 
         cik_map, cik_provenance = SecCompanyTickers(user_agent=settings.user_agent).fetch_map()
         provenances.append(cik_provenance)
-
         records = [
-            record
-            if record.symbol is None or record.symbol not in cik_map
-            else _with_cik(record, cik_map[record.symbol].cik)
+            replace(record, cik=cik_map[record.symbol].cik)
+            if record.symbol and record.symbol in cik_map
+            else record
             for record in records
         ]
+        notes["cik"] = {
+            "map_size": len(cik_map),
+            "matched": sum(1 for record in records if record.cik),
+            "unmatched": sum(1 for record in records if not record.cik),
+        }
 
         sic_directory = SecSicDirectory(user_agent=settings.user_agent)
         spac = sic_directory.fetch_membership(SIC_BLANK_CHECK, max_pages=sic_max_pages)
         reit = sic_directory.fetch_membership(SIC_REIT, max_pages=sic_max_pages)
         provenances.extend([spac.provenance, reit.provenance])
-        notes["sic_blank_check"] = {
-            "ciks": len(spac.ciks),
-            "pages": spac.pages_fetched,
-            "truncated": spac.truncated,
-        }
+        notes["sic_blank_check"] = {"ciks": len(spac.ciks), "pages": spac.pages_fetched, "truncated": spac.truncated}
         notes["sic_reit"] = {"ciks": len(reit.ciks), "pages": reit.pages_fetched, "truncated": reit.truncated}
         if spac.truncated or reit.truncated:
             errors.append("SEC SIC listing truncated at max_pages; SPAC/REIT detection may be incomplete")
@@ -121,7 +189,15 @@ def run_universe_sync(
     else:
         raise ValueError(f"unsupported market: {market_code}")
 
+    issuer_ids, security_ids, identity_notes = resolve_identities(records)
+    errors.extend(identity_notes)
     decisions = [classify(record, context) for record in records]
+
+    notes["identity"] = {
+        "security": dict(Counter(identity.source for identity in security_ids)),
+        "issuer": dict(Counter(identity.source for identity in issuer_ids)),
+        "collisions": len(identity_notes),
+    }
 
     return SyncResult(
         run_id=run_id,
@@ -132,30 +208,10 @@ def run_universe_sync(
         decisions=decisions,
         provenances=provenances,
         errors=errors,
+        issuer_identities=issuer_ids,
+        security_identities=security_ids,
         expected_population=expected,
         notes=notes,
-    )
-
-
-def _with_cik(record: RawSecurityRecord, cik: str) -> RawSecurityRecord:
-    return RawSecurityRecord(
-        source_id=record.source_id,
-        source_record_id=record.source_record_id,
-        market_code=record.market_code,
-        exchange_id=record.exchange_id,
-        local_code=record.local_code,
-        name=record.name,
-        security_type=record.security_type,
-        symbol=record.symbol,
-        market_segment_code=record.market_segment_code,
-        market_segment_name=record.market_segment_name,
-        currency=record.currency,
-        country=record.country,
-        is_adr=record.is_adr,
-        is_test_issue=record.is_test_issue,
-        listing_status=record.listing_status,
-        cik=cik,
-        type_evidence=record.type_evidence,
     )
 
 
@@ -173,7 +229,9 @@ def snapshot_rows(result: SyncResult) -> list[list[Any]]:
     version = _sources_data_version(result.provenances)
     primary = result.provenances[0]
     rows: list[list[Any]] = []
-    for record, decision in zip(result.records, result.decisions, strict=True):
+    for record, decision, issuer, security in zip(
+        result.records, result.decisions, result.issuer_identities, result.security_identities, strict=True
+    ):
         rows.append(
             [
                 str(result.run_id),
@@ -195,6 +253,14 @@ def snapshot_rows(result: SyncResult) -> list[list[Any]]:
                 _spac_flag(record, decision),
                 record.listing_status,
                 record.cik,
+                record.edinet_code,
+                record.corporate_number,
+                issuer.source,
+                issuer.key,
+                issuer.confidence,
+                security.source,
+                security.key,
+                security.confidence,
                 Json(record.type_evidence),
                 decision.decision,
                 decision.reason_code,
@@ -210,7 +276,7 @@ def snapshot_rows(result: SyncResult) -> list[list[Any]]:
 
 
 def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | None = None) -> list[Path]:
-    """Write run, provenance, snapshot and apply statements as .sql files."""
+    """Write run, provenance, snapshot and apply statements."""
 
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
@@ -314,8 +380,8 @@ def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | Non
         [
             "-- Load the snapshot first, for example:",
             (
-                "--   select pipeline.load_master_snapshot_from_url("
-                f"{quote(str(result.run_id))}::uuid, '<object storage url>', '<publishable key>');"
+                "--   select pipeline.load_master_snapshot_from_signed_url("
+                f"{quote(str(result.run_id))}::uuid, '<signed object storage url>');"
             ),
             f"select ref.apply_master_snapshot({quote(str(result.run_id))}::uuid) as master_result;",
             (
@@ -349,6 +415,8 @@ def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | Non
         "duplicate_count": result.duplicate_count,
         "decisions": result.decision_counts,
         "reasons": result.reason_counts,
+        "security_identity_sources": result.identity_counts,
+        "issuer_identity_sources": result.issuer_identity_counts,
         "provider_errors": len(result.errors),
         "sources": [
             {
