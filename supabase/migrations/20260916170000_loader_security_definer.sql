@@ -95,8 +95,10 @@ begin
   -- ------------------------------------- 2. nobody else reaches the http client
   execute 'revoke all on schema extensions from surge_worker_prod, surge_worker_prod_app, surge_worker_research, surge_readonly';
 
-  -- PUBLIC keeps no EXECUTE on the HTTP client functions; the definer (the
-  -- migration owner) still has it as the function's owner.
+  -- Best effort: on a managed platform these functions are owned by another
+  -- role, which makes this REVOKE a silent no-op (see 20260916170700). Schema
+  -- USAGE above is the control that actually holds, and
+  -- pipeline.assert_http_boundary() checks it.
   declare
     fn record;
   begin

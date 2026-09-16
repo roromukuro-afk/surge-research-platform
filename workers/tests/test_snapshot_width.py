@@ -18,11 +18,14 @@ LOADER = "load_master_snapshot_from_signed_url"
 WIDTH_GUARD = re.compile(r"array_length\(f, 1\) = (\d+)")
 
 
+DEFINITION = f"create or replace function pipeline.{LOADER}"
+
+
 def _current_loader_sql() -> tuple[Path, str]:
-    """The most recent migration that defines the signed-URL loader."""
+    """The most recent migration that DEFINES the loader, not one that mentions it."""
 
     candidates = sorted(
-        path for path in MIGRATIONS.glob("*.sql") if LOADER in path.read_text(encoding="utf-8")
+        path for path in MIGRATIONS.glob("*.sql") if DEFINITION in path.read_text(encoding="utf-8")
     )
     assert candidates, "no migration defines the signed URL loader"
     latest = candidates[-1]

@@ -298,6 +298,22 @@ def test_worker_cannot_make_http_requests_directly():
         worker.close()
 
 
+def test_the_http_boundary_assertion_holds(conn):
+    """No runtime role may reach schema extensions, whoever owns the functions.
+
+    EXECUTE on extensions.http* is granted to PUBLIC by the platform and cannot
+    be revoked by this project's role, so the boundary is schema USAGE. This
+    asserts the property rather than the grant.
+    """
+
+    with conn.cursor() as cur:
+        cur.execute("select pipeline.assert_http_boundary()")
+        result = cur.fetchone()[0]
+        assert result["ok"] is True
+        if result.get("extensions_schema"):
+            assert result["runtime_roles_with_usage"] == []
+
+
 @pytest.mark.skipif(not WORKER_DSN, reason="SURGE_TEST_WORKER_DSN is not set")
 def test_worker_still_reaches_the_loader_through_the_allowlist():
     """Closing the direct path must not close the legitimate one."""
