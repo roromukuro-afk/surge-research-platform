@@ -55,6 +55,15 @@
 | D-50 | Coverage の診断内訳 | `provider_error_count` / `data_quality_warning_count` / `identity_collision_record_count` / `identity_collision_key_count` に分離。run_errors の全行がいずれか1つに入る | 2026-09-16 / 監査 Phase 1.1a #7 | [phase-1-universe-sync.md](runbooks/phase-1-universe-sync.md) |
 | D-51 | `ref.listing_status_history` | Phase 1.1a で廃止（空・後継は `ref.listing_states`）。行が存在する環境では DROP せず DEPRECATED を明示する | 2026-09-16 / 監査 Phase 1.1a #8 | `20260916160500` |
 | D-52 | Phase 2 の Raw Market Data キー | `security_id` を唯一の復元キーにしない。`provider_id` / native symbol / exchange / `observed_at` / source record id（provider security id）/ `identity_version` を必ず保存する | 2026-09-16 / 監査 Phase 1.1a #6 | [security-identity.md](specs/security-identity.md) §6 |
+| D-53 | 権威ある Universe run | **publication が決める**。`pipeline.run_publications` に載った run だけが authoritative で、`pipeline.validate_run` を通らないものは publish できない。読み出しは `universe.authoritative_run_at(market, version, knowledge_cutoff)` / `universe.eligibility_as_of(...)` / `universe.current_eligibility`。`published_at <= cutoff` で絞るため、後から再構築した run は過去の Replay に逆流しない | 2026-09-16 / 監査 Phase 1.1b #4 | [security-identity.md](specs/security-identity.md) §5 |
+| D-54 | DB からの HTTP 実行権限 | loader を **SECURITY DEFINER** にし、runtime role から `extensions` スキーマの USAGE と `extensions.http*` の EXECUTE を剥奪する。HTTP を出す権限は「allowlist を検査する関数」に属し、ロールには属さない | 2026-09-16 / 監査 Phase 1.1b #1 | `20260916170000` |
+| D-55 | 新規 function の既定権限 | project schema では PUBLIC EXECUTE を残さない。default privileges（正の grant を作ってから revoke）+ event trigger + テスト不変条件の3段で担保する。素の `alter default privileges ... revoke ... from public` だけでは entry が作られず効かないことを実測 | 2026-09-16 / 監査 Phase 1.1b #2 | `20260916170400` |
+| D-56 | JP の普通株判定 | 市場区分は「どこで売買されるか」であって種別ではない。優先株式 → `PREFERRED`、種類株式（社債型含む）→ `NOT_COMMON_STOCK`、優先出資証券 → UNRESOLVED、判定不能の特殊コード → `TYPE_UNKNOWN`。**普通株と推測しない**。universe-1.0.0 の意味変更ではなく実装の bug fix | 2026-09-16 / 監査 Phase 1.1b #3 | [universe-definition-v1.0.0.md](specs/universe-definition-v1.0.0.md) |
+| D-57 | Production run の provenance | `git_sha` / `config_hash` / `job_version` / `universe_version` / `identity_version` / provider_bindings を必須化（CLI が拒否し、DB の CHECK が拒否する）。`JOB_VERSION` は出力が変わるたびに上げる | 2026-09-16 / 監査 Phase 1.1b #5 | `20260916170300` |
+| D-58 | idempotency の意味 | key = job + run_mode + market + as_of + source_data_version + universe_version + identity_version + job_version + config_hash のハッシュ。**run_id を含めない**。同一 logical invocation の retry は同じ key、source snapshot や設定が変われば別 key | 2026-09-16 / 監査 Phase 1.1b #6 | [test_run_provenance.py](../workers/tests/test_run_provenance.py) |
+| D-59 | 知識時刻と有効時刻 | as-of は `available_at <= knowledge_cutoff` と `effective_from <= effective_at < effective_to` の両方で絞る。2引数版が正式形、1引数版は両方同じ時刻 | 2026-09-16 / 監査 Phase 1.1b #7 | [security-identity.md](specs/security-identity.md) §4 |
+| D-60 | SIC membership の provenance | SIC コード + ソート済み CIK 集合の SHA-256 を content hash とする（ページ本文は取得ごとに変わるため）。membership が変われば `source_data_version` も変わる | 2026-09-16 / 監査 Phase 1.1b #8 | `workers/src/surge/providers/sec_edgar.py` |
+| D-61 | Object Storage の認証情報 | worker secret store の bucket-scoped / service credential のみ。**匿名ポリシーを作らない**。既定の投入経路は DB への直接接続（`scripts/load_snapshot_direct.py`）で、storage 経由は「job が DB へ到達できない場合」に限る | 2026-09-16 / 監査 Phase 1.1b #9 | [phase-1-universe-sync.md](runbooks/phase-1-universe-sync.md) |
 
 ---
 
@@ -88,7 +97,7 @@
 | D-41 | 技術 | JP の `PROVISIONAL` 発行体 732 件（EDINET コード一覧に載らない ETF・REIT・出資証券等）の扱い | Phase 2 前 | 発行体の統合が必要になるのは主に普通株。EDINET 未突合は UNRESOLVED/EXCLUDED 側に偏っている |
 | D-42 | 投資ロジック/技術 | 同一 CIK に複数の証券がぶら下がる 640 CIK（クラス株・優先株・ワラント等）のうち、どこまでを「同一発行体の別クラス」として扱い、どこからを別発行体とみなすか | Phase 3 前 | 現状は CIK = 発行体、クラスは証券側で分離。例外（合併・持株会社化で CIK が変わる場合）の扱いは未定 |
 | D-43 | 技術 | US の identity collision 240 レコード / **67 distinct キー**（同一 CIK・同一種別・同一クラスに複数銘柄。最大は `US:CIK:0000927971:ETF:` の 42 銘柄）を、どの追加属性で分離するか | Phase 3 前 | 現状は両方を PROVISIONAL に降格し、`context` 付きで警告に残す。大半は ETN / レバレッジ ETF。discriminator を広げると 240 件の `security_id` が変わるため、rebuild としてしか実施できない |
-| D-53 | 技術 | 同一 `as_of_date` に同じ市場の run が複数ある場合（再取得・再構築）、下流（Phase 2 の価格取得、現在 Eligibility の参照）はどの run の `universe.evaluations` を正とするか。現在は run ごとに全件が残り、最新 run を選ぶ規則が未定義 | Phase 2 前 | `run_id` の最新（`finished_at` 最大）を採る素直な規則で足りるはずだが、再構築時に「途中まで失敗した run」を選ばないためのガードが要る |
+| ~~D-53~~ | 技術 | **解決済み（A 表 D-53 参照）**: publication model を実装 | — | — |
 | D-01b | 投資ロジック | 「次の取引可能時点」の定義 | Phase 8 前 | 判断しない |
 | D-02a | 技術/投資ロジック | FX の Provider と許容遅延 | Phase 2 前 | — |
 | D-03b | 費用/技術 | Object Storage プロバイダ | Phase 2 前 | Phase 1 はローカル実装 |

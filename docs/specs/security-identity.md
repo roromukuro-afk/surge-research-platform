@@ -91,7 +91,29 @@ open 行の一意制約は `(issuer_id, name_type)` なので、**ALIAS と LEGA
 
 `ref.listings.local_code` は **current materialized state** であり、過去の Ticker の正本ではない（Phase 1.1a 監査 #3）。as-of 結果に現在値が混ざらないよう、この関数は materialized 行から属性を読まない。
 
-## 5. 同一性が変わるときの手順（rebuild）
+### 知識時刻と有効時刻（Phase 1.1b）
+
+as-of 読み出しは**2つの時間軸**で絞る。
+
+| 軸 | 列 | 意味 |
+|---|---|---|
+| 知識時刻 | `available_at` | システムがその行を知り得た時刻 |
+| 有効時刻 | `effective_from` / `effective_to` | 事実そのものが成り立つ期間 |
+
+`ref.listings_as_of(p_effective_at, p_known_at)` / `ref.listing_symbols_as_of(p_effective_at, p_known_at)` が正式形。1引数版は両方に同じ時刻を入れた「その時点の姿を、その時点の知識で」。
+
+Phase 1.1b 以前は `effective_from <= cutoff` を見ていなかったため、「T1 に判明した、T2 から有効な変更」が T1 の読み出しに現れていた（未来の混入）。
+
+## 5. どの run が Universe か（Phase 1.1b）
+
+同一 as-of 日に複数の run（再取得・再構築）が存在しうる。**`finished_at` が新しい run を自動的に正とはしない。**
+
+- `pipeline.run_publications` に載った run だけが authoritative。
+- 公開の前提は `pipeline.validate_run`（SUCCEEDED / finished_at / git_sha / config_hash / job_version / universe_version / identity_version / provider_bindings / source_fetches / MARKET coverage / fatal error なし / 件数整合）。
+- 読み出しは `universe.authoritative_run_at(market, universe_version, knowledge_cutoff)` と `universe.eligibility_as_of(...)`。`published_at <= knowledge_cutoff` で絞るので、**後から再構築した run が過去の Replay に逆流しない**。
+- `universe.current_eligibility` は「いま」の Universe。
+
+## 6. 同一性が変わるときの手順（rebuild）
 
 in-place 移行ができない変更は次の手順に限る。**migration を適用しただけでは旧 DB の移行は完了しない。**
 
@@ -100,14 +122,14 @@ in-place 移行ができない変更は次の手順に限る。**migration を�
 3. `select ref.finalize_identity_rebuild('<label>')` で `new_*` を埋める。**master が空のときは例外を投げて拒否する**ので、reload 前に実行して「移行できたつもり」になることがない。
 4. before / after の件数と、変わった Universe 判定の件数を報告する。
 
-実行手順は [phase-1-universe-sync.md](../runbooks/phase-1-universe-sync.md) と `scripts/rebuild_security_master.sh` にある。
+実行手順は [phase-1-universe-sync.md](../runbooks/phase-1-universe-sync.md) と `scripts/rebuild_security_master.sh` にある。再構築した run も validate → publish を経て初めて Universe になる。
 
-## 6. Phase 2 以降への申し送り
+## 7. Phase 2 以降への申し送り
 
 - **Raw Market Data の唯一の復元キーを `security_id` にしない。** 各レコードに `provider_id` / provider の native symbol / exchange / `observed_at` / provider の source record id（あれば provider security id）/ `identity_version` を必ず残す。Identity が昇格・変更されても再割当できるようにするため。
 - US の security-level 安定識別子（FIGI、share-class レベルの識別子、provider の安定 ID 等）を Provider 選定時に確認し、取得できた場合にのみ `STRONG` へ昇格する（D-40 / D-44）。
 
-## 7. 回帰テスト
+## 8. 回帰テスト
 
 | Fixture | 内容 | 実装 |
 |---|---|---|
@@ -127,3 +149,11 @@ in-place 移行ができない変更は次の手順に限る。**migration を�
 | 1.1a-6 | US の CIK 由来 security identity は `REGISTRY_ANCHORED`、表記変更で STRONG を名乗らない | `test_identity_resolution.py` |
 | 1.1a-7 | `REGISTRY_ANCHORED` の衝突も降格される（`== STRONG` 退行の防止） | 同上 |
 | 1.1a-8 | TSV の列数と SQL loader の期待値が一致する | `test_snapshot_width.py` |
+| 1.1b-1 | worker は `extensions.http*` を直接実行できない / loader 経由のみ | `test_db_publication_and_time.py` |
+| 1.1b-2 | project schema に PUBLIC 実行可能な function が存在しない（新規作成分も） | 同上 |
+| 1.1b-3 | JP の特殊株式7件（実データ）が普通株にならない・将来の同種も捕捉 | `test_jp_special_shares.py` |
+| 1.1b-4 | 未公開 / RUNNING / FAILED の run は authoritative にならない、publish 後のみ切り替わる | `test_db_publication_and_time.py` |
+| 1.1b-5 | 知識時刻 T1・有効時刻 T2 の変更が T1 の読み出しに現れない | 同上 |
+| 1.1b-6 | 同一 logical invocation は同じ idempotency key、snapshot/config/version が変われば別 key | `test_run_provenance.py` |
+| 1.1b-7 | `--git-sha` なしの PRODUCTION artifact を作らない | 同上 |
+| 1.1b-8 | SIC membership が1件変われば source_data_version も変わる | `test_providers_classification.py` |

@@ -69,6 +69,7 @@ Claude Code はこのプロジェクトの**主任開発エージェント**で�
 
 ### 1-10. Universe 定義は版管理
 - 現行は `universe-1.0.0`。変更は新しい版のファイルで行う。種別を判定できない銘柄を黙って含めない。
+- **市場区分は「どこで売買されるか」であって「何であるか」ではない。** JPX のプライム/スタンダード/グロースには優先株式・社債型種類株式も載る。普通株かどうかは銘柄名（優先株式 / 種類株式 / 優先出資証券 等）で判定し、判定できない特殊証券を COMMON_STOCK と推測しない。
 
 ### 1-10b. 銘柄の同一性と履歴
 - **Ticker は同一性ではない。** 正規化した名称も同一性ではない（fallback でも使わない）。同一性は公的レジストリの識別子（US = SEC CIK、JP = EDINET コード、Security の JP = JPX ローカルコード）から作る。
@@ -82,6 +83,9 @@ Claude Code はこのプロジェクトの**主任開発エージェント**で�
 - 同一性を変える再構築は [docs/specs/security-identity.md](docs/specs/security-identity.md) §5 の手順に従い、旧 → 新 ID を必ず残す。migration の適用だけで旧 DB の移行が終わったことにしない（reload 後に `ref.finalize_identity_rebuild` を実行する）。
 - **`UNRESOLVED` は「除外」ではない。** 下流の価格・FX 取得対象は `INCLUDED` ∪ `UNRESOLVED`。Prediction は Eligibility が解決した `INCLUDED` のみ。
 - coverage は provider の失敗とデータ品質警告と identity collision（レコード数と distinct キー数）を分けて記録する。
+- **どの run が Universe かは publication が決める**（`pipeline.run_publications`）。`finished_at` の新しさで決めない。下流は `universe.authoritative_run_at(market, version, knowledge_cutoff)` / `universe.eligibility_as_of(...)` を通して読み、**後から再構築した run を過去の時点へ逆流させない**。
+- **Production run は再現可能でなければならない。** `git_sha` / `config_hash` / `job_version` / `universe_version` / `identity_version` / provider_bindings を必ず保存する（CLI と DB 制約で強制）。`idempotency_key` は論理的な invocation（market・as_of・source_data_version・各 version・config_hash）で決め、**run_id を含めない**。
+- **知識時刻と有効時刻を混同しない。** as-of 読み出しは `available_at <= knowledge_cutoff` かつ `effective_from <= effective_at < effective_to` の両方で絞る。
 
 ### 1-11. 過去高値
 - **過去の急騰高値まで戻ることを上昇根拠・Potential Upside にしない。**
@@ -166,7 +170,9 @@ Phase 完了報告（指示書 §49）:
 - **`supabase/migrations/` が DB 設計の唯一の正本。** Dashboard の手作業を正本にしない。Cloud に適用した DDL と Git 上の migration を一致させる。
 - ローカル Supabase（Docker）は migration 検証・integration test・オフライン開発の補助であり、Phase の blocker にしない。
 - 接続情報は Supabase CLI・ローカル環境変数・GitHub Secrets に置く。hard-code・commit・チャット出力・service role key のログ出力を禁止。
-- **DB から外部を取得する経路は、短命な署名 URL + host allowlist + https に限る。** DB に raw API key を渡さない。DB から任意 host へ Authorization ヘッダを送らない。
+- **DB から外部を取得する経路は、短命な署名 URL + host allowlist + https に限る。** DB に raw API key を渡さない。DB から任意 host へ Authorization ヘッダを送らない。**loader は SECURITY DEFINER**とし、runtime role に `extensions` スキーマの USAGE を与えない（allowlist を迂回して `extensions.http` を直接叩けないようにする）。
+- **Object Storage の認証情報は worker secret store のみ。** bucket 単位に絞った credential を使い、**匿名（anon）ポリシーを作らない**。Git・チャット・ログ・ブラウザへ出さない。DB へ渡すのは署名 URL だけ。
+- **新しい function に PUBLIC EXECUTE を残さない。** default privileges と event trigger で防ぎ、テストで「project schema に public 実行可能な function が 0 件」を検査する。
 - **Production の worker は専用の最小権限 LOGIN role で接続する**（DB owner で接続しない）。パスワードは DB 内で生成し Vault に保管する。
 - **runtime の worker は自分の設定を書き換えられない。** `pipeline.load_host_allowlist`・`pipeline.sources`・`ref.exchanges`・`ref.identity_migration_map`・`universe.definitions`・`universe.decision_reasons` は SELECT のみ。変更は migration / DB 管理者が行う。
 - **新しいテーブルは既定で読み取り専用。** `ref` / `pipeline` / `universe` の default privileges は SELECT のみなので、runtime が書くテーブルを追加する migration は書き込み権限を明示的に grant する。**runtime worker（`surge_worker_prod`）には `DELETE` をどのスキーマでも与えない**（research スキーマの DELETE は research ロールのもの）。

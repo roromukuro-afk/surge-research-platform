@@ -100,3 +100,39 @@ def test_file_creation_footer_is_not_a_record():
     nasdaq = "\n".join([NASDAQ_HEADER, "AAPL|Apple Inc. - Common Stock|Q|N|N|100|N|N", "File Creation Time: x"])
     records, _ = parse_symbol_directory(nasdaq, OTHER_HEADER)
     assert [record.local_code for record in records] == ["AAPL"]
+
+
+# ------------------------------------------- Phase 1.1b: SIC membership hashing
+def test_sic_membership_hash_moves_the_run_fingerprint():
+    """An empty content hash let SPAC/REIT membership change invisibly.
+
+    _sources_data_version ignores provenances without a content hash, so a run
+    whose only change was the SIC membership produced the same fingerprint - and
+    therefore the same idempotency key - as the run before it.
+    """
+
+    from datetime import UTC, datetime
+
+    from surge.jobs.universe_sync import _sources_data_version
+    from surge.models import Provenance
+    from surge.providers.sec_edgar import sic_membership_hash
+
+    now = datetime.now(UTC)
+
+    def provenance(content_hash: str) -> Provenance:
+        return Provenance(
+            source_id="sec_sic_directory", endpoint="https://www.sec.gov/cgi-bin/browse-edgar?SIC=6770",
+            requested_at=now, received_at=now, http_status=200, bytes=1,
+            content_sha256=content_hash, item_count=2, observed_at=now, available_at=now,
+        )
+
+    before = sic_membership_hash("6770", {"0000000001", "0000000002"})
+    after = sic_membership_hash("6770", {"0000000001", "0000000002", "0000000003"})
+
+    assert before != after
+    assert _sources_data_version([provenance(before)]) != _sources_data_version([provenance(after)])
+
+    # the order the SEC happens to return the pages in must not matter
+    assert sic_membership_hash("6770", {"0000000002", "0000000001"}) == before
+    # and it is not simply empty any more
+    assert before != ""

@@ -58,30 +58,66 @@ python -m pip install -e ".[dev]"
 export PYTHONPATH="$PWD/src"
 export SURGE_CONTACT_EMAIL="you@example.com"   # goes into the SEC User-Agent
 
-python -m surge.cli universe-sync --market JP --out ../.local/phase1
-python -m surge.cli universe-sync --market US --out ../.local/phase1
+# A PRODUCTION run must be attributable to a commit; the CLI refuses without it.
+python -m surge.cli universe-sync --market JP --out ../.local/phase1 --git-sha "$(git rev-parse HEAD)"
+python -m surge.cli universe-sync --market US --out ../.local/phase1 --git-sha "$(git rev-parse HEAD)"
+
+# for a local experiment, say so explicitly instead
+python -m surge.cli universe-sync --market JP --out ../.local/scratch --run-mode DEV
 ```
+
+Current versions (must agree in the runbook, the summary JSON and the database):
+
+| Version | Value |
+|---|---|
+| `job_version` | `universe_sync-1.1b.0` (`surge.JOB_VERSION`) |
+| `identity_version` | `identity-1.1a` (`surge.identity.IDENTITY_VERSION`) |
+| `universe_version` | `universe-1.0.0` |
+| `git_sha` | the commit passed to `--git-sha`; required for `PRODUCTION` |
+| `config_hash` | sha256 of the run configuration, written to `pipeline.runs.config_hash` |
 
 Output per market:
 
 | File | Contents |
 |---|---|
 | `<market>_00_run.sql` | `pipeline.runs`, `pipeline.source_fetches`, `pipeline.run_errors` |
-| `<market>_snapshot.tsv` | the snapshot itself, unit separator (`0x1f`) delimited, 36 fields per line |
+| `<market>_snapshot.tsv` | the snapshot itself, unit separator (`0x1f`) delimited, 37 fields per line |
 | `<market>_99_apply.sql` | `ref.apply_master_snapshot`, `universe.apply_snapshot_evaluations`, `universe.compute_coverage`, run completion |
 | `<market>_summary.json` | counts, decision and reason breakdown, identity breakdown, source provenance |
 
 ## Load it
 
-Bulk rows go to object storage and the database reads them from there, so the
-snapshot never has to travel through the orchestration layer.
+The snapshot goes into `pipeline.master_snapshot` and everything else is derived
+from there. Two paths, one credential model: **the only secret is a connection
+string or a bucket-scoped credential, and it lives in the worker secret store.**
+No anonymous storage policy is ever created (Phase 1.1b).
 
-The loader only accepts a **short lived signed URL** on an **allowlisted host**
-over **https**. No API key is ever passed to, stored in or sent by the database,
-and the database sends no `Authorization` header to anything.
+### Direct load (the default)
 
-Register the storage host once per environment (it is deployment configuration,
-not schema, so no migration seeds it):
+```bash
+# 1. run row, provenance, diagnostics, and the snapshot itself
+SURGE_DB_URL=... python scripts/load_snapshot_direct.py ../.local/phase1 JP
+
+# 2. materialise the master, the evaluations and coverage
+psql "$SURGE_DB_URL" -v ON_ERROR_STOP=1 -f ../.local/phase1/jp_99_apply.sql
+
+# 3. validate and publish (see "Which run is the universe")
+psql "$SURGE_DB_URL" -v ON_ERROR_STOP=1 -c "select pipeline.publish_run('<run id>'::uuid);"
+```
+
+`scripts/rebuild_security_master.sh <market> <git sha> [label]` runs the whole
+sequence.
+
+### Object storage (when the job cannot reach the database)
+
+The database can fetch the snapshot itself, and the loader accepts **only** a
+short lived signed URL on an **allowlisted host** over **https**. Since Phase
+1.1b the loader is `SECURITY DEFINER`: the privilege to make an HTTP request
+belongs to the function, which checks the URL first, and no runtime role can
+reach `extensions.http` at all.
+
+Register the storage host once per environment (deployment configuration, so no
+migration seeds it):
 
 ```sql
 insert into pipeline.load_host_allowlist (host, note)
@@ -89,78 +125,20 @@ values ('<project ref>.supabase.co', 'project object storage; signed URLs only')
 on conflict (host) do nothing;
 ```
 
+The upload and the signing use a **bucket-scoped credential from the worker
+secret store** (an S3-compatible scoped key, or a service credential held only
+there). It is never committed, never printed, never given to a browser, and
+never replaced by a temporary anonymous policy on the bucket:
+
 ```bash
-# 1. run row and provenance
-psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f jp_00_run.sql
-
-# 2. upload the snapshot to the private bucket
-curl -sS -X POST "$SUPABASE_URL/storage/v1/object/phase1-load/jp_snapshot.tsv" \
-  -H "apikey: $SUPABASE_PUBLISHABLE_KEY" \
-  -H "Authorization: Bearer $SUPABASE_PUBLISHABLE_KEY" \
-  -H "Content-Type: text/tab-separated-values" \
-  --data-binary @jp_snapshot.tsv
-
-# 3. mint a signed URL with a short expiry and keep it in a shell variable
-SIGNED_PATH=$(curl -sS -X POST "$SUPABASE_URL/storage/v1/object/sign/phase1-load/jp_snapshot.tsv" \
-  -H "apikey: $SUPABASE_PUBLISHABLE_KEY" \
-  -H "Authorization: Bearer $SUPABASE_PUBLISHABLE_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"expiresIn":300}' | python -c "import json,sys; print(json.load(sys.stdin)['signedURL'])")
-
-# 4. let the database read it, then materialise
-psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -c \
-  "select pipeline.load_master_snapshot_from_signed_url('<run id>'::uuid,
-     '$SUPABASE_URL/storage/v1$SIGNED_PATH');"
-psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f jp_99_apply.sql
-
-# 5. delete the uploaded object once the load is verified
+# upload with the worker's own credential, mint a short signed URL, load, delete
+python scripts/upload_and_sign.py ../.local/phase1/jp_snapshot.tsv   # writes $SIGNED_URL
+psql "$SURGE_DB_URL" -v ON_ERROR_STOP=1 -c   "select pipeline.load_master_snapshot_from_signed_url('<run id>'::uuid, '$SIGNED_URL');"
 ```
 
-`SUPABASE_DB_URL` and the keys come from the environment or a local `.env`; they
-are never committed and never printed. The signed URL is itself a short lived
-credential: keep it in a variable, do not log it, and let it expire.
-
-If the upload is done with a publishable key, the storage policies that allow it
-are temporary: create them before the upload and drop them immediately after, so
-the bucket has no standing anonymous access.
-
-```sql
-create policy phase1_load_anon_insert on storage.objects for insert to anon with check (bucket_id = 'phase1-load');
-create policy phase1_load_anon_select on storage.objects for select to anon using (bucket_id = 'phase1-load');
-create policy phase1_load_anon_delete on storage.objects for delete to anon using (bucket_id = 'phase1-load');
--- ... upload, sign, load, delete the object, then:
-drop policy phase1_load_anon_insert on storage.objects;
-drop policy phase1_load_anon_select on storage.objects;
-drop policy phase1_load_anon_delete on storage.objects;
-```
-
-Re-running a load is safe: identities are deterministic, history rows are only
-opened when a value actually changed, and an unchanged re-observation only moves
-`last_confirmed_at` forward.
-
-## Who connects
-
-The production worker connects as `surge_worker_prod_app`, a LOGIN role that is a
-member of the `surge_worker_prod` group. Its password is generated inside the
-database by `20260916150300_runtime_principal.sql` and stored in Supabase Vault;
-read it from Vault when configuring a worker. The role has no `DELETE` anywhere
-and is read-only on the `research` schema (USAGE + SELECT, never INSERT): research
-output must not be written by the production worker.
-
-## Rebuilding the master
-
-A rebuild is only for identity changes that cannot be migrated in place, and it
-has to stay auditable:
-
-1. `ref.identity_migration_map` records every old security / listing / issuer id
-   with its provider coordinates (`20260916150400`).
-2. The master, universe evaluations, coverage and staging rows are cleared.
-   `pipeline.runs` and `pipeline.source_fetches` are kept: they are the record of
-   what was ingested and when.
-3. The job is re-run from the official sources and loaded as above.
-4. `ref.finalize_identity_rebuild('<label>')` fills `new_security_id` /
-   `new_listing_id` / `new_issuer_id` so old → new can be reconstructed. It is a
-   post-reload step, not a migration: it errors out if the master is empty.
+The database only ever learns the signed URL, and that URL expires. If a
+provider or a bucket cannot issue a scoped credential, use the direct path
+instead - do not open the bucket to anonymous access to work around it.
 
 ## Who may write what
 
@@ -184,13 +162,16 @@ rebuild migration records the old identifiers and clears the master, and the new
 identifiers only exist after the providers have been re-fetched. Run, per market:
 
 ```bash
-SUPABASE_DB_URL=... SUPABASE_URL=... SUPABASE_PUBLISHABLE_KEY=...   scripts/rebuild_security_master.sh JP phase-1.1a-identity-rebuild ./.local/rebuild
-SUPABASE_DB_URL=... SUPABASE_URL=... SUPABASE_PUBLISHABLE_KEY=...   scripts/rebuild_security_master.sh US phase-1.1a-identity-rebuild ./.local/rebuild
+SURGE_DB_URL=... scripts/rebuild_security_master.sh JP "$(git rev-parse HEAD)" phase-1.1a-identity-rebuild
+SURGE_DB_URL=... scripts/rebuild_security_master.sh US "$(git rev-parse HEAD)" phase-1.1a-identity-rebuild
 ```
 
 The script ends with `ref.finalize_identity_rebuild('<label>')`, which fills the
 old -> new id map and **refuses to run while the master is empty**, so a plain
 `db push` can never look like a completed migration.
+
+Without a label the same script is an ordinary refresh: fetch, load, apply,
+validate, publish.
 
 ## Reading the result
 

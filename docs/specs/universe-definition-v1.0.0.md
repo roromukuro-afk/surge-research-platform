@@ -37,6 +37,32 @@
 
 代替ソースとして J-Quants `GET /v2/equities/master`（`Mkt` = 0111/0112/0113、`ProdCat`）も使えるが、認証が必要で `ProdCat` のコード値一覧を公式ページで確認できていないため、Phase 1 では採用していない。
 
+### 実装ノート（Phase 1.1b、2026-09-16）— 市場区分は証券種別ではない
+
+「市場・商品区分」は**どこで売買されるか**であって**何であるか**ではない。プライム/スタンダード/グロース（内国株式）には**優先株式・社債型種類株式**も含まれるため、区分だけで COMMON_STOCK と確定すると普通株以外が Universe に入る。2026-09-16 の実測で7件が誤って INCLUDED になっていた。
+
+判定規則（定義の変更ではなく、「普通株のみ」という既存定義を正しく実装するための修正）:
+
+1. 銘柄名に「優先株式」→ `PREFERRED` → `EXCLUDED PREFERRED`
+2. 銘柄名に「種類株式」（社債型種類株式を含む）→ `OTHER` → `EXCLUDED NOT_COMMON_STOCK`
+3. 銘柄名に「優先出資証券」→ `INVESTMENT_CERTIFICATE` → `UNRESOLVED`（D-10b、従来どおり）
+4. 銘柄名に「新株予約権」→ `WARRANT` → `EXCLUDED WARRANT`
+5. 上記に当たらず、コードが4桁の普通株コード形でない（5文字目が `0` 以外）→ `UNKNOWN` → `UNRESOLVED TYPE_UNKNOWN`（**普通株と推測しない**）
+
+| コード | 銘柄名 | 変更前 | 変更後 |
+|---|---|---|---|
+| 25935 | 伊藤園第１種優先株式 | INCLUDED | EXCLUDED `PREFERRED` |
+| 50765 | インフロニア・ホールディングス第１回社債型種類株式 | INCLUDED | EXCLUDED `NOT_COMMON_STOCK` |
+| 75505 | ゼンショーホールディングス第１回社債型種類株式 | INCLUDED | EXCLUDED `NOT_COMMON_STOCK` |
+| 92015 | 日本航空株式会社第１回社債型種類株式 | INCLUDED | EXCLUDED `NOT_COMMON_STOCK` |
+| 92025 | ＡＮＡホールディングス第１回社債型種類株式 | INCLUDED | EXCLUDED `NOT_COMMON_STOCK` |
+| 94345 | ソフトバンク第１回社債型種類株式 | INCLUDED | EXCLUDED `NOT_COMMON_STOCK` |
+| 94346 | ソフトバンク第２回社債型種類株式 | INCLUDED | EXCLUDED `NOT_COMMON_STOCK` |
+
+2026-09-16 実測の影響: JP `INCLUDED` 3,707 → **3,700**、`EXCLUDED` 727 → **734**、`UNRESOLVED` 7（変化なし）。
+
+**コード形の根拠について**: 公式ファイル（data_j.xlsx、2026-09-16）で、4文字コードの 4,434 件はすべて普通株、5文字コードの 7 件はすべて上記の特殊株式であることを実測した。証券コード協議会の仕様書（PDF）は本ラウンドでは取得できていないため、**5文字コードは「普通株ではない」根拠ではなく「普通株と断定しない」ガード**として使う。決定的な根拠は銘柄名。
+
 ### 未決（D-10b、UNRESOLVED として可視化済み）
 - 東証の対象3市場に上場する**外国株式**の扱い（現在5銘柄）
 - 出資証券・優先出資証券などの扱い（現在2銘柄）
@@ -105,4 +131,5 @@ Phase 1.1 で判別順を次のとおり明文化した（定義の変更では�
 - 判定が付いてから価格を取り始めると、判定が付いた日より前の価格が欠落し、後追いで Prediction も Replay もできなくなる。
 - `UNRESOLVED` の銘柄は **ENTRY 候補にはしない**（Universe に含まれていないため）。取得だけ行い、判定が `INCLUDED` に変わった時点で候補に上がる。**Prediction の対象は Eligibility が解決した `INCLUDED` のみ**（Phase 1.1a 監査 #11）。
 - 取得対象の件数・内訳（`INCLUDED` / `UNRESOLVED`）は run ごとにカバレッジへ記録する。
+- **どの run の判定を読むかは publication が決める**（`universe.authoritative_run_at` / `universe.eligibility_as_of` / `universe.current_eligibility`）。同一 as-of 日に複数 run があっても、下流は published run だけを見る（D-53）。
 - `EXCLUDED` は取得対象外。ただし理由コード別の件数はカバレッジに残す。

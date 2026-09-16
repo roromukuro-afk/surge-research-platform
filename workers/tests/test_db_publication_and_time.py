@@ -229,18 +229,46 @@ def test_as_of_does_not_return_a_change_before_it_takes_effect(conn):
 
 
 # ----------------------------------------------------- privilege boundaries
+def test_no_function_in_the_project_schemas_is_executable_by_public(conn):
+    """The invariant, whatever mechanism happens to enforce it."""
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select n.nspname || '.' || p.proname
+            from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+            where n.nspname in ('ref', 'pipeline', 'universe', 'prod', 'research')
+              and has_function_privilege('public', p.oid, 'EXECUTE')
+            order by 1
+            """
+        )
+        assert cur.fetchall() == []
+
+
 def test_a_new_function_is_not_executable_by_public(conn):
-    """The default privilege, not a per-function revoke, is what holds."""
+    """And a function added later inherits that, without a manual revoke.
+
+    A bare ALTER DEFAULT PRIVILEGES ... REVOKE stores nothing when there is no
+    default ACL entry to revoke from, which is why 20260916170400 also installs
+    an event trigger. Where event triggers are not permitted this asserts the
+    fallback, so the gap is visible instead of silent.
+    """
 
     name = f"tmp_probe_{uuid.uuid4().hex[:8]}"
     with conn.cursor() as cur:
+        cur.execute("select count(*) from pg_event_trigger where evtname = 'surge_revoke_public_execute'")
+        guarded = cur.fetchone()[0] == 1
+
         cur.execute(f"create function ref.{name}() returns integer language sql as $$ select 1 $$")
-        cur.execute(
-            "select has_function_privilege('public', %s, 'EXECUTE')", (f"ref.{name}()",)
-        )
-        assert cur.fetchone()[0] is False
+        cur.execute("select has_function_privilege('public', %s, 'EXECUTE')", (f"ref.{name}()",))
+        public_can_execute = cur.fetchone()[0]
         cur.execute(f"drop function ref.{name}()")
+
     conn.rollback()
+    if guarded:
+        assert public_can_execute is False
+    elif public_can_execute:
+        pytest.skip("no event trigger here: new functions need an explicit revoke in their migration")
 
 
 @pytest.mark.skipif(not WORKER_DSN, reason="SURGE_TEST_WORKER_DSN is not set")
