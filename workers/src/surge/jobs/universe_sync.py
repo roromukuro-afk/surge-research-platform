@@ -65,6 +65,10 @@ class SyncResult:
     security_identities: list[Identity] = field(default_factory=list)
     expected_population: dict[str, int] = field(default_factory=dict)
     notes: dict[str, Any] = field(default_factory=dict)
+    run_mode: str = "PRODUCTION"
+    # Everything that can change the result and is not the provider payload
+    # itself. Hashed into config_hash and recorded with the run.
+    config: dict[str, Any] = field(default_factory=dict)
 
     @property
     def decision_counts(self) -> dict[str, int]:
@@ -110,6 +114,50 @@ class SyncResult:
                 if error.error_type == ERROR_IDENTITY_COLLISION
             }
         )
+
+
+def canonical_config_hash(config: dict[str, Any]) -> str:
+    """Stable fingerprint of the settings that can change a run's output."""
+
+    payload = json.dumps(config, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def idempotency_key(
+    *,
+    market_code: str,
+    as_of: date,
+    run_mode: str,
+    source_data_version: str,
+    universe_version: str,
+    identity_version: str,
+    job_version: str,
+    config_hash: str,
+) -> str:
+    """The logical invocation, not the attempt.
+
+    Re-running the same job over the same provider snapshot with the same code
+    and configuration is the SAME invocation, so it produces the same key and a
+    retry cannot create a second run. A new provider snapshot, a new universe or
+    identity version, new code or changed configuration is a different
+    invocation and gets its own key. The run id is deliberately not a component.
+    """
+
+    material = "|".join(
+        [
+            JOB_NAME,
+            run_mode,
+            market_code,
+            as_of.isoformat(),
+            source_data_version,
+            universe_version,
+            identity_version,
+            job_version,
+            config_hash,
+        ]
+    )
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+    return f"{JOB_NAME}:{run_mode}:{market_code}:{as_of.isoformat()}:{digest}"
 
 
 def _sources_data_version(provenances: list[Provenance]) -> str:
@@ -172,6 +220,7 @@ def run_universe_sync(
     settings: Settings | None = None,
     as_of: date | None = None,
     sic_max_pages: int = 60,
+    run_mode: str = "PRODUCTION",
 ) -> SyncResult:
     settings = settings or load_settings()
     as_of = as_of or datetime.now(UTC).date()
@@ -286,11 +335,24 @@ def run_universe_sync(
         "issuer_names_from_registry": sum(1 for record in records if record.issuer_name),
     }
 
+    config = {
+        "job_version": JOB_VERSION,
+        "universe_version": UNIVERSE_VERSION,
+        "identity_version": IDENTITY_VERSION,
+        "market_code": market_code,
+        "sic_max_pages": sic_max_pages if market_code == "US" else None,
+        "sources": {
+            provenance.source_id: provenance.endpoint for provenance in provenances
+        },
+    }
+
     return SyncResult(
         run_id=run_id,
         market_code=market_code,
         as_of_date=as_of,
         universe_version=UNIVERSE_VERSION,
+        run_mode=run_mode,
+        config=config,
         records=records,
         decisions=decisions,
         provenances=provenances,
@@ -376,9 +438,20 @@ def snapshot_rows(result: SyncResult) -> list[list[Any]]:
 def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | None = None) -> list[Path]:
     """Write run, provenance, snapshot and apply statements."""
 
+    version = _sources_data_version(result.provenances)
+    config_hash = canonical_config_hash(result.config)
+
+    # A production run has to be attributable to a commit and a configuration.
+    # Without them a result cannot be reproduced or re-audited later, so the
+    # artefact is refused rather than written with NULL provenance.
+    if result.run_mode == "PRODUCTION" and not git_sha:
+        raise ValueError(
+            "a PRODUCTION run needs --git-sha: refusing to write an artefact that cannot be "
+            "attributed to a commit (use --run-mode DEV for local experiments)"
+        )
+
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
-    version = _sources_data_version(result.provenances)
 
     run_sql = insert_statement(
         "pipeline.runs",
@@ -393,6 +466,7 @@ def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | Non
             "as_of_date",
             "data_cutoff",
             "git_sha",
+            "config_hash",
             "versions",
             "provider_bindings",
             "params",
@@ -403,16 +477,32 @@ def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | Non
                 str(result.run_id),
                 JOB_NAME,
                 JOB_VERSION,
-                "PRODUCTION",
+                result.run_mode,
                 result.market_code,
-                f"{JOB_NAME}:{result.market_code}:{result.as_of_date.isoformat()}:{result.run_id}",
+                idempotency_key(
+                    market_code=result.market_code,
+                    as_of=result.as_of_date,
+                    run_mode=result.run_mode,
+                    source_data_version=version,
+                    universe_version=result.universe_version,
+                    identity_version=IDENTITY_VERSION,
+                    job_version=JOB_VERSION,
+                    config_hash=config_hash,
+                ),
                 "RUNNING",
                 result.as_of_date,
                 result.provenances[0].observed_at,
                 git_sha,
-                Json({"universe_version": result.universe_version, "job_version": JOB_VERSION}),
+                config_hash,
+                Json(
+                    {
+                        "universe_version": result.universe_version,
+                        "identity_version": IDENTITY_VERSION,
+                        "job_version": JOB_VERSION,
+                    }
+                ),
                 Json({provenance.source_id: provenance.endpoint for provenance in result.provenances}),
-                Json({"source_data_version": version, "notes": result.notes}),
+                Json({"source_data_version": version, "config": result.config, "notes": result.notes}),
                 "local-cli",
             ]
         ],
@@ -527,6 +617,10 @@ def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | Non
         "run_id": str(result.run_id),
         "market_code": result.market_code,
         "as_of_date": result.as_of_date.isoformat(),
+        "run_mode": result.run_mode,
+        "job_version": JOB_VERSION,
+        "git_sha": git_sha,
+        "config_hash": config_hash,
         "universe_version": result.universe_version,
         "retrieved_count": len(result.records),
         "unique_count": len({(record.exchange_id, record.local_code) for record in result.records}),

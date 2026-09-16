@@ -76,6 +76,14 @@ def _classify_jp(record: RawSecurityRecord) -> UniverseDecision:
         return UniverseDecision("EXCLUDED", "REIT_OR_FUND", detail)
     if record.security_type == "INVESTMENT_CERTIFICATE":
         return UniverseDecision("UNRESOLVED", "INVESTMENT_CERTIFICATE_RULE_PENDING", detail)
+    # Preferred shares and bond-type class shares sit on Prime/Standard/Growth
+    # next to ordinary shares; the segment column does not distinguish them.
+    if record.security_type == "PREFERRED":
+        return UniverseDecision("EXCLUDED", "PREFERRED", detail)
+    if record.security_type == "WARRANT":
+        return UniverseDecision("EXCLUDED", "WARRANT", detail)
+    if record.security_type == "OTHER":
+        return UniverseDecision("EXCLUDED", "NOT_COMMON_STOCK", detail)
     if record.security_type == "FOREIGN_COMMON_STOCK" or segment in JP_FOREIGN_SEGMENTS:
         return UniverseDecision("UNRESOLVED", "FOREIGN_STOCK_RULE_PENDING", detail)
     if record.security_type == "UNKNOWN" or segment == "UNKNOWN":

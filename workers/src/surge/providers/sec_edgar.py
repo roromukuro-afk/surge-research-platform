@@ -7,6 +7,7 @@ text is stored.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -45,6 +46,18 @@ class SicMembership:
 
 def _pad_cik(value: int | str) -> str:
     return str(int(value)).zfill(10)
+
+
+def sic_membership_hash(sic: str, ciks: set[str] | frozenset[str]) -> str:
+    """Deterministic fingerprint of one SIC membership list.
+
+    The SEC pages carry timestamps and paging markers, so hashing the bodies
+    would change on every fetch. Hashing the SIC plus its sorted membership
+    changes when, and only when, the membership changes.
+    """
+
+    payload = "\n".join([sic, *sorted(ciks)])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class SecCompanyTickers:
@@ -142,7 +155,9 @@ class SecSicDirectory:
             received_at=last_received,
             http_status=status,
             bytes=total_bytes,
-            content_sha256="",
+            # The membership itself is the content: an empty hash would let the
+            # run fingerprint stay the same while SPAC/REIT membership moved.
+            content_sha256=sic_membership_hash(sic, ciks),
             item_count=len(ciks),
             observed_at=last_received,
             available_at=last_received,

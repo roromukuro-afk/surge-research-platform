@@ -20,6 +20,30 @@ from surge.providers.base import LATENCY_DAILY_BATCH, ROLE_SECURITY_MASTER
 SOURCE_ID = "jpx_listed_issues"
 DEFAULT_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx"
 
+# The market/product column says which segment a line is on, not what kind of
+# instrument it is: preferred shares and bond-type class shares sit on Prime
+# next to ordinary shares. universe-1.0.0 includes domestic COMMON stock only,
+# so the instrument wording decides and the market column cannot.
+#
+# Measured against the official workbook (2026-09-16): 4,434 rows carry a four
+# character code and are ordinary shares; the 7 rows with a five character code
+# are exactly the special shares below.
+_SPECIAL_SHARE_PATTERNS: tuple[tuple[str, str], ...] = (
+    # (wording in the JPX security name, security type)
+    ("優先出資証券", "INVESTMENT_CERTIFICATE"),
+    ("優先株式", "PREFERRED"),
+    ("種類株式", "OTHER"),          # 社債型種類株式 etc: not ordinary common stock
+    ("新株予約権", "WARRANT"),
+    ("優先出資", "INVESTMENT_CERTIFICATE"),
+)
+
+# A JPX securities code is four characters for an ordinary share. A fifth
+# character that is not "0" marks a different instrument of the same issuer.
+# The spec itself (証券コード協議会) is published as a PDF we have not parsed, so
+# this is used only as a guard: it never promotes anything to COMMON_STOCK, it
+# stops us calling something common stock when the name did not say so.
+_ORDINARY_CODE_LENGTH = 4
+
 # JPX "市場・商品区分" -> (segment code, security type)
 SEGMENT_MAP: dict[str, tuple[str, str]] = {
     "プライム（内国株式）": ("PRIME_DOMESTIC", "COMMON_STOCK"),
@@ -75,6 +99,29 @@ class JpxListedIssuesProvider:
         return FetchResult(records=tuple(records), provenance=provenance, errors=tuple(errors))
 
 
+def classify_special_share(code: str, name: str) -> tuple[str, str] | None:
+    """Detect an instrument that is not ordinary common stock.
+
+    Returns (security_type, evidence) or None when the row really is an
+    ordinary share. Nothing here ever returns COMMON_STOCK: the only outcomes
+    are a specific non-common type or UNKNOWN, which the universe step leaves
+    UNRESOLVED instead of silently including.
+    """
+
+    for wording, security_type in _SPECIAL_SHARE_PATTERNS:
+        if wording in name:
+            return security_type, f"name contains {wording}"
+
+    # The name did not say, but the code shape says it is not the issuer's
+    # ordinary share. Do not guess what it is.
+    if len(code) > _ORDINARY_CODE_LENGTH and not code[_ORDINARY_CODE_LENGTH:].strip("0"):
+        return None  # e.g. "13010": the ordinary share written in five characters
+    if len(code) > _ORDINARY_CODE_LENGTH:
+        return "UNKNOWN", f"code {code} is not an ordinary share code"
+
+    return None
+
+
 def parse_workbook(payload: bytes, *, observed_at: datetime | None = None) -> tuple[list[RawSecurityRecord], list[str]]:
     """Parse data_j.xlsx into raw records.
 
@@ -108,6 +155,14 @@ def parse_workbook(payload: bytes, *, observed_at: datetime | None = None) -> tu
         else:
             segment_code, security_type = mapped
 
+        evidence: dict[str, object] = {"jpx_category": category}
+        if security_type in ("COMMON_STOCK", "FOREIGN_COMMON_STOCK"):
+            special = classify_special_share(code, name)
+            if special is not None:
+                security_type, reason = special
+                evidence["special_share"] = reason
+                evidence["segment_says"] = mapped[1]
+
         records.append(
             RawSecurityRecord(
                 source_id=SOURCE_ID,
@@ -123,7 +178,7 @@ def parse_workbook(payload: bytes, *, observed_at: datetime | None = None) -> tu
                 currency="JPY",
                 country="JP",
                 listing_status="LISTED",
-                type_evidence={"jpx_category": category},
+                type_evidence=evidence,
             )
         )
 

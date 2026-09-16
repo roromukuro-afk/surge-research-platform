@@ -20,18 +20,31 @@ def main(argv: list[str] | None = None) -> int:
     sync.add_argument("--market", required=True, choices=["JP", "US"])
     sync.add_argument("--out", required=True, type=Path, help="Directory for generated SQL and summary")
     sync.add_argument("--as-of", type=date.fromisoformat, default=None)
-    sync.add_argument("--git-sha", default=None)
+    sync.add_argument(
+        "--git-sha",
+        default=None,
+        help="commit the artefact is attributable to. Required for a PRODUCTION run.",
+    )
     sync.add_argument("--sic-max-pages", type=int, default=60)
+    sync.add_argument(
+        "--run-mode",
+        choices=["PRODUCTION", "RESEARCH", "DEV"],
+        default="PRODUCTION",
+        help="PRODUCTION requires --git-sha; use DEV for local experiments.",
+    )
 
     args = parser.parse_args(argv)
 
     if args.command == "universe-sync":
         settings = load_settings()
+        if args.run_mode == "PRODUCTION" and not args.git_sha:
+            parser.error("--git-sha is required for a PRODUCTION run (or pass --run-mode DEV)")
         result = run_universe_sync(
             args.market,
             settings=settings,
             as_of=args.as_of,
             sic_max_pages=args.sic_max_pages,
+            run_mode=args.run_mode,
         )
         written = write_sql_artifacts(result, args.out, git_sha=args.git_sha)
         print(
@@ -39,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "run_id": str(result.run_id),
                     "market": result.market_code,
+                    "run_mode": result.run_mode,
                     "retrieved": len(result.records),
                     "decisions": result.decision_counts,
                     "reasons": result.reason_counts,
