@@ -17,10 +17,18 @@
 --    re-scanned every ticker row for every listing.
 
 -- ---------------------------------------------- 1. the loader must be runnable
-grant usage on schema extensions to surge_worker_prod;
-
-comment on schema extensions is
-  'Extension objects. surge_worker_prod needs USAGE to run pipeline.load_master_snapshot_from_signed_url, which is SECURITY INVOKER.';
+-- The extensions schema is a Supabase convention; a vanilla Postgres (CI) has
+-- neither it nor the http extension, and nothing to grant.
+do $$
+begin
+  if exists (select 1 from pg_namespace where nspname = 'extensions') then
+    execute 'grant usage on schema extensions to surge_worker_prod';
+    execute 'comment on schema extensions is ''Extension objects. surge_worker_prod needs USAGE to run pipeline.load_master_snapshot_from_signed_url, which is SECURITY INVOKER.''';
+  else
+    raise notice 'no extensions schema here: the http loader is not installed either';
+  end if;
+end
+$$;
 
 -- --------------------------------------------- 2. functions are not public
 do $$
