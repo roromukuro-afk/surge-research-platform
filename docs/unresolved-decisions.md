@@ -47,7 +47,7 @@
 
 | ID | 種別 | 論点 | Claude Code の意見 |
 |---|---|---|---|
-| **D-00（登録）** | 前提 | **v5.1 全文の受領と Canonical 登録** | 受領したら無加工で `short-surge-v5.1.original.md` に保存し、SHA-256 を記録してから Phase 1 に進む |
+| **D-00（登録）** | 前提 | **v5.1 全文の受領と Canonical 登録**（Phase 1 の唯一の開始条件）。2026-09-16 の監査は「直前にユーザーが提示した全文」を Canonical と確定したが、**その本文は Claude Code 側のセッションには渡っていない**（ChatGPT 側の会話に存在すると考えられる）。捜索済み: 本セッションの文脈、全 Claude Code セッション記録（`v5.1` / `3000円以下限定` / `何銘柄を実際に評価できたか` / `織り込み判定` / `マルチスクリーニング` / `3段階ファネル` / `Dynamic Driver Score` / `Bigdata.com`）、Downloads / Documents / Desktop / OneDrive 配下、リポジトリ内。Google Drive コネクタは未認可で検索不可 | 記憶からの再生成・近似復元は禁止されているため作成しない。受領方法は (a) チャットへ全文貼り付け (b) ローカルにファイル保存してパスを伝える（バイト列をそのまま保持できるためこちらが確実）。受領後ただちに `short-surge-v5.1.original.md` へ無加工保存し、SHA-256 を MANIFEST に登録して D-00 を RESOLVED にし、Phase 1 に着手する |
 
 ### B-2. Phase 1 中に決めればよい（pending で開始可）
 
