@@ -123,14 +123,11 @@ def test_the_worker_cannot_change_a_published_run():
         worker.close()
         if run is not None:
             with owner.cursor() as cur:
-                # the publication has to go before the artifacts can be cleaned up
+                # Unpublish so the run stops being frozen. The rows themselves
+                # stay: ref.listings references the run that ingested them, and
+                # deleting history to tidy a test is exactly what this phase
+                # forbids.
                 cur.execute("delete from pipeline.run_publications where run_id = %s", (str(run),))
-                for table in (
-                    "universe.evaluations", "universe.coverage", "pipeline.master_snapshot",
-                    "pipeline.run_errors", "pipeline.source_fetches",
-                ):
-                    cur.execute(f"delete from {table} where run_id = %s", (str(run),))  # noqa: S608
-                cur.execute("delete from pipeline.runs where run_id = %s", (str(run),))
         owner.close()
 
 
