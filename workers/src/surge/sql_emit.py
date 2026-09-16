@@ -52,6 +52,7 @@ SNAPSHOT_COLUMNS = (
     "issuer_name",
     "issuer_name_source",
     "identity_version",
+    "issuer_normalized_name",
 )
 
 

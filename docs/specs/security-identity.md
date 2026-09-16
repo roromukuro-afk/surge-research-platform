@@ -47,7 +47,9 @@
 
 ## 2. 発行体の名称（Phase 1.1a）
 
-- **`ref.issuers.legal_name` はレジストリの名称**（SEC の registrant name / EDINET の提出者名）。Provider の商品名（"Apple Inc. - Common Stock"）を発行体名にしない。
+- **レジストリ識別子を持つ発行体の `ref.issuers.legal_name` はレジストリの名称**（SEC の registrant name / EDINET の提出者名）。Provider の商品名（"Apple Inc. - Common Stock"）を発行体名にしない。
+- レジストリ識別子が無い発行体（2026-09-16 実測 6,820 / 16,567）は、そもそもレジストリ名が存在しない。`legal_name` には provider の表示名が入り、`ref.issuer_names` では **`ALIAS`** として記録する（`LEGAL` ではない）。
+- `normalized_name`（照合用）もレジストリ名から作る。商品名の正規化を発行体の照合キーにしない。
 - Security 自身の名称は従来どおり `ref.security_names`。
 - `ref.issuer_names` に SCD2 で保持する。
 
@@ -56,6 +58,19 @@
 | `LEGAL` | レジストリ由来の名称 |
 | `ALIAS` | レジストリ名が無いときの provider 表示名。**照合の証拠であり、同一性ではない** |
 | `FORMER` | 旧名称（レジストリが旧名を提供する場合に使用） |
+
+open 行の一意制約は `(issuer_id, name_type)` なので、**ALIAS と LEGAL は同時に open でよい**。レジストリ名が後から得られた発行体は LEGAL 行が開き、それまでの ALIAS 行は「照合に使える別名」として開いたまま残る（意図した挙動）。
+
+既知の弱点: レジストリ名が**取得できなくなった**場合、`ref.issuers.legal_name` は provider の商品名（ALIAS 相当）へ戻る。現在の provider では起きていないが、後退を検知するなら「LEGAL が一度付いた発行体は ALIAS へ降格しない」ガードが必要（D-46 の運用課題）。
+
+### 既知の限界: 衝突集合が変わるとキーが動く
+
+`REGISTRY_ANCHORED` のキーは、**同一 snapshot 内の兄弟銘柄との衝突**によって降格される。したがって次の場合、rebuild 手順を経ずに `security_id` が変わりうる。
+
+- 衝突していた兄弟が上場廃止・非掲載になり、衝突が解消されて `US:CIK:...` へ戻る
+- provider が表示名を変更し、`class token` が変わる
+
+これは「テキスト由来の属性を含むキー」の構造的な帰結であり、confidence を `REGISTRY_ANCHORED` に留めている理由そのものでもある。Phase 2 以降の Raw Market Data が provider の native key と `identity_version` を必ず保持するのは、この再割当を後から追えるようにするため（§6）。現時点では検出も記録もされないので、**Phase 2 で「前回 run に存在した security_id が今回消えた」件数を監視対象にする**（D-40 で恒久対応を決める）。
 
 ## 3. 履歴（SCD2）
 

@@ -143,8 +143,9 @@ opened when a value actually changed, and an unchanged re-observation only moves
 The production worker connects as `surge_worker_prod_app`, a LOGIN role that is a
 member of the `surge_worker_prod` group. Its password is generated inside the
 database by `20260916150300_runtime_principal.sql` and stored in Supabase Vault;
-read it from Vault when configuring a worker. The role has no `DELETE` on the
-history tables and no access to the `research` schema.
+read it from Vault when configuring a worker. The role has no `DELETE` anywhere
+and is read-only on the `research` schema (USAGE + SELECT, never INSERT): research
+output must not be written by the production worker.
 
 ## Rebuilding the master
 
@@ -168,9 +169,9 @@ The runtime worker connects as `surge_worker_prod_app` (a member of
 
 | May write | May only read |
 |---|---|
-| `pipeline.runs`, `pipeline.source_fetches`, `pipeline.run_errors`, `pipeline.master_snapshot`, `ref.issuers`, `ref.issuer_names`, `ref.securities`, `ref.listings`, `ref.listing_states`, `ref.listing_symbols`, `ref.security_names`, `ref.security_identifiers`, `universe.evaluations`, `universe.coverage` | `pipeline.load_host_allowlist`, `pipeline.sources`, `ref.exchanges`, `ref.identity_migration_map`, `universe.definitions`, `universe.decision_reasons` |
+| `pipeline.runs`, `pipeline.source_fetches`, `pipeline.run_errors`, `pipeline.master_snapshot`, `ref.issuers`, `ref.issuer_names`, `ref.securities`, `ref.listings`, `ref.listing_states`, `ref.listing_symbols`, `ref.security_names`, `ref.security_identifiers`, `universe.evaluations`, `universe.coverage` | `pipeline.load_host_allowlist`, `pipeline.sources`, `ref.exchanges`, `ref.identity_migration_map`, `universe.definitions`, `universe.decision_reasons`, and everything in `research` |
 
-`DELETE` is granted nowhere, including `prod`. Since `20260916160000` the default
+`DELETE` is granted to the worker nowhere, including `prod`. It also needs `USAGE` on schema `extensions` to run the loader, which is SECURITY INVOKER (`20260916160800`). Since `20260916160000` the default
 privileges in `ref` / `pipeline` / `universe` grant SELECT only, so **a migration
 that adds a runtime table must grant write explicitly** - a new configuration
 table is read-only unless someone says otherwise. That is how the allowlist

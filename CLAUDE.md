@@ -169,7 +169,7 @@ Phase 完了報告（指示書 §49）:
 - **DB から外部を取得する経路は、短命な署名 URL + host allowlist + https に限る。** DB に raw API key を渡さない。DB から任意 host へ Authorization ヘッダを送らない。
 - **Production の worker は専用の最小権限 LOGIN role で接続する**（DB owner で接続しない）。パスワードは DB 内で生成し Vault に保管する。
 - **runtime の worker は自分の設定を書き換えられない。** `pipeline.load_host_allowlist`・`pipeline.sources`・`ref.exchanges`・`ref.identity_migration_map`・`universe.definitions`・`universe.decision_reasons` は SELECT のみ。変更は migration / DB 管理者が行う。
-- **新しいテーブルは既定で読み取り専用。** `ref` / `pipeline` / `universe` の default privileges は SELECT のみなので、runtime が書くテーブルを追加する migration は書き込み権限を明示的に grant する。`DELETE` はどのスキーマにも与えない。
+- **新しいテーブルは既定で読み取り専用。** `ref` / `pipeline` / `universe` の default privileges は SELECT のみなので、runtime が書くテーブルを追加する migration は書き込み権限を明示的に grant する。**runtime worker（`surge_worker_prod`）には `DELETE` をどのスキーマでも与えない**（research スキーマの DELETE は research ロールのもの）。
 - **このリポジトリは Public。** 公開してよいのはコード・設計文書・Prompt・Schema・Test 等のみ。
 - **絶対に commit しない**: API key / secret / token、`.env` / `.env.local` 等、Supabase service role key、Provider の認証情報、利用規約上再配布できない Raw ニュース等のデータ、Raw market data の大量ダンプ、Production DB dump、Object Storage 内の研究データ、Prediction の実データ、その他の認証情報。
 - 研究データ・Prediction 実データ・Raw 取得データは Private な Supabase / Object Storage 側にのみ保持する。テスト fixture は合成データのみ。

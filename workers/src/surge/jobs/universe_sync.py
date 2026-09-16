@@ -361,6 +361,9 @@ def snapshot_rows(result: SyncResult) -> list[list[Any]]:
                 record.issuer_name,
                 record.issuer_name_source,
                 IDENTITY_VERSION,
+                # normalised from the ISSUER's registry name, so the issuer's
+                # matching key is not a normalised product name
+                normalize_name(record.issuer_name) if record.issuer_name else None,
             ]
         )
         # The SQL loader reads the file positionally and silently drops rows of
@@ -488,7 +491,10 @@ def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | Non
                 "--   select pipeline.load_master_snapshot_from_signed_url("
                 f"{quote(str(result.run_id))}::uuid, '<signed object storage url>');"
             ),
-            f"select ref.apply_master_snapshot({quote(str(result.run_id))}::uuid) as master_result;",
+            (
+                "select ref.apply_master_snapshot_with_name_refresh("
+                f"{quote(str(result.run_id))}::uuid) as master_result;"
+            ),
             (
                 "select universe.apply_snapshot_evaluations("
                 f"{quote(str(result.run_id))}::uuid, {quote(result.universe_version)}, "
@@ -498,7 +504,7 @@ def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | Non
                 "select universe.compute_coverage("
                 f"{quote(str(result.run_id))}::uuid, {quote(result.universe_version)}, "
                 f"{quote(result.as_of_date)}::date, {quote(expected_json)}::jsonb, "
-                f"{quote('provider_file_row_count')}) as coverage_rows;"
+                f"{quote('provider_parsed_record_count')}) as coverage_rows;"
             ),
             (
                 "-- coverage splits the run diagnostics by kind: expected here are "

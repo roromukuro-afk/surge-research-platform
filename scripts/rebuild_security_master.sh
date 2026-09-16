@@ -19,7 +19,7 @@ set -euo pipefail
 
 MARKET="${1:?market (JP|US)}"
 LABEL="${2:?identity migration label, e.g. phase-1.1a-identity-rebuild}"
-OUT_DIR="${3:-./.local/rebuild}"
+OUT_DIR="${3:-./.local/rebuild}"   # git-ignored; never inside a tracked directory
 BUCKET="${SNAPSHOT_BUCKET:-phase1-load}"
 EXPIRES="${SIGNED_URL_TTL:-300}"
 
@@ -30,8 +30,11 @@ EXPIRES="${SIGNED_URL_TTL:-300}"
 lower_market="$(echo "$MARKET" | tr '[:upper:]' '[:lower:]')"
 object_path="rebuild/${lower_market}_snapshot.tsv"
 
+mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"   # absolute: the job runs from workers/
+
 echo "1/6 fetching ${MARKET} from the official sources"
-(cd workers && PYTHONPATH=src python -m surge.cli universe-sync --market "$MARKET" --out "$(cd "$OLDPWD" && cd "$OUT_DIR" && pwd)")
+(cd workers && PYTHONPATH=src python -m surge.cli universe-sync --market "$MARKET" --out "$OUT_DIR")
 
 run_id="$(python -c "import json,sys; print(json.load(open(sys.argv[1]))['run_id'])" \
   "${OUT_DIR}/${lower_market}_summary.json")"
