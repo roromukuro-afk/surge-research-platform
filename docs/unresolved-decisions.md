@@ -88,6 +88,7 @@
 | D-41 | 技術 | JP の `PROVISIONAL` 発行体 732 件（EDINET コード一覧に載らない ETF・REIT・出資証券等）の扱い | Phase 2 前 | 発行体の統合が必要になるのは主に普通株。EDINET 未突合は UNRESOLVED/EXCLUDED 側に偏っている |
 | D-42 | 投資ロジック/技術 | 同一 CIK に複数の証券がぶら下がる 640 CIK（クラス株・優先株・ワラント等）のうち、どこまでを「同一発行体の別クラス」として扱い、どこからを別発行体とみなすか | Phase 3 前 | 現状は CIK = 発行体、クラスは証券側で分離。例外（合併・持株会社化で CIK が変わる場合）の扱いは未定 |
 | D-43 | 技術 | US の identity collision 240 レコード / **67 distinct キー**（同一 CIK・同一種別・同一クラスに複数銘柄。最大は `US:CIK:0000927971:ETF:` の 42 銘柄）を、どの追加属性で分離するか | Phase 3 前 | 現状は両方を PROVISIONAL に降格し、`context` 付きで警告に残す。大半は ETN / レバレッジ ETF。discriminator を広げると 240 件の `security_id` が変わるため、rebuild としてしか実施できない |
+| D-53 | 技術 | 同一 `as_of_date` に同じ市場の run が複数ある場合（再取得・再構築）、下流（Phase 2 の価格取得、現在 Eligibility の参照）はどの run の `universe.evaluations` を正とするか。現在は run ごとに全件が残り、最新 run を選ぶ規則が未定義 | Phase 2 前 | `run_id` の最新（`finished_at` 最大）を採る素直な規則で足りるはずだが、再構築時に「途中まで失敗した run」を選ばないためのガードが要る |
 | D-01b | 投資ロジック | 「次の取引可能時点」の定義 | Phase 8 前 | 判断しない |
 | D-02a | 技術/投資ロジック | FX の Provider と許容遅延 | Phase 2 前 | — |
 | D-03b | 費用/技術 | Object Storage プロバイダ | Phase 2 前 | Phase 1 はローカル実装 |
