@@ -107,3 +107,82 @@ def test_a_production_artefact_without_a_commit_is_refused(tmp_path):
     result.run_mode = "DEV"
     written = write_sql_artifacts(result, tmp_path)
     assert written
+
+
+# ----------------------------------------- Phase 1.1c: temporal provenance
+def test_data_cutoff_is_the_last_source_not_the_first():
+    """A run is not usable until everything it depends on has arrived."""
+
+    from datetime import UTC, datetime, timedelta
+
+    from surge.jobs.universe_sync import dependency_available_at, first_source_available_at
+    from surge.models import Provenance
+
+    base = datetime(2026, 9, 16, 7, 23, 41, tzinfo=UTC)
+
+    def at(seconds: int, source: str) -> Provenance:
+        moment = base + timedelta(seconds=seconds)
+        return Provenance(
+            source_id=source, endpoint="fixture://", requested_at=moment, received_at=moment,
+            http_status=200, bytes=1, content_sha256="a" * 64, item_count=1,
+            observed_at=moment, available_at=moment,
+        )
+
+    # the real shape of a US run: Nasdaq, then the SEC ticker file, then two SIC pages
+    provenances = [
+        at(0, "nasdaq_trader_symbol_directory"),
+        at(1, "sec_company_tickers"),
+        at(32, "sec_sic_directory"),
+        at(42, "sec_sic_directory"),
+    ]
+
+    assert dependency_available_at(provenances) == base + timedelta(seconds=42)
+    assert first_source_available_at(provenances) == base
+    # the primary provider's time is NOT the cutoff
+    assert dependency_available_at(provenances) != provenances[0].available_at
+
+
+def test_snapshot_rows_use_the_dependency_cutoff(tmp_path):
+    """Every row's available_at is the last source, not the primary provider's."""
+
+    import uuid as uuid_module
+    from datetime import UTC, datetime, timedelta
+
+    from surge.jobs.universe_sync import SyncResult, snapshot_rows
+    from surge.models import Provenance, RawSecurityRecord, UniverseDecision
+    from surge.sql_emit import SNAPSHOT_COLUMNS
+
+    base = datetime(2026, 9, 16, 7, 0, tzinfo=UTC)
+    late = base + timedelta(minutes=5)
+
+    def provenance(source: str, moment: datetime) -> Provenance:
+        return Provenance(
+            source_id=source, endpoint="fixture://", requested_at=moment, received_at=moment,
+            http_status=200, bytes=1, content_sha256="b" * 64, item_count=1,
+            observed_at=moment, available_at=moment,
+        )
+
+    record = RawSecurityRecord(
+        source_id="jpx_listed_issues", source_record_id="1301", market_code="JP",
+        exchange_id="XTKS", local_code="1301", symbol="1301", name="極洋",
+        security_type="COMMON_STOCK", currency="JPY", country="JP",
+    )
+    from surge.jobs.universe_sync import resolve_identities
+
+    issuers, securities, _ = resolve_identities([record])
+    result = SyncResult(
+        run_id=uuid_module.uuid4(), market_code="JP", as_of_date=base.date(),
+        universe_version="universe-1.0.0",
+        records=[record],
+        decisions=[UniverseDecision("INCLUDED", "TARGET_MARKET_COMMON_STOCK")],
+        provenances=[provenance("jpx_listed_issues", base), provenance("edinet_code_list", late)],
+        errors=[], run_mode="DEV",
+        issuer_identities=issuers, security_identities=securities,
+    )
+
+    row = snapshot_rows(result)[0]
+    observed_at = row[SNAPSHOT_COLUMNS.index("observed_at")]
+    available_at = row[SNAPSHOT_COLUMNS.index("available_at")]
+
+    assert observed_at == base, "observed_at stays the primary payload's read time"
+    assert available_at == late, "available_at waits for the enrichment source"

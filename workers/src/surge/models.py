@@ -85,6 +85,9 @@ class FetchResult:
     records: tuple[RawSecurityRecord, ...]
     provenance: Provenance
     errors: tuple[str, ...] = ()
+    # Provider detail worth keeping with the run but not worth a column, such as
+    # the component digests behind a combined content hash.
+    notes: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -106,6 +109,9 @@ class RunError:
 ERROR_PROVIDER_DATA = "PROVIDER_DATA"
 ERROR_DATA_QUALITY = "DATA_QUALITY"
 ERROR_IDENTITY_COLLISION = "IDENTITY_COLLISION"
+# A source that decides classification came back incomplete. Counted as a data
+# quality warning in coverage, but it blocks publication.
+ERROR_CRITICAL_SOURCE_INCOMPLETE = "CRITICAL_SOURCE_INCOMPLETE"
 
 
 @dataclass(frozen=True)

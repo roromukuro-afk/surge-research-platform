@@ -136,3 +136,19 @@ def test_sic_membership_hash_moves_the_run_fingerprint():
     assert sic_membership_hash("6770", {"0000000002", "0000000001"}) == before
     # and it is not simply empty any more
     assert before != ""
+
+
+def test_nasdaq_combined_content_hash_is_a_real_digest():
+    """It was two digests joined with a colon, which is not a SHA-256."""
+
+    import re
+
+    from surge.providers.nasdaq_trader import combined_content_hash
+
+    digest = combined_content_hash("a" * 64, "b" * 64)
+    assert re.fullmatch(r"[0-9a-f]{64}", digest)
+    assert ":" not in digest
+    # each component matters, and their order does
+    assert digest != combined_content_hash("a" * 64, "c" * 64)
+    assert digest != combined_content_hash("b" * 64, "a" * 64)
+    assert digest == combined_content_hash("a" * 64, "b" * 64)

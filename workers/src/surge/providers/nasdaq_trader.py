@@ -6,6 +6,7 @@ and carries the exchange code, the ETF flag and the test issue flag.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from datetime import UTC, datetime
 
@@ -107,6 +108,19 @@ def classify_security_name(name: str, *, etf_flag: str | None) -> tuple[str, boo
     return "UNKNOWN", is_adr, evidence
 
 
+def combined_content_hash(nasdaq_sha256: str, other_sha256: str) -> str:
+    """One 64 hex digest for the two files this provider reads as a unit.
+
+    Concatenating the two hashes with a colon produced a 129 character string
+    that is not a SHA-256, so anything treating content_sha256 as a digest (a
+    length check, a constraint, another system) was wrong about it. The
+    components stay available in the run notes.
+    """
+
+    payload = "\n".join([f"nasdaqlisted:{nasdaq_sha256}", f"otherlisted:{other_sha256}"])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 class NasdaqTraderProvider:
     """Reads both symbol directory files. No credentials required."""
 
@@ -151,12 +165,21 @@ class NasdaqTraderProvider:
             received_at=other.received_at,
             http_status=max(nasdaq.status, other.status),
             bytes=nasdaq.bytes + other.bytes,
-            content_sha256=f"{nasdaq.sha256}:{other.sha256}",
+            content_sha256=combined_content_hash(nasdaq.sha256, other.sha256),
             item_count=len(records),
             observed_at=other.received_at,
             available_at=other.received_at,
         )
-        return FetchResult(records=tuple(records), provenance=provenance, errors=tuple(errors))
+        return FetchResult(
+            records=tuple(records),
+            provenance=provenance,
+            errors=tuple(errors),
+            notes={
+                "nasdaqlisted_sha256": nasdaq.sha256,
+                "otherlisted_sha256": other.sha256,
+                "combined_hash_rule": "sha256('nasdaqlisted:<h1>' || chr(10) || 'otherlisted:<h2>')",
+            },
+        )
 
 
 def _rows(text: str) -> list[dict[str, str]]:

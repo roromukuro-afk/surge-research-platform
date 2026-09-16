@@ -31,6 +31,11 @@ pytestmark = [
 ]
 
 UNIVERSE_VERSION = "universe-1.0.0"
+REQUIRED_US_SOURCES = (
+    "nasdaq_trader_symbol_directory",
+    "sec_company_tickers",
+    "sec_sic_directory",
+)
 
 
 @pytest.fixture()
@@ -53,23 +58,28 @@ def _publishable_run(cur, market: str, observed_at, *, symbol: str, status: str 
         update pipeline.runs
         set status = %s,
             finished_at = %s,
+            data_cutoff = %s,
             git_sha = 'deadbeef',
             config_hash = 'cfg-test',
             versions = '{"universe_version": "universe-1.0.0", "identity_version": "identity-test",
                          "job_version": "test"}'::jsonb,
-            provider_bindings = '{"test_source": "fixture://"}'::jsonb
+            provider_bindings = '{"test_source": "fixture://"}'::jsonb,
+            params = '{"source_data_version": "test-version"}'::jsonb
         where run_id = %s
         """,
-        (status, observed_at, str(run_id)),
+        (status, observed_at, observed_at, str(run_id)),
     )
-    cur.execute(
-        """
-        insert into pipeline.source_fetches (run_id, source_id, endpoint, requested_at, received_at,
-                                             http_status, item_count, bytes, observed_at, available_at)
-        values (%s, 'nasdaq_trader_symbol_directory', 'fixture://', %s, %s, 200, 1, 1, %s, %s)
-        """,
-        (str(run_id), observed_at, observed_at, observed_at, observed_at),
-    )
+    # every source this market cannot be published without, each with a real digest
+    for index, source in enumerate(REQUIRED_US_SOURCES):
+        cur.execute(
+            """
+            insert into pipeline.source_fetches (run_id, source_id, endpoint, requested_at, received_at,
+                                                 http_status, item_count, bytes, content_sha256,
+                                                 observed_at, available_at)
+            values (%s, %s, 'fixture://', %s, %s, 200, 1, 1, %s, %s, %s)
+            """,
+            (str(run_id), source, observed_at, observed_at, f"{index:064x}", observed_at, observed_at),
+        )
     key = f"US:CIK:{uuid.uuid4().hex[:8]}:COMMON_STOCK:"
     _add_snapshot_row(cur, run_id, symbol=symbol, identity_key=key, observed_at=observed_at)
     _apply(cur, run_id)

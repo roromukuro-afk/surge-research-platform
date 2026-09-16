@@ -31,6 +31,7 @@ from surge.identity import (
     security_identity,
 )
 from surge.models import (
+    ERROR_CRITICAL_SOURCE_INCOMPLETE,
     ERROR_DATA_QUALITY,
     ERROR_IDENTITY_COLLISION,
     ERROR_PROVIDER_DATA,
@@ -114,6 +115,22 @@ class SyncResult:
                 if error.error_type == ERROR_IDENTITY_COLLISION
             }
         )
+
+
+def dependency_available_at(provenances: list[Provenance]) -> datetime:
+    """When everything this run depends on had become usable.
+
+    A run that mixes JPX with EDINET, or Nasdaq with two SEC lookups, is not
+    knowable until the last of them arrived. Taking the primary provider's time
+    would date the result earlier than the information it contains, which is the
+    one direction a cutoff must never be wrong in.
+    """
+
+    return max(provenance.available_at for provenance in provenances)
+
+
+def first_source_available_at(provenances: list[Provenance]) -> datetime:
+    return min(provenance.available_at for provenance in provenances)
 
 
 def canonical_config_hash(config: dict[str, Any]) -> str:
@@ -270,6 +287,8 @@ def run_universe_sync(
         records = list(fetched.records)
         provenances.append(fetched.provenance)
         errors.extend(_provider_errors(fetched.errors))
+        if fetched.notes:
+            notes["nasdaq_trader"] = fetched.notes
 
         cik_map, cik_provenance = SecCompanyTickers(user_agent=settings.user_agent).fetch_map()
         provenances.append(cik_provenance)
@@ -299,11 +318,18 @@ def run_universe_sync(
         notes["sic_blank_check"] = {"ciks": len(spac.ciks), "pages": spac.pages_fetched, "truncated": spac.truncated}
         notes["sic_reit"] = {"ciks": len(reit.ciks), "pages": reit.pages_fetched, "truncated": reit.truncated}
         if spac.truncated or reit.truncated:
+            # SPAC and REIT membership decide universe classification. An
+            # incomplete read is not a warning to note and move on: a run built
+            # on it must not become the published universe.
             errors.append(
                 RunError(
-                    error_type=ERROR_DATA_QUALITY,
-                    message="SEC SIC listing truncated at max_pages; SPAC/REIT detection may be incomplete",
-                    context={"sic_blank_check_truncated": spac.truncated, "sic_reit_truncated": reit.truncated},
+                    error_type=ERROR_CRITICAL_SOURCE_INCOMPLETE,
+                    message="SEC SIC listing truncated at max_pages; SPAC/REIT classification is incomplete",
+                    context={
+                        "sic_blank_check_truncated": spac.truncated,
+                        "sic_reit_truncated": reit.truncated,
+                        "blocks_publication": True,
+                    },
                     stage="classify",
                 )
             )
@@ -377,6 +403,10 @@ def _spac_flag(record: RawSecurityRecord, decision: UniverseDecision) -> bool | 
 def snapshot_rows(result: SyncResult) -> list[list[Any]]:
     version = _sources_data_version(result.provenances)
     primary = result.provenances[0]
+    # observed_at: when the primary payload was read.
+    # available_at: when the LAST source this row depends on became usable, so a
+    # row is never visible to an as-of read before its inputs existed.
+    available_at = dependency_available_at(result.provenances)
     rows: list[list[Any]] = []
     expected_width = len(SNAPSHOT_COLUMNS)
     for record, decision, issuer, security in zip(
@@ -418,7 +448,7 @@ def snapshot_rows(result: SyncResult) -> list[list[Any]]:
                 # already fully described by its own columns.
                 Json(decision.detail if decision.decision != "INCLUDED" else {}),
                 primary.observed_at,
-                primary.available_at,
+                available_at,
                 version,
                 record.issuer_name,
                 record.issuer_name_source,
@@ -491,7 +521,7 @@ def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | Non
                 ),
                 "RUNNING",
                 result.as_of_date,
-                result.provenances[0].observed_at,
+                dependency_available_at(result.provenances),
                 git_sha,
                 config_hash,
                 Json(
@@ -502,7 +532,17 @@ def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | Non
                     }
                 ),
                 Json({provenance.source_id: provenance.endpoint for provenance in result.provenances}),
-                Json({"source_data_version": version, "config": result.config, "notes": result.notes}),
+                Json(
+                    {
+                        "source_data_version": version,
+                        "config": result.config,
+                        "notes": result.notes,
+                        "first_source_available_at": first_source_available_at(
+                            result.provenances
+                        ).isoformat(),
+                        "data_cutoff_rule": "max(source_fetches.available_at)",
+                    }
+                ),
                 "local-cli",
             ]
         ],
