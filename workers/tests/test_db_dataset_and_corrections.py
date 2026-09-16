@@ -153,8 +153,8 @@ def test_re_confirming_provenance_does_not_move_the_ingestion_run(conn):
             (key,),
         )
         identifier_id, ingestion_run, provenance_run = cur.fetchone()
-        assert ingestion_run == first
-        assert provenance_run == first
+        assert str(ingestion_run) == str(first)
+        assert str(provenance_run) == str(first)
 
         # a second run re-observes the same value from a later fetch
         second = _new_run(cur, "US", T2)
@@ -170,8 +170,8 @@ def test_re_confirming_provenance_does_not_move_the_ingestion_run(conn):
             (identifier_id,),
         )
         ingestion_run, provenance_run, observed_at = cur.fetchone()
-        assert ingestion_run == first, "the row was still created by the first run"
-        assert provenance_run == second, "but the second run is what last confirmed it"
+        assert str(ingestion_run) == str(first), "the row was still created by the first run"
+        assert str(provenance_run) == str(second), "but the second run is what last confirmed it"
         assert observed_at == T2
     conn.rollback()
 
@@ -194,10 +194,14 @@ def test_a_provenance_correction_is_recorded(conn):
         )
         identifier_id = cur.fetchone()[0]
 
+        cur.execute("select source_id from ref.security_identifiers where identifier_id = %s", (identifier_id,))
+        original_source = cur.fetchone()[0]
+        corrected_source = "edinet_code_list" if original_source != "edinet_code_list" else "sec_company_tickers"
+
         cur.execute(
-            "update ref.security_identifiers set source_id = 'sec_company_tickers', "
+            "update ref.security_identifiers set source_id = %s, "
             "last_provenance_run_id = %s where identifier_id = %s",
-            (str(run), identifier_id),
+            (corrected_source, str(run), identifier_id),
         )
         cur.execute(
             """
@@ -211,9 +215,9 @@ def test_a_provenance_correction_is_recorded(conn):
         assert len(rows) == 1
         changed, before, after, correction_run = rows[0]
         assert changed == ["source_id"]
-        assert after["source_id"] == "sec_company_tickers"
-        assert before["source_id"] != after["source_id"]
-        assert correction_run == run
+        assert after["source_id"] == corrected_source
+        assert before["source_id"] == original_source
+        assert str(correction_run) == str(run)
     conn.rollback()
 
 
