@@ -47,6 +47,11 @@ SNAPSHOT_COLUMNS = (
     "observed_at",
     "available_at",
     "source_data_version",
+    # Phase 1.1a. Appended, never inserted in the middle: the SQL loader reads
+    # the TSV positionally, so every existing position has to stay where it is.
+    "issuer_name",
+    "issuer_name_source",
+    "identity_version",
 )
 
 
@@ -94,9 +99,12 @@ def chunked(rows: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
 # format needs no quoting and survives Japanese text unchanged.
 FIELD_DELIMITER = "\x1f"
 
-# Same order as pipeline.load_master_snapshot_from_url expects, minus run_id
-# which is passed to the function.
+# Same order as pipeline.load_master_snapshot_from_signed_url expects, minus
+# run_id which is passed to the function. The loader checks the field count and
+# silently drops rows of the wrong width, so this number is a contract:
+# test_snapshot_width.py asserts it against the migration.
 TSV_COLUMNS = tuple(column for column in SNAPSHOT_COLUMNS if column != "run_id")
+TSV_FIELD_COUNT = len(TSV_COLUMNS)
 
 
 def tsv_value(value: Any) -> str:

@@ -28,16 +28,26 @@ a local directory that is git-ignored.
 |---|---|---|
 | Issuer, US | `CIK:<cik>` | STRONG |
 | Issuer, JP | `EDINET:<code>` | STRONG |
-| Issuer, fallback | `NAME:<market>:<normalized name>` | PROVISIONAL |
+| Issuer, fallback | `ISSUER-OF:<security identity key>` | PROVISIONAL |
 | Security, JP | `JP:JPX:<local code>` | STRONG |
-| Security, US with CIK | `US:CIK:<cik>:<type>:<class token>` | STRONG |
+| Security, US with CIK | `US:CIK:<cik>:<type>:<class token>` | REGISTRY_ANCHORED |
 | Security, US fallback | `US:<exchange>:SYMBOL:<symbol>` | PROVISIONAL |
 | Listing | `<exchange>` + the security identity key | follows the security |
 
-Two records that resolve to the same strong security key but are different
-instruments are both demoted to the provisional key and reported as a provider
-warning; they are never merged. A ticker change is ticker history on the same
-listing, not a new security.
+`STRONG` means a registry issued the identifier for that thing. The US security
+key mixes a CIK with a type and a share class read out of the provider's display
+name, so a formatting change can move it: it is `REGISTRY_ANCHORED`, never
+`STRONG`. Nothing is promoted automatically.
+
+The fallback issuer key follows the security's own coordinate and never a name:
+two companies whose names normalise to the same string stay separate issuers,
+because a false split can be merged later and a false merge cannot be undone.
+The provider's name is kept as an `ALIAS` row in `ref.issuer_names`.
+
+Two records that resolve to the same reusable security key but are different
+instruments are both demoted to the provisional key and reported with
+`error_type = 'IDENTITY_COLLISION'`; they are never merged. A ticker change is
+ticker history on the same listing, not a new security.
 
 ## Run it
 
@@ -57,7 +67,7 @@ Output per market:
 | File | Contents |
 |---|---|
 | `<market>_00_run.sql` | `pipeline.runs`, `pipeline.source_fetches`, `pipeline.run_errors` |
-| `<market>_snapshot.tsv` | the snapshot itself, unit separator (`0x1f`) delimited, 33 fields per line |
+| `<market>_snapshot.tsv` | the snapshot itself, unit separator (`0x1f`) delimited, 36 fields per line |
 | `<market>_99_apply.sql` | `ref.apply_master_snapshot`, `universe.apply_snapshot_evaluations`, `universe.compute_coverage`, run completion |
 | `<market>_summary.json` | counts, decision and reason breakdown, identity breakdown, source provenance |
 
@@ -147,8 +157,39 @@ has to stay auditable:
    `pipeline.runs` and `pipeline.source_fetches` are kept: they are the record of
    what was ingested and when.
 3. The job is re-run from the official sources and loaded as above.
-4. `20260916150500` fills `new_security_id` / `new_listing_id` / `new_issuer_id`
-   so old → new can be reconstructed.
+4. `ref.finalize_identity_rebuild('<label>')` fills `new_security_id` /
+   `new_listing_id` / `new_issuer_id` so old → new can be reconstructed. It is a
+   post-reload step, not a migration: it errors out if the master is empty.
+
+## Who may write what
+
+The runtime worker connects as `surge_worker_prod_app` (a member of
+`surge_worker_prod`) and may write only its own output:
+
+| May write | May only read |
+|---|---|
+| `pipeline.runs`, `pipeline.source_fetches`, `pipeline.run_errors`, `pipeline.master_snapshot`, `ref.issuers`, `ref.issuer_names`, `ref.securities`, `ref.listings`, `ref.listing_states`, `ref.listing_symbols`, `ref.security_names`, `ref.security_identifiers`, `universe.evaluations`, `universe.coverage` | `pipeline.load_host_allowlist`, `pipeline.sources`, `ref.exchanges`, `ref.identity_migration_map`, `universe.definitions`, `universe.decision_reasons` |
+
+`DELETE` is granted nowhere, including `prod`. Since `20260916160000` the default
+privileges in `ref` / `pipeline` / `universe` grant SELECT only, so **a migration
+that adds a runtime table must grant write explicitly** - a new configuration
+table is read-only unless someone says otherwise. That is how the allowlist
+became writable in the first place.
+
+## Upgrade procedure (an existing database)
+
+Applying the migrations does **not** by itself migrate an existing master: the
+rebuild migration records the old identifiers and clears the master, and the new
+identifiers only exist after the providers have been re-fetched. Run, per market:
+
+```bash
+SUPABASE_DB_URL=... SUPABASE_URL=... SUPABASE_PUBLISHABLE_KEY=...   scripts/rebuild_security_master.sh JP phase-1.1a-identity-rebuild ./.local/rebuild
+SUPABASE_DB_URL=... SUPABASE_URL=... SUPABASE_PUBLISHABLE_KEY=...   scripts/rebuild_security_master.sh US phase-1.1a-identity-rebuild ./.local/rebuild
+```
+
+The script ends with `ref.finalize_identity_rebuild('<label>')`, which fills the
+old -> new id map and **refuses to run while the master is empty**, so a plain
+`db push` can never look like a completed migration.
 
 ## Reading the result
 

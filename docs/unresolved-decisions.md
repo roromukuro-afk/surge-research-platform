@@ -46,6 +46,15 @@
 | D-37 | Production worker の DB principal | 専用の LOGIN role `surge_worker_prod_app`（`surge_worker_prod` のメンバー）で接続する。パスワードは DB 内で生成し Supabase Vault に保管、チャット・ログ・Git に出さない。履歴テーブルへの DELETE と research スキーマへのアクセスを持たない | 2026-09-16 / 監査 Phase 1.1 #7 | 同上 |
 | D-38 | 下流工程の取得対象 | **価格・FX の取得対象は `INCLUDED` ∪ `UNRESOLVED`。** `UNRESOLVED` を黙って落とさない（落とすと判定確定前の価格が欠落して後追い評価ができない）。ただし `UNRESOLVED` は ENTRY 候補にしない | 2026-09-16 / 監査 Phase 1.1 #12 | [universe-definition-v1.0.0.md](specs/universe-definition-v1.0.0.md) §5 |
 | D-39 | 同一性を変える再構築の手順 | 旧 ID を `ref.identity_migration_map` に記録 → master/判定/coverage/staging を削除（`pipeline.runs`・`source_fetches` は保持）→ 公式ソースから再取得 → 新旧 ID 対応を埋める。手順は versioned migration と worker code に残す | 2026-09-16 / 監査 Phase 1.1 #10 | [security-identity.md](specs/security-identity.md) §4 |
+| D-44 | Identity confidence の語彙 | `STRONG`（そのものに対するレジストリ識別子）/ `REGISTRY_ANCHORED`（レジストリ識別子＋provider テキスト由来の属性）/ `PROVISIONAL` の3段階。US の `US:CIK:<cik>:<type>:<class>` は表示名由来の要素を含むため `REGISTRY_ANCHORED`。昇格は自動で行わず `identity_version` を伴う記録された migration とする。降格判定は「再利用可能な tier の集合」で行い、単一値比較にしない | 2026-09-16 / 監査 Phase 1.1a #6 | [security-identity.md](specs/security-identity.md) §1 |
+| D-45 | レジストリ識別子が無い発行体 | 名称一致で統合しない。fallback キーは security の座標（`ISSUER-OF:<security identity key>`）。名称は `ref.issuer_names` の `ALIAS`。**false merge より false split を優先**し、stable identifier が得られた時点で identity migration として統合する | 2026-09-16 / 監査 Phase 1.1a #5 | 同上 §1・§2 |
+| D-46 | 発行体名の出所 | `ref.issuers.legal_name` はレジストリ名（SEC registrant name / EDINET 提出者名）。商品名を発行体名にしない。履歴は `ref.issuer_names`（LEGAL / FORMER / ALIAS）に SCD2 で保持 | 2026-09-16 / 監査 Phase 1.1a #4 | 同上 §2 |
+| D-47 | runtime worker の権限境界 | 設定・参照データ（allowlist / sources / exchanges / definitions / decision_reasons / identity_migration_map）は runtime SELECT のみ。変更は migration / DB 管理者。default privileges も SELECT のみに変更し、新規テーブルは明示 grant が無い限り書き込み不可。`DELETE` はどのスキーマにも与えない | 2026-09-16 / 監査 Phase 1.1a #1・#2 | [phase-1-universe-sync.md](runbooks/phase-1-universe-sync.md) |
+| D-48 | 過去 Ticker の正本 | `ref.listing_symbols`（SCD2）。`ref.listings.local_code` は current materialized state であり as-of の正本にしない。`ref.listings_as_of()` は同一カットオフで symbol を返す | 2026-09-16 / 監査 Phase 1.1a #3 | [security-identity.md](specs/security-identity.md) §4 |
+| D-49 | Rebuild 手順の再現性 | 旧→新 ID の充填は migration ではなく post-reload の手続き（`ref.finalize_identity_rebuild`）。master が空なら例外で拒否する。手順は `scripts/rebuild_security_master.sh` と runbook に残す | 2026-09-16 / 監査 Phase 1.1a #9 | 同上 §5 |
+| D-50 | Coverage の診断内訳 | `provider_error_count` / `data_quality_warning_count` / `identity_collision_record_count` / `identity_collision_key_count` に分離。run_errors の全行がいずれか1つに入る | 2026-09-16 / 監査 Phase 1.1a #7 | [phase-1-universe-sync.md](runbooks/phase-1-universe-sync.md) |
+| D-51 | `ref.listing_status_history` | Phase 1.1a で廃止（空・後継は `ref.listing_states`）。行が存在する環境では DROP せず DEPRECATED を明示する | 2026-09-16 / 監査 Phase 1.1a #8 | `20260916160500` |
+| D-52 | Phase 2 の Raw Market Data キー | `security_id` を唯一の復元キーにしない。`provider_id` / native symbol / exchange / `observed_at` / source record id（provider security id）/ `identity_version` を必ず保存する | 2026-09-16 / 監査 Phase 1.1a #6 | [security-identity.md](specs/security-identity.md) §6 |
 
 ---
 
@@ -75,10 +84,10 @@
 | ID | 種別 | 論点 | 必要な時期 | Claude Code の意見 |
 |---|---|---|---|---|
 | D-01a | 投資ロジック | `entry_price_method` | Phase 8 前 | 場中 Provider の能力を確認してから |
-| D-40 | 技術 | US の `PROVISIONAL` 証券 6,328 件（SEC `company_tickers_exchange.json` に CIK がない ETF・ワラント等）を、別の公式ソースで STRONG 化するか、PROVISIONAL のまま運用するか | Phase 2 前（`INCLUDED` に PROVISIONAL は 0 件のため blocker ではない） | ほぼ ETF・ユニット・ワラントで、`INCLUDED` には入らない。Phase 2 で `INCLUDED` ∪ `UNRESOLVED` を追跡する範囲では影響が小さい |
+| D-40 | 技術 | US の `PROVISIONAL` 証券 6,328 件（SEC `company_tickers_exchange.json` に CIK がない ETF・ワラント等）と `REGISTRY_ANCHORED` 6,909 件を、security-level の安定識別子（FIGI / share-class 識別子 / provider の安定 ID）で `STRONG` 化できるか。**Phase 2 の US Provider 選定時に取得可否を確認し、取得できた場合にのみ昇格する**（D-44） | Phase 2 の Provider 選定時 | ほぼ ETF・ユニット・ワラントで、`INCLUDED` には入らない。Phase 2 で `INCLUDED` ∪ `UNRESOLVED` を追跡する範囲では影響が小さい |
 | D-41 | 技術 | JP の `PROVISIONAL` 発行体 732 件（EDINET コード一覧に載らない ETF・REIT・出資証券等）の扱い | Phase 2 前 | 発行体の統合が必要になるのは主に普通株。EDINET 未突合は UNRESOLVED/EXCLUDED 側に偏っている |
 | D-42 | 投資ロジック/技術 | 同一 CIK に複数の証券がぶら下がる 640 CIK（クラス株・優先株・ワラント等）のうち、どこまでを「同一発行体の別クラス」として扱い、どこからを別発行体とみなすか | Phase 3 前 | 現状は CIK = 発行体、クラスは証券側で分離。例外（合併・持株会社化で CIK が変わる場合）の扱いは未定 |
-| D-43 | 技術 | US の identity collision 240 件（同一 CIK・同一種別・同一クラスに複数銘柄）を、どの追加属性で分離するか | Phase 3 前 | 現状は両方を PROVISIONAL に降格して警告に残す。大半は ETF 系 |
+| D-43 | 技術 | US の identity collision 240 レコード / **67 distinct キー**（同一 CIK・同一種別・同一クラスに複数銘柄。最大は `US:CIK:0000927971:ETF:` の 42 銘柄）を、どの追加属性で分離するか | Phase 3 前 | 現状は両方を PROVISIONAL に降格し、`context` 付きで警告に残す。大半は ETN / レバレッジ ETF。discriminator を広げると 240 件の `security_id` が変わるため、rebuild としてしか実施できない |
 | D-01b | 投資ロジック | 「次の取引可能時点」の定義 | Phase 8 前 | 判断しない |
 | D-02a | 技術/投資ロジック | FX の Provider と許容遅延 | Phase 2 前 | — |
 | D-03b | 費用/技術 | Object Storage プロバイダ | Phase 2 前 | Phase 1 はローカル実装 |

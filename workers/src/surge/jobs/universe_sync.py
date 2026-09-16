@@ -22,8 +22,24 @@ from typing import Any
 
 from surge import JOB_VERSION
 from surge.config import Settings, load_settings
-from surge.identity import Identity, demote_colliding_identities, issuer_identity, security_identity
-from surge.models import FetchResult, Provenance, RawSecurityRecord, UniverseDecision
+from surge.identity import (
+    IDENTITY_VERSION,
+    Identity,
+    IdentityCollision,
+    demote_colliding_identities,
+    issuer_identity,
+    security_identity,
+)
+from surge.models import (
+    ERROR_DATA_QUALITY,
+    ERROR_IDENTITY_COLLISION,
+    ERROR_PROVIDER_DATA,
+    FetchResult,
+    Provenance,
+    RawSecurityRecord,
+    RunError,
+    UniverseDecision,
+)
 from surge.normalize import normalize_name
 from surge.providers.edinet import EdinetCodeList, jpx_code_to_securities_code
 from surge.providers.jpx_listed import JpxListedIssuesProvider
@@ -44,7 +60,7 @@ class SyncResult:
     records: list[RawSecurityRecord]
     decisions: list[UniverseDecision]
     provenances: list[Provenance]
-    errors: list[str]
+    errors: list[RunError]
     issuer_identities: list[Identity] = field(default_factory=list)
     security_identities: list[Identity] = field(default_factory=list)
     expected_population: dict[str, int] = field(default_factory=dict)
@@ -71,6 +87,30 @@ class SyncResult:
         keys = [(record.exchange_id, record.local_code) for record in self.records]
         return len(keys) - len(set(keys))
 
+    # Coverage reports these separately: a provider that failed is not the same
+    # thing as an identity that could not be proven unique.
+    @property
+    def provider_error_count(self) -> int:
+        return sum(1 for error in self.errors if error.error_type == ERROR_PROVIDER_DATA)
+
+    @property
+    def data_quality_warning_count(self) -> int:
+        return sum(1 for error in self.errors if error.error_type == ERROR_DATA_QUALITY)
+
+    @property
+    def identity_collision_record_count(self) -> int:
+        return sum(1 for error in self.errors if error.error_type == ERROR_IDENTITY_COLLISION)
+
+    @property
+    def identity_collision_key_count(self) -> int:
+        return len(
+            {
+                error.context.get("identity_key")
+                for error in self.errors
+                if error.error_type == ERROR_IDENTITY_COLLISION
+            }
+        )
+
 
 def _sources_data_version(provenances: list[Provenance]) -> str:
     """One short, stable fingerprint of every source snapshot used by the run."""
@@ -79,18 +119,22 @@ def _sources_data_version(provenances: list[Provenance]) -> str:
     return hashlib.sha256(parts.encode()).hexdigest()[:24] if parts else "unversioned"
 
 
-def resolve_identities(records: list[RawSecurityRecord]) -> tuple[list[Identity], list[Identity], list[str]]:
-    """Issuer and security identity for each record, with collision fallback."""
+def _provider_errors(messages: list[str] | tuple[str, ...]) -> list[RunError]:
+    """Provider level failures: a file that would not parse, a code we cannot map."""
 
-    issuers = [
-        issuer_identity(
-            market_code=record.market_code,
-            normalized_name=normalize_name(record.name),
-            cik=record.cik,
-            edinet_code=record.edinet_code,
-        )
-        for record in records
-    ]
+    return [RunError(error_type=ERROR_PROVIDER_DATA, message=message) for message in messages]
+
+
+def resolve_identities(
+    records: list[RawSecurityRecord],
+) -> tuple[list[Identity], list[Identity], list[IdentityCollision]]:
+    """Issuer and security identity for each record, with collision fallback.
+
+    Securities are resolved first, because an issuer without a registry
+    identifier is keyed on its security's coordinate rather than on a name: a
+    name that two companies happen to share must not merge them.
+    """
+
     securities = [
         security_identity(
             market_code=record.market_code,
@@ -103,13 +147,23 @@ def resolve_identities(records: list[RawSecurityRecord]) -> tuple[list[Identity]
         )
         for record in records
     ]
-    securities, notes = demote_colliding_identities(
+    securities, collisions = demote_colliding_identities(
         securities,
         exchange_ids=[record.exchange_id for record in records],
         symbols=[record.symbol for record in records],
         local_codes=[record.local_code for record in records],
+        market_codes=[record.market_code for record in records],
     )
-    return issuers, securities, notes
+    issuers = [
+        issuer_identity(
+            market_code=record.market_code,
+            security_identity_key=security.key,
+            cik=record.cik,
+            edinet_code=record.edinet_code,
+        )
+        for record, security in zip(records, securities, strict=True)
+    ]
+    return issuers, securities, collisions
 
 
 def run_universe_sync(
@@ -122,7 +176,7 @@ def run_universe_sync(
     settings = settings or load_settings()
     as_of = as_of or datetime.now(UTC).date()
     run_id = uuid.uuid4()
-    errors: list[str] = []
+    errors: list[RunError] = []
     provenances: list[Provenance] = []
     notes: dict[str, Any] = {}
 
@@ -130,7 +184,7 @@ def run_universe_sync(
         fetched: FetchResult = JpxListedIssuesProvider(user_agent=settings.user_agent).fetch_security_master()
         records = list(fetched.records)
         provenances.append(fetched.provenance)
-        errors.extend(fetched.errors)
+        errors.extend(_provider_errors(fetched.errors))
 
         edinet_map, edinet_provenance = EdinetCodeList(user_agent=settings.user_agent).fetch_map()
         provenances.append(edinet_provenance)
@@ -142,8 +196,16 @@ def run_universe_sync(
                 enriched.append(record)
                 continue
             matched += 1
+            # 提出者名 is the filing entity's own name. The JPX workbook only
+            # carries the security display name, which is not the same thing.
             enriched.append(
-                replace(record, edinet_code=issuer.edinet_code, corporate_number=issuer.corporate_number)
+                replace(
+                    record,
+                    edinet_code=issuer.edinet_code,
+                    corporate_number=issuer.corporate_number,
+                    issuer_name=issuer.name or None,
+                    issuer_name_source=EdinetCodeList.provider_id if issuer.name else None,
+                )
             )
         records = enriched
         notes["edinet"] = {
@@ -158,12 +220,19 @@ def run_universe_sync(
         fetched = NasdaqTraderProvider(user_agent=settings.user_agent).fetch_security_master()
         records = list(fetched.records)
         provenances.append(fetched.provenance)
-        errors.extend(fetched.errors)
+        errors.extend(_provider_errors(fetched.errors))
 
         cik_map, cik_provenance = SecCompanyTickers(user_agent=settings.user_agent).fetch_map()
         provenances.append(cik_provenance)
+        # The SEC file carries the EDGAR registrant name next to the CIK; the
+        # Nasdaq directory only has the product name ("... - Common Stock").
         records = [
-            replace(record, cik=cik_map[record.symbol].cik)
+            replace(
+                record,
+                cik=cik_map[record.symbol].cik,
+                issuer_name=cik_map[record.symbol].name or None,
+                issuer_name_source=SecCompanyTickers.provider_id if cik_map[record.symbol].name else None,
+            )
             if record.symbol and record.symbol in cik_map
             else record
             for record in records
@@ -181,7 +250,14 @@ def run_universe_sync(
         notes["sic_blank_check"] = {"ciks": len(spac.ciks), "pages": spac.pages_fetched, "truncated": spac.truncated}
         notes["sic_reit"] = {"ciks": len(reit.ciks), "pages": reit.pages_fetched, "truncated": reit.truncated}
         if spac.truncated or reit.truncated:
-            errors.append("SEC SIC listing truncated at max_pages; SPAC/REIT detection may be incomplete")
+            errors.append(
+                RunError(
+                    error_type=ERROR_DATA_QUALITY,
+                    message="SEC SIC listing truncated at max_pages; SPAC/REIT detection may be incomplete",
+                    context={"sic_blank_check_truncated": spac.truncated, "sic_reit_truncated": reit.truncated},
+                    stage="classify",
+                )
+            )
 
         context = UniverseContext(spac_ciks=spac.ciks, reit_ciks=reit.ciks, sic_lookup_available=True)
         expected = {f"MARKET:{market_code}": fetched.provenance.item_count}
@@ -189,14 +265,25 @@ def run_universe_sync(
     else:
         raise ValueError(f"unsupported market: {market_code}")
 
-    issuer_ids, security_ids, identity_notes = resolve_identities(records)
-    errors.extend(identity_notes)
+    issuer_ids, security_ids, collisions = resolve_identities(records)
+    errors.extend(
+        RunError(
+            error_type=ERROR_IDENTITY_COLLISION,
+            message=collision.message,
+            context=collision.context,
+            stage="resolve_identity",
+        )
+        for collision in collisions
+    )
     decisions = [classify(record, context) for record in records]
 
     notes["identity"] = {
+        "version": IDENTITY_VERSION,
         "security": dict(Counter(identity.source for identity in security_ids)),
         "issuer": dict(Counter(identity.source for identity in issuer_ids)),
-        "collisions": len(identity_notes),
+        "collision_records": len(collisions),
+        "collision_keys": len({collision.identity_key for collision in collisions}),
+        "issuer_names_from_registry": sum(1 for record in records if record.issuer_name),
     }
 
     return SyncResult(
@@ -229,6 +316,7 @@ def snapshot_rows(result: SyncResult) -> list[list[Any]]:
     version = _sources_data_version(result.provenances)
     primary = result.provenances[0]
     rows: list[list[Any]] = []
+    expected_width = len(SNAPSHOT_COLUMNS)
     for record, decision, issuer, security in zip(
         result.records, result.decisions, result.issuer_identities, result.security_identities, strict=True
     ):
@@ -270,8 +358,15 @@ def snapshot_rows(result: SyncResult) -> list[list[Any]]:
                 primary.observed_at,
                 primary.available_at,
                 version,
+                record.issuer_name,
+                record.issuer_name_source,
+                IDENTITY_VERSION,
             ]
         )
+        # The SQL loader reads the file positionally and silently drops rows of
+        # the wrong width, so a mismatch has to fail here instead.
+        if len(rows[-1]) != expected_width:
+            raise ValueError(f"snapshot row has {len(rows[-1])} fields, expected {expected_width}")
     return rows
 
 
@@ -356,8 +451,18 @@ def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | Non
 
     error_sql = insert_statement(
         "pipeline.run_errors",
-        ("run_id", "stage", "severity", "error_type", "message"),
-        [[str(result.run_id), "provider_fetch", "WARNING", "PROVIDER_DATA", message] for message in result.errors],
+        ("run_id", "stage", "severity", "error_type", "message", "context"),
+        [
+            [
+                str(result.run_id),
+                error.stage,
+                error.severity,
+                error.error_type,
+                error.message,
+                Json(error.context),
+            ]
+            for error in result.errors
+        ],
     )
 
     header = out_dir / f"{result.market_code.lower()}_00_run.sql"
@@ -396,6 +501,13 @@ def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | Non
                 f"{quote('provider_file_row_count')}) as coverage_rows;"
             ),
             (
+                "-- coverage splits the run diagnostics by kind: expected here are "
+                f"{result.provider_error_count} provider errors, "
+                f"{result.data_quality_warning_count} data quality warnings, "
+                f"{result.identity_collision_record_count} identity collision records "
+                f"over {result.identity_collision_key_count} keys."
+            ),
+            (
                 "update pipeline.runs set status = 'SUCCEEDED', finished_at = now() "
                 f"where run_id = {quote(str(result.run_id))}::uuid;"
             ),
@@ -417,7 +529,13 @@ def write_sql_artifacts(result: SyncResult, out_dir: Path, *, git_sha: str | Non
         "reasons": result.reason_counts,
         "security_identity_sources": result.identity_counts,
         "issuer_identity_sources": result.issuer_identity_counts,
-        "provider_errors": len(result.errors),
+        # Split, not one "errors" number: 246 provider errors and 6 provider
+        # errors plus 240 identity warnings are very different reports.
+        "provider_errors": result.provider_error_count,
+        "data_quality_warnings": result.data_quality_warning_count,
+        "identity_collision_records": result.identity_collision_record_count,
+        "identity_collision_keys": result.identity_collision_key_count,
+        "identity_version": IDENTITY_VERSION,
         "sources": [
             {
                 "source_id": provenance.source_id,

@@ -103,6 +103,6 @@ Phase 1.1 で判別順を次のとおり明文化した（定義の変更では�
 `UNRESOLVED` は「除外」ではない。**価格・FX の取得対象は `INCLUDED` ∪ `UNRESOLVED`** とし、`UNRESOLVED` を取得対象から黙って落とさない。
 
 - 判定が付いてから価格を取り始めると、判定が付いた日より前の価格が欠落し、後追いで Prediction も Replay もできなくなる。
-- `UNRESOLVED` の銘柄は **ENTRY 候補にはしない**（Universe に含まれていないため）。取得だけ行い、判定が `INCLUDED` に変わった時点で候補に上がる。
+- `UNRESOLVED` の銘柄は **ENTRY 候補にはしない**（Universe に含まれていないため）。取得だけ行い、判定が `INCLUDED` に変わった時点で候補に上がる。**Prediction の対象は Eligibility が解決した `INCLUDED` のみ**（Phase 1.1a 監査 #11）。
 - 取得対象の件数・内訳（`INCLUDED` / `UNRESOLVED`）は run ごとにカバレッジへ記録する。
 - `EXCLUDED` は取得対象外。ただし理由コード別の件数はカバレッジに残す。

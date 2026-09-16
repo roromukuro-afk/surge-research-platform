@@ -31,7 +31,17 @@ SNAPSHOT_COLUMNS = (
     "currency, country, is_adr, is_test_issue, listing_status, cik, "
     "issuer_identity_source, issuer_identity_key, issuer_identity_confidence, "
     "security_identity_source, security_identity_key, security_identity_confidence, "
-    "decision, reason_code, observed_at, available_at, source_data_version"
+    "decision, reason_code, observed_at, available_at, source_data_version, "
+    "issuer_name, issuer_name_source, identity_version"
+)
+
+CONFIG_TABLES = (
+    "pipeline.load_host_allowlist",
+    "pipeline.sources",
+    "ref.exchanges",
+    "universe.definitions",
+    "universe.decision_reasons",
+    "ref.identity_migration_map",
 )
 
 
@@ -73,22 +83,31 @@ def _add_snapshot_row(
     decision: str = "INCLUDED",
     reason: str = "TARGET_MARKET_COMMON_STOCK",
     issuer_key: str = "CIK:0000000001",
+    issuer_source: str = "SEC_CIK",
+    issuer_confidence: str = "STRONG",
+    security_confidence: str = "REGISTRY_ANCHORED",
+    issuer_name: str | None = "Example Registrant Inc.",
+    cik: str | None = "0000000001",
 ) -> None:
     cur.execute(
         f"""
         insert into pipeline.master_snapshot ({SNAPSHOT_COLUMNS})
         values (%s, 'nasdaq_trader_symbol_directory', %s, 'US', %s, %s, %s,
                 %s, %s, 'COMMON_STOCK', %s, null,
-                'USD', 'US', false, false, %s, '0000000001',
-                'SEC_CIK', %s, 'STRONG',
-                'SEC_CIK', %s, 'STRONG',
-                %s, %s, %s, %s, 'test-version')
+                'USD', 'US', false, false, %s, %s,
+                %s, %s, %s,
+                'SEC_CIK', %s, %s,
+                %s, %s, %s, %s, 'test-version',
+                %s, %s, 'identity-test')
         """,
         (
             str(run_id), f"rec:{symbol}", exchange_id, symbol, symbol,
             name, name.lower(), segment,
-            status, issuer_key, identity_key,
+            status, cik,
+            issuer_source, issuer_key, issuer_confidence,
+            identity_key, security_confidence,
             decision, reason, observed_at, observed_at,
+            issuer_name, "sec_company_tickers" if issuer_name else None,
         ),
     )
 

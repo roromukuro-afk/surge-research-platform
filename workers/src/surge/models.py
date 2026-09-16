@@ -68,6 +68,11 @@ class RawSecurityRecord:
     cik: str | None = None
     edinet_code: str | None = None
     corporate_number: str | None = None
+    # The issuing entity's own registry name (SEC registrant / EDINET 提出者名).
+    # `name` above is the provider's security display name and must never be
+    # used as the issuer's legal name.
+    issuer_name: str | None = None
+    issuer_name_source: str | None = None
     type_evidence: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -80,6 +85,27 @@ class FetchResult:
     records: tuple[RawSecurityRecord, ...]
     provenance: Provenance
     errors: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RunError:
+    """One diagnostic from a run, typed so coverage can separate the kinds.
+
+    A provider that failed and a classification warning are not the same thing,
+    and neither may be reported as "the provider returned N errors".
+    """
+
+    error_type: str  # PROVIDER_DATA | DATA_QUALITY | IDENTITY_COLLISION
+    message: str
+    context: dict[str, Any] = field(default_factory=dict)
+    stage: str = "provider_fetch"
+    severity: str = "WARNING"
+
+
+# Error types the database and the coverage function agree on.
+ERROR_PROVIDER_DATA = "PROVIDER_DATA"
+ERROR_DATA_QUALITY = "DATA_QUALITY"
+ERROR_IDENTITY_COLLISION = "IDENTITY_COLLISION"
 
 
 @dataclass(frozen=True)

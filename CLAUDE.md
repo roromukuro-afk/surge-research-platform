@@ -71,12 +71,17 @@ Claude Code はこのプロジェクトの**主任開発エージェント**で�
 - 現行は `universe-1.0.0`。変更は新しい版のファイルで行う。種別を判定できない銘柄を黙って含めない。
 
 ### 1-10b. 銘柄の同一性と履歴
-- **Ticker は同一性ではない。** 正規化した名称も同一性ではない。同一性は公的レジストリの識別子（US = SEC CIK、JP = EDINET コード、Security の JP = JPX ローカルコード）から作る。
-- 作れないときは `PROVISIONAL` として明示し、黙って推測しない。`STRONG` キーの衝突は統合せず両方を降格し、run 警告に残す。
-- Ticker・名称・識別子・上場区分/状態は SCD2 で持つ。変化したときだけ履歴行を開き、無変化の再観測は `last_confirmed_at` を進める。履歴を上書き・削除しない。
-- 過去時点の姿は `ref.listings_as_of()` と同じ規則（`available_at <= cutoff`）でのみ読む。
-- 同一性を変える再構築は [docs/specs/security-identity.md](docs/specs/security-identity.md) §4 の手順に従い、旧 → 新 ID を必ず残す。
-- **`UNRESOLVED` は「除外」ではない。** 下流の価格・FX 取得対象は `INCLUDED` ∪ `UNRESOLVED`。ENTRY 候補にはしない。
+- **Ticker は同一性ではない。** 正規化した名称も同一性ではない（fallback でも使わない）。同一性は公的レジストリの識別子（US = SEC CIK、JP = EDINET コード、Security の JP = JPX ローカルコード）から作る。
+- 作れないときは `PROVISIONAL` として明示し、黙って推測しない。**発行体の fallback キーは security の座標に従う**（`ISSUER-OF:<security identity key>`）。名称は `ref.issuer_names` の `ALIAS`＝照合の証拠であり、統合の根拠にしない。
+- **false merge より false split を優先する。** 分かれたものは後から統合できるが、統合したものは戻せない。
+- **confidence を実態より高く言わない。** `STRONG`（そのものに対するレジストリ識別子）/ `REGISTRY_ANCHORED`（レジストリ識別子＋テキスト由来の属性。US の `US:CIK:<cik>:<type>:<class>` はこれ）/ `PROVISIONAL` の3段階。昇格は自動で行わず、`identity_version` を伴う記録された migration とする。
+- 再利用可能なキー（`STRONG` と `REGISTRY_ANCHORED`）の衝突は統合せず両方を降格し、`error_type = 'IDENTITY_COLLISION'` として `context` 付きで記録する。降格判定を単一値比較にしない。
+- **発行体名はレジストリの名称**（SEC registrant name / EDINET 提出者名）。商品名（"… - Common Stock"）を発行体名にしない。
+- Ticker・名称・識別子・上場区分/状態・発行体名は SCD2 で持つ。変化したときだけ履歴行を開き、無変化の再観測は `last_confirmed_at` を進める。履歴を上書き・削除しない。
+- 過去時点の姿は `ref.listings_as_of()` と同じ規則（`available_at <= cutoff`）でのみ読む。**`ref.listings.local_code` は現在値であり、過去 Ticker の正本ではない**（`ref.listing_symbols` が正本）。
+- 同一性を変える再構築は [docs/specs/security-identity.md](docs/specs/security-identity.md) §5 の手順に従い、旧 → 新 ID を必ず残す。migration の適用だけで旧 DB の移行が終わったことにしない（reload 後に `ref.finalize_identity_rebuild` を実行する）。
+- **`UNRESOLVED` は「除外」ではない。** 下流の価格・FX 取得対象は `INCLUDED` ∪ `UNRESOLVED`。Prediction は Eligibility が解決した `INCLUDED` のみ。
+- coverage は provider の失敗とデータ品質警告と identity collision（レコード数と distinct キー数）を分けて記録する。
 
 ### 1-11. 過去高値
 - **過去の急騰高値まで戻ることを上昇根拠・Potential Upside にしない。**
@@ -163,6 +168,8 @@ Phase 完了報告（指示書 §49）:
 - 接続情報は Supabase CLI・ローカル環境変数・GitHub Secrets に置く。hard-code・commit・チャット出力・service role key のログ出力を禁止。
 - **DB から外部を取得する経路は、短命な署名 URL + host allowlist + https に限る。** DB に raw API key を渡さない。DB から任意 host へ Authorization ヘッダを送らない。
 - **Production の worker は専用の最小権限 LOGIN role で接続する**（DB owner で接続しない）。パスワードは DB 内で生成し Vault に保管する。
+- **runtime の worker は自分の設定を書き換えられない。** `pipeline.load_host_allowlist`・`pipeline.sources`・`ref.exchanges`・`ref.identity_migration_map`・`universe.definitions`・`universe.decision_reasons` は SELECT のみ。変更は migration / DB 管理者が行う。
+- **新しいテーブルは既定で読み取り専用。** `ref` / `pipeline` / `universe` の default privileges は SELECT のみなので、runtime が書くテーブルを追加する migration は書き込み権限を明示的に grant する。`DELETE` はどのスキーマにも与えない。
 - **このリポジトリは Public。** 公開してよいのはコード・設計文書・Prompt・Schema・Test 等のみ。
 - **絶対に commit しない**: API key / secret / token、`.env` / `.env.local` 等、Supabase service role key、Provider の認証情報、利用規約上再配布できない Raw ニュース等のデータ、Raw market data の大量ダンプ、Production DB dump、Object Storage 内の研究データ、Prediction の実データ、その他の認証情報。
 - 研究データ・Prediction 実データ・Raw 取得データは Private な Supabase / Object Storage 側にのみ保持する。テスト fixture は合成データのみ。
