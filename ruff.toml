@@ -1,0 +1,7 @@
+# Repository-wide lint settings. workers/pyproject.toml keeps the same values so
+# that running ruff from either directory gives the same result.
+line-length = 125
+src = ["workers/src", "workers/tests", "scripts"]
+
+[lint]
+select = ["E", "F", "I", "UP", "B"]

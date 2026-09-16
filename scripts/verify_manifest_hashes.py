@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Verify that every file registered in docs/prompts/MANIFEST.md still matches its hash.
 
 Canonical sources (v5.1, the implementation instructions, the audit originals)
