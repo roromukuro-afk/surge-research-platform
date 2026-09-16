@@ -83,6 +83,9 @@ Claude Code はこのプロジェクトの**主任開発エージェント**で�
 - 同一性を変える再構築は [docs/specs/security-identity.md](docs/specs/security-identity.md) §5 の手順に従い、旧 → 新 ID を必ず残す。migration の適用だけで旧 DB の移行が終わったことにしない（reload 後に `ref.finalize_identity_rebuild` を実行する）。
 - **`UNRESOLVED` は「除外」ではない。** 下流の価格・FX 取得対象は `INCLUDED` ∪ `UNRESOLVED`。Prediction は Eligibility が解決した `INCLUDED` のみ。
 - coverage は provider の失敗とデータ品質警告と identity collision（レコード数と distinct キー数）を分けて記録する。
+- **publish した run は immutable。** 属する artifact（runs / source_fetches / run_errors / master_snapshot / evaluations / coverage）は追記も更新も削除もできない。訂正は新しい run を publish して supersede する。
+- **時刻は2種類を区別する。** `observed_at` = その値を供給した source を読んだ時刻、`available_at` = システムが知り得た時刻（identity 依存行は run の全 source の available_at 最大値）。`data_cutoff` は `max(source_fetches.available_at)`。
+- **provenance は値を供給した source を指す。** CIK は SEC、EDINET コードは EDINET code list。primary provider で一律にしない。
 - **どの run が Universe かは publication が決める**（`pipeline.run_publications`）。`finished_at` の新しさで決めない。下流は `universe.authoritative_run_at(market, version, knowledge_cutoff)` / `universe.eligibility_as_of(...)` を通して読み、**後から再構築した run を過去の時点へ逆流させない**。
 - **Production run は再現可能でなければならない。** `git_sha` / `config_hash` / `job_version` / `universe_version` / `identity_version` / provider_bindings を必ず保存する（CLI と DB 制約で強制）。`idempotency_key` は論理的な invocation（market・as_of・source_data_version・各 version・config_hash）で決め、**run_id を含めない**。
 - **知識時刻と有効時刻を混同しない。** as-of 読み出しは `available_at <= knowledge_cutoff` かつ `effective_from <= effective_at < effective_to` の両方で絞る。

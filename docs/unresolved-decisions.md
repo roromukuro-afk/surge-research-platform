@@ -64,6 +64,14 @@
 | D-59 | 知識時刻と有効時刻 | as-of は `available_at <= knowledge_cutoff` と `effective_from <= effective_at < effective_to` の両方で絞る。2引数版が正式形、1引数版は両方同じ時刻 | 2026-09-16 / 監査 Phase 1.1b #7 | [security-identity.md](specs/security-identity.md) §4 |
 | D-60 | SIC membership の provenance | SIC コード + ソート済み CIK 集合の SHA-256 を content hash とする（ページ本文は取得ごとに変わるため）。membership が変われば `source_data_version` も変わる | 2026-09-16 / 監査 Phase 1.1b #8 | `workers/src/surge/providers/sec_edgar.py` |
 | D-61 | Object Storage の認証情報 | worker secret store の bucket-scoped / service credential のみ。**匿名ポリシーを作らない**。既定の投入経路は DB への直接接続（`scripts/load_snapshot_direct.py`）で、storage 経由は「job が DB へ到達できない場合」に限る | 2026-09-16 / 監査 Phase 1.1b #9 | [phase-1-universe-sync.md](runbooks/phase-1-universe-sync.md) |
+| D-62 | Published run の不変性 | publish した run の artifact は INSERT/UPDATE/DELETE 禁止（trigger、owner を含む全ロール）。訂正は新 run を publish して supersede。`ref.*` は materialized 現在状態なので対象外 | 2026-09-16 / 監査 Phase 1.1c #1 | `20260916180000` |
+| D-63 | publish の直列化 | run 単位の advisory lock（書き込み shared / publish exclusive）＋ publish 後の再 validate。validate と publication の間に内容が動いたら publication ごと中止 | 2026-09-16 / 監査 Phase 1.1c #2 | 同上 |
+| D-64 | `data_cutoff` の定義 | `max(source_fetches.available_at)`（最後の source）。最初の source の時刻は `params.first_source_available_at` に別途保持 | 2026-09-16 / 監査 Phase 1.1c #3 | [security-identity.md](specs/security-identity.md) §4 |
+| D-65 | snapshot 行の `available_at` | run が依存する全 source の `available_at` 最大値。identity 依存行が identity 解決前に見えないよう安全側（遅い側）に倒す | 2026-09-16 / 監査 Phase 1.1c #4・#7 | 同上 |
+| D-66 | identifier / issuer name の provenance | `source_id` / `observed_at` / `source_record_id` は**値を供給した source**（CIK = SEC ticker file、EDINET = code list）。`available_at` は dependency max。既存行は provenance のみ修復し、値と有効期間は変えない。`available_at` は後ろにしか動かさない | 2026-09-16 / 監査 Phase 1.1c #5・#6 | `20260916180100` / `20260916180300` |
+| D-67 | publication の検証範囲 | 市場一致・source_data_version 単一かつ run と一致・identity_version / universe_version 一致・全 source に `available_at`・必須 source に 64hex digest・`data_cutoff >= max(available_at)`・critical source が truncated でないこと | 2026-09-16 / 監査 Phase 1.1c #8 | `20260916180200` |
+| D-68 | critical source の不完全取得 | SEC SIC（SPAC / REIT）の truncated は `CRITICAL_SOURCE_INCOMPLETE` とし **publication を拒否**する。一般の data quality 警告は拒否しない | 2026-09-16 / 監査 Phase 1.1c #8 | 同上 |
+| D-69 | content_sha256 の意味 | 64桁 hex の SHA-256 か NULL。複数ファイルを1つの source として読む場合は各 digest を連結して再度 SHA-256 する（成分は run notes に保持） | 2026-09-16 / 監査 Phase 1.1c #9 | `workers/src/surge/providers/nasdaq_trader.py` |
 
 ---
 
@@ -97,6 +105,7 @@
 | D-41 | 技術 | JP の `PROVISIONAL` 発行体 732 件（EDINET コード一覧に載らない ETF・REIT・出資証券等）の扱い | Phase 2 前 | 発行体の統合が必要になるのは主に普通株。EDINET 未突合は UNRESOLVED/EXCLUDED 側に偏っている |
 | D-42 | 投資ロジック/技術 | 同一 CIK に複数の証券がぶら下がる 640 CIK（クラス株・優先株・ワラント等）のうち、どこまでを「同一発行体の別クラス」として扱い、どこからを別発行体とみなすか | Phase 3 前 | 現状は CIK = 発行体、クラスは証券側で分離。例外（合併・持株会社化で CIK が変わる場合）の扱いは未定 |
 | D-43 | 技術 | US の identity collision 240 レコード / **67 distinct キー**（同一 CIK・同一種別・同一クラスに複数銘柄。最大は `US:CIK:0000927971:ETF:` の 42 銘柄）を、どの追加属性で分離するか | Phase 3 前 | 現状は両方を PROVISIONAL に降格し、`context` 付きで警告に残す。大半は ETN / レバレッジ ETF。discriminator を広げると 240 件の `security_id` が変わるため、rebuild としてしか実施できない |
+| D-70 | 規約/技術 | JP の5桁証券コードの公式定義（証券コード協議会の仕様書 PDF）を取得し、コード形ガードを「公式根拠あり」へ格上げするか | Phase 3 前（銘柄名が決定的なため blocker ではない） | 公式ファイルの実測（4桁=普通株 4,434件 / 5桁=特殊株式 7件）で代用している |
 | ~~D-53~~ | 技術 | **解決済み（A 表 D-53 参照）**: publication model を実装 | — | — |
 | D-01b | 投資ロジック | 「次の取引可能時点」の定義 | Phase 8 前 | 判断しない |
 | D-02a | 技術/投資ロジック | FX の Provider と許容遅延 | Phase 2 前 | — |
