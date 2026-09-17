@@ -31,6 +31,8 @@ from surge.providers.eodhd import (
     parse_symbol,
 )
 from surge.providers.jquants import (
+    AFTERNOON_SESSION_FIELDS,
+    MORNING_SESSION_FIELDS,
     JQuantsFieldError,
     extract_records,
     parse_bar,
@@ -352,3 +354,128 @@ def test_the_quota_counts_api_calls_not_http_requests():
     assert ledger.requests == 2
     assert ledger.calls == 101
     assert ledger.by_dataset["EODHD_US_EOD_BULK"] == 100
+
+
+# ------------------------------------------- J-Quants, against JPX's own sample
+# The two records below are the official 200 responses from the V2 specification
+# pages (eq-bars-daily and eq-master), abridged only where a run of Premium
+# session fields repeats. If JPX changes a name, these fail.
+JQUANTS_BAR_SAMPLE = {
+    "Date": "2023-03-24", "Code": "86970",
+    "O": 2047.0, "H": 2069.0, "L": 2035.0, "C": 2045.0,
+    "UL": "0", "LL": "0", "Vo": 2202500.0, "Va": 4507051850.0,
+    "AdjFactor": 1.0,
+    "AdjO": 2047.0, "AdjH": 2069.0, "AdjL": 2035.0, "AdjC": 2045.0, "AdjVo": 2202500.0,
+    "MktCap": 1083850.0, "ExRT": None,
+}
+
+JQUANTS_MASTER_SAMPLE = {
+    "Date": "2022-11-11", "Code": "86970",
+    "CoName": "Japan Exchange Group", "CoNameEn": "Japan Exchange Group,Inc.",
+    "S17": "16", "S17Nm": "Financials ex banks",
+    "S33": "7200", "S33Nm": "Other Financing Business",
+    "ScaleCat": "TOPIX Large70",
+    "Mkt": "0111", "MktNm": "Prime",
+    "Mrgn": "1", "MrgnNm": "Margin",
+    "ProdCat": "011",
+}
+
+
+def test_the_official_bar_sample_parses_field_for_field():
+    bar = parse_bar(JQUANTS_BAR_SAMPLE)
+
+    assert bar.code == "86970", "the sample code is the 5-digit string form"
+    assert bar.is_five_digit_code is True
+    assert bar.trade_date == date(2023, 3, 24)
+    assert bar.open == Decimal("2047.0")
+    assert bar.volume == Decimal("2202500.0")
+    assert bar.turnover == Decimal("4507051850.0")
+    assert bar.adjustment_factor == Decimal("1.0")
+    assert bar.market_cap_million_jpy == Decimal("1083850.0")
+    assert bar.limit_up == "0" and bar.limit_down == "0"
+
+
+def test_a_null_ex_event_is_not_an_event():
+    """ExRT is null on every day with no corporate action - most days."""
+
+    assert parse_bar(JQUANTS_BAR_SAMPLE).ex_event_code is None
+
+
+def test_the_premium_only_session_fields_are_absent_not_null_on_standard():
+    """JPX documents that these keys do not appear at all below Premium.
+
+    An adapter that treated their absence as an error would fail on every
+    Standard-plan response; one that treated it as a null would claim a morning
+    session of nothing. Neither: it reports that they did not come.
+    """
+
+    bar = parse_bar(JQUANTS_BAR_SAMPLE)
+    assert bar.has_session_detail is False
+
+    with_session = dict(JQUANTS_BAR_SAMPLE)
+    with_session.update(dict.fromkeys(MORNING_SESSION_FIELDS, 1.0))
+    with_session.update(dict.fromkeys(AFTERNOON_SESSION_FIELDS, 1.0))
+    assert parse_bar(with_session).has_session_detail is True
+
+
+def test_the_official_master_sample_parses_field_for_field():
+    master = parse_master(JQUANTS_MASTER_SAMPLE)
+
+    assert master.code == "86970"
+    assert master.market_code == "0111"
+    assert master.market_name == "Prime"
+    assert master.sector33 == "7200"
+    assert master.margin_code == "1"
+    assert master.as_of_date == "2022-11-11"
+
+
+def test_product_category_says_what_the_instrument_is():
+    """JPX added ProdCat in 2026. Phase 1 had to infer this from the issue name."""
+
+    assert parse_master(JQUANTS_MASTER_SAMPLE).product_category_meaning == "DOMESTIC_SHARE"
+
+    reit = dict(JQUANTS_MASTER_SAMPLE, ProdCat="013")
+    assert parse_master(reit).product_category_meaning == "REIT"
+
+    preferred = dict(JQUANTS_MASTER_SAMPLE, ProdCat="012")
+    assert parse_master(preferred).product_category_meaning == "PREFERRED_INVESTMENT_CERTIFICATE"
+
+
+def test_an_unknown_product_category_is_not_guessed_at():
+    unknown = dict(JQUANTS_MASTER_SAMPLE, ProdCat="099")
+    assert parse_master(unknown).product_category_meaning == "UNKNOWN_PRODUCT_CATEGORY"
+
+    without = {k: v for k, v in JQUANTS_MASTER_SAMPLE.items() if k != "ProdCat"}
+    assert parse_master(without).product_category_meaning is None
+
+
+def test_the_v2_envelope_is_preferred_over_guessing():
+    """V2 puts records under "data". Do not go looking when it is right there."""
+
+    records, key = extract_records({"data": [{"Code": "86970"}], "pagination_key": "abc"})
+    assert key == "data"
+    assert records == [{"Code": "86970"}]
+
+
+# ------------------------------------- EODHD, split ratios that are not tidy
+@pytest.mark.parametrize(
+    "ratio,to,frm",
+    [
+        ("4.000000/1.000000", "4.000000", "1.000000"),
+        ("1.000000/50.000000", "1.000000", "50.000000"),  # a reverse split
+        ("104.000000/100.000000", "104.000000", "100.000000"),  # GE, a stock dividend
+        ("1748175.000000/1000000.000000", "1748175.000000", "1000000.000000"),  # Ford
+        ("71371.000000/2745.000000", "71371.000000", "2745.000000"),  # BMW
+    ],
+)
+def test_split_ratios_are_divided_not_pattern_matched(ratio, to, frm):
+    """The field also carries stock dividends and reorganisations.
+
+    Reading only the numerator, or expecting a small integer pair, corrupts the
+    adjustment factor on exactly the events that matter most.
+    """
+
+    split = parse_split("X", {"date": "2020-01-02", "split": ratio})
+    assert split.split_to == Decimal(to)
+    assert split.split_from == Decimal(frm)
+    assert split.split_to / split.split_from > 0

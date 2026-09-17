@@ -18,10 +18,17 @@ job does, recording what changed.
 for a date is the only evidence of either, so every snapshot is stored from day
 one; a snapshot not taken is a fact permanently lost.
 
-The exact v2 JSON field names could not be confirmed without a subscription, so
-the field map below accepts the documented v2 short names and their v1
-equivalents, and the smoke test reports the keys the API actually returned. A
-field that matches none of them is an error, never a silent null.
+The field names below are JPX's own, read from the V2 specification pages on
+2026-09-17. The V1 names are kept as a fallback because the wire could not be
+measured without a subscription - every J-Quants endpoint, including on the free
+plan, requires a key issued from the logged-in dashboard. A field that matches
+neither is an error, never a silent null, and the smoke test prints the keys the
+API actually returned so any difference shows up on the first real call.
+
+One documentation quirk worth knowing: the spec marks every field "Required",
+while its own footnotes say the morning and afternoon session keys are absent
+entirely on non-Premium plans, and that MktCap and ExRT are null on days with no
+trade and no corporate action. "Required" there means documented, not present.
 """
 
 from __future__ import annotations
@@ -49,8 +56,8 @@ class JQuantsFieldError(RuntimeError):
     """A documented field was not in the response. Reported, never worked around."""
 
 
-# Documented v2 short names first, v1 names as fallback. Both name the same
-# quantity; where they do not, the field is absent from this map on purpose.
+# V2 short names first, V1 names as fallback. Both name the same quantity;
+# where they would not, the field is absent from this map on purpose.
 BAR_FIELDS: dict[str, tuple[str, ...]] = {
     "code": ("Code",),
     "trade_date": ("Date",),
@@ -60,7 +67,20 @@ BAR_FIELDS: dict[str, tuple[str, ...]] = {
     "close": ("C", "Close"),
     "volume": ("Vo", "Volume"),
     "turnover": ("Va", "TurnoverValue"),
+    # Limit up / limit down flags, documented as the STRINGS "0" and "1".
+    "limit_up": ("UL",),
+    "limit_down": ("LL",),
+    # Unadjusted close x shares outstanding, in millions of yen. Null for ETFs
+    # and ETNs, and on days with no trade.
+    "market_cap_million_jpy": ("MktCap",),
 }
+
+# Premium only: on every other plan these keys are absent from the response
+# rather than null. Named here so the smoke test can report whether they came.
+MORNING_SESSION_FIELDS = ("MO", "MH", "ML", "MC", "MUL", "MLL", "MVo", "MVa",
+                          "MAdjO", "MAdjH", "MAdjL", "MAdjC", "MAdjVo")
+AFTERNOON_SESSION_FIELDS = ("AO", "AH", "AL", "AC", "AUL", "ALL", "AVo", "AVa",
+                            "AAdjO", "AAdjH", "AAdjL", "AAdjC", "AAdjVo")
 
 ADJUSTED_BAR_FIELDS: dict[str, tuple[str, ...]] = {
     "adj_open": ("AdjO", "AdjustmentOpen"),
@@ -74,13 +94,48 @@ ADJUSTED_BAR_FIELDS: dict[str, tuple[str, ...]] = {
 
 MASTER_FIELDS: dict[str, tuple[str, ...]] = {
     "code": ("Code",),
+    "as_of_date": ("Date",),
     "name": ("CoName", "CompanyName"),
     "name_en": ("CoNameEn", "CompanyNameEnglish"),
     "market_code": ("Mkt", "MarketCode"),
     "market_name": ("MktNm", "MarketCodeName"),
     "sector17": ("S17", "Sector17Code"),
+    "sector17_name": ("S17Nm", "Sector17CodeName"),
     "sector33": ("S33", "Sector33Code"),
+    "sector33_name": ("S33Nm", "Sector33CodeName"),
     "scale_category": ("ScaleCat", "ScaleCategory"),
+    "margin_code": ("Mrgn", "MarginCode"),
+    "margin_name": ("MrgnNm", "MarginCodeName"),
+    # Added by JPX on 2026-05-26. The first J-Quants field that separates an
+    # ordinary share from a REIT, an ETF or a preferred investment certificate
+    # without reading the issue name - which is how Phase 1 had to do it.
+    "product_category": ("ProdCat",),
+}
+
+# ProdCat, from the official code table.
+PRODUCT_CATEGORY = {
+    "011": "DOMESTIC_SHARE",
+    "012": "PREFERRED_INVESTMENT_CERTIFICATE",
+    "013": "REIT",
+    "014": "ETF",
+    "021": "FOREIGN_SHARE",
+    "022": "FOREIGN_REIT",
+    "023": "FOREIGN_ETF",
+    "024": "FOREIGN_DEPOSITARY_RECEIPT",
+}
+
+# Market segment codes. Not a dense range: 0103, 0108 and 0110 do not exist.
+MARKET_SEGMENT = {
+    "0101": "TSE 1st Section",
+    "0102": "TSE 2nd Section",
+    "0104": "Mothers",
+    "0105": "TOKYO PRO MARKET",
+    "0106": "JASDAQ Standard",
+    "0107": "JASDAQ Growth",
+    "0109": "Other",
+    "0111": "Prime",
+    "0112": "Standard",
+    "0113": "Growth",
 }
 
 # ExRT, documented: 1 split, 2 reverse split, 3 rights issue. A gratis allotment
@@ -109,11 +164,20 @@ class JQuantsBar:
     adj_volume: Decimal | None
     adjustment_factor: Decimal | None
     ex_event_code: str | None
+    limit_up: str | None = None
+    limit_down: str | None = None
+    market_cap_million_jpy: Decimal | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
     def is_five_digit_code(self) -> bool:
         return len(self.code) == 5
+
+    @property
+    def has_session_detail(self) -> bool:
+        """Whether the Premium-only morning and afternoon keys arrived at all."""
+
+        return any(name in self.raw for name in MORNING_SESSION_FIELDS)
 
 
 @dataclass(frozen=True)
@@ -126,7 +190,25 @@ class JQuantsMasterRecord:
     sector17: str | None
     sector33: str | None
     scale_category: str | None
+    as_of_date: str | None = None
+    sector17_name: str | None = None
+    sector33_name: str | None = None
+    margin_code: str | None = None
+    margin_name: str | None = None
+    product_category: str | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @property
+    def product_category_meaning(self) -> str | None:
+        """What ProdCat says this instrument is, or None when it says nothing.
+
+        An unrecognised code returns UNKNOWN_PRODUCT_CATEGORY rather than a
+        guess: JPX added this field in 2026 and can add codes to it.
+        """
+
+        if self.product_category is None:
+            return None
+        return PRODUCT_CATEGORY.get(self.product_category, "UNKNOWN_PRODUCT_CATEGORY")
 
 
 @dataclass(frozen=True)
@@ -172,6 +254,9 @@ def parse_bar(record: dict[str, Any]) -> JQuantsBar:
         adj_volume=_decimal(_pick(record, ADJUSTED_BAR_FIELDS["adj_volume"], required=False)),
         adjustment_factor=_decimal(_pick(record, ADJUSTED_BAR_FIELDS["adjustment_factor"], required=False)),
         ex_event_code=_optional_str(_pick(record, ADJUSTED_BAR_FIELDS["ex_event_code"], required=False)),
+        limit_up=_optional_str(_pick(record, BAR_FIELDS["limit_up"], required=False)),
+        limit_down=_optional_str(_pick(record, BAR_FIELDS["limit_down"], required=False)),
+        market_cap_million_jpy=_decimal(_pick(record, BAR_FIELDS["market_cap_million_jpy"], required=False)),
         raw=record,
     )
 
@@ -186,6 +271,12 @@ def parse_master(record: dict[str, Any]) -> JQuantsMasterRecord:
         sector17=_optional_str(_pick(record, MASTER_FIELDS["sector17"], required=False)),
         sector33=_optional_str(_pick(record, MASTER_FIELDS["sector33"], required=False)),
         scale_category=_optional_str(_pick(record, MASTER_FIELDS["scale_category"], required=False)),
+        as_of_date=_optional_str(_pick(record, MASTER_FIELDS["as_of_date"], required=False)),
+        sector17_name=_optional_str(_pick(record, MASTER_FIELDS["sector17_name"], required=False)),
+        sector33_name=_optional_str(_pick(record, MASTER_FIELDS["sector33_name"], required=False)),
+        margin_code=_optional_str(_pick(record, MASTER_FIELDS["margin_code"], required=False)),
+        margin_name=_optional_str(_pick(record, MASTER_FIELDS["margin_name"], required=False)),
+        product_category=_optional_str(_pick(record, MASTER_FIELDS["product_category"], required=False)),
         raw=record,
     )
 
@@ -199,11 +290,14 @@ def _optional_str(value: Any) -> str | None:
 def extract_records(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
     """Find the record list in the response envelope.
 
-    The envelope key differs between the v1 and v2 documentation, so rather than
-    hard-coding one and getting an empty result if it is the other, take the one
-    list of objects the payload contains - and refuse if there is more than one,
-    which would mean the envelope is not what we think it is.
+    V2 returns records under "data"; V1 used a per-endpoint key. Prefer the
+    documented V2 key, otherwise take the one list of objects the payload
+    contains - and refuse if there is more than one, because an ambiguous
+    envelope is not the envelope this adapter was written for.
     """
+
+    if isinstance(payload.get("data"), list):
+        return payload["data"], "data"
 
     candidates = {
         key: value
