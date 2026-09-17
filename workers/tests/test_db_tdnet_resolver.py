@@ -5,6 +5,10 @@ listing was in force when the disclosure was published; ``known_at`` asks what
 the master had learned by the time we read it. Collapsing them - which a query
 against current rows does silently - means a 2025 disclosure resolved in 2026
 would claim we knew that mapping in 2025.
+
+The fixture reads back the effective and available times the apply step actually
+recorded, rather than assuming them. That keeps these tests about the resolver
+instead of about which timestamp ``apply_master_snapshot`` happens to choose.
 """
 
 from __future__ import annotations
@@ -44,108 +48,140 @@ def conn():
         connection.close()
 
 
-def _jp_listing_with_a_code_change(cur) -> tuple[str, str, str]:
-    """One JP security that traded under one code and then another.
+def _jp_listing_with_a_code_change(cur) -> dict:
+    """One JP security that traded under one code and then another."""
 
-    Returns ``(old_code, new_code, security_id)``.
-    """
-
-    suffix = uuid.uuid4().hex[:4].upper()
-    old_code = f"1{suffix[:3]}"
-    new_code = f"2{suffix[:3]}"
+    suffix = uuid.uuid4().hex[:3].upper()
+    old_code = f"1{suffix}"
+    new_code = f"2{suffix}"
     identity_key = f"JP:EDINET:E{uuid.uuid4().hex[:5].upper()}:COMMON_STOCK:"
 
-    run_one = _new_run(cur, "JP", FIRST)
-    _add_snapshot_row(
-        cur,
-        run_one,
-        symbol=old_code,
-        identity_key=identity_key,
-        observed_at=FIRST,
-        exchange_id="XTKS",
-        segment="P",
-        issuer_key=f"EDINET:E{uuid.uuid4().hex[:5].upper()}",
-        issuer_source="EDINET_CODE",
-        name="Example Japanese Issuer",
-    )
-    _apply(cur, run_one)
-
-    run_two = _new_run(cur, "JP", SECOND)
-    _add_snapshot_row(
-        cur,
-        run_two,
-        symbol=new_code,
-        identity_key=identity_key,
-        observed_at=SECOND,
-        exchange_id="XTKS",
-        segment="P",
-        issuer_key=f"EDINET:E{uuid.uuid4().hex[:5].upper()}",
-        issuer_source="EDINET_CODE",
-        name="Example Japanese Issuer",
-    )
-    _apply(cur, run_two)
+    for symbol, moment in ((old_code, FIRST), (new_code, SECOND)):
+        run = _new_run(cur, "JP", moment)
+        _add_snapshot_row(
+            cur,
+            run,
+            symbol=symbol,
+            identity_key=identity_key,
+            observed_at=moment,
+            exchange_id="XTKS",
+            segment="P",
+            issuer_key=f"EDINET:E{uuid.uuid4().hex[:5].upper()}",
+            issuer_source="EDINET_CODE",
+            name="Example Japanese Issuer",
+        )
+        _apply(cur, run)
 
     cur.execute(
-        "select security_id::text from ref.listings where listing_identity_key = %s",
+        "select listing_id, security_id::text from ref.listings where listing_identity_key = %s",
         (f"XTKS|{identity_key}",),
     )
     row = cur.fetchone()
-    return old_code, new_code, (row[0] if row else None)
+    assert row is not None, "the fixture listing was not created"
+    listing_id, security_id = row
+
+    cur.execute(
+        """
+        select symbol, effective_from, effective_to, available_at
+        from ref.listing_symbols
+        where listing_id = %s and symbol_type = 'TICKER'
+        order by effective_from
+        """,
+        (listing_id,),
+    )
+    symbols = cur.fetchall()
+
+    cur.execute(
+        "select min(effective_from), min(available_at) from ref.listing_states where listing_id = %s",
+        (listing_id,),
+    )
+    state_from, state_available = cur.fetchone()
+
+    return {
+        "old_code": old_code,
+        "new_code": new_code,
+        "security_id": security_id,
+        "listing_id": listing_id,
+        "symbols": symbols,
+        "state_from": state_from,
+        "state_available": state_available,
+    }
+
+
+def _window(fixture, symbol):
+    """The effective window the master actually recorded for one symbol."""
+
+    for recorded, effective_from, effective_to, available_at in fixture["symbols"]:
+        if recorded == symbol:
+            return effective_from, effective_to, available_at
+    raise AssertionError(f"{symbol} is not in the recorded symbol history: {fixture['symbols']}")
+
+
+def _inside_old_window(fixture):
+    """A moment at which the old code was the live one."""
+
+    old_from, _old_to, _ = _window(fixture, fixture["old_code"])
+    return max(old_from, fixture["state_from"]) + timedelta(seconds=1)
 
 
 def test_a_disclosure_resolves_to_the_code_that_was_current_then(conn):
     """The rule this whole change is for.
 
-    A 2025 disclosure carries the 2025 code. Resolving it against today's
-    listing would find nothing - or worse, find whoever holds that code now.
+    A disclosure carries the code that was live when it was published. Resolving
+    it against today's listing would find nothing - or worse, find whoever holds
+    that code now.
     """
 
     with conn.cursor() as cur:
-        old_code, new_code, security_id = _jp_listing_with_a_code_change(cur)
-        assert security_id is not None
-
+        fixture = _jp_listing_with_a_code_change(cur)
         resolver = DatabaseResolver(conn)
 
-        # Backfill: a 2025 disclosure, read in 2026.
         resolved, market = resolver.resolve(
-            old_code, as_of=FIRST + timedelta(hours=1), known_at=NOW
+            fixture["old_code"], as_of=_inside_old_window(fixture), known_at=NOW
         )
-        assert resolved == security_id
+        assert resolved == fixture["security_id"]
         assert market == "JP"
 
-        # The same security under its current code, read as of now.
-        resolved_now, _ = resolver.resolve(new_code, as_of=NOW, known_at=NOW)
-        assert resolved_now == security_id
+        new_from, _, _ = _window(fixture, fixture["new_code"])
+        resolved_now, _ = resolver.resolve(
+            fixture["new_code"], as_of=new_from + timedelta(seconds=1), known_at=NOW
+        )
+        assert resolved_now == fixture["security_id"]
 
 
 def test_the_new_code_does_not_resolve_at_the_old_effective_time(conn):
     """The as-of read does not follow the materialised current value."""
 
     with conn.cursor() as cur:
-        old_code, new_code, security_id = _jp_listing_with_a_code_change(cur)
+        fixture = _jp_listing_with_a_code_change(cur)
         resolver = DatabaseResolver(conn)
 
-        resolved, _ = resolver.resolve(new_code, as_of=FIRST + timedelta(hours=1), known_at=NOW)
+        resolved, _ = resolver.resolve(
+            fixture["new_code"], as_of=_inside_old_window(fixture), known_at=NOW
+        )
         assert resolved is None, "the future code answered a question about the past"
 
 
 def test_knowledge_time_gates_what_the_master_may_say(conn):
     """The second half of bitemporal.
 
-    Using today's master to resolve a 2025 disclosure is allowed. Claiming we
-    knew that mapping in 2025 is not - so a read whose knowledge cutoff predates
-    the master learning anything returns nothing.
+    Using today's master to resolve an old disclosure is allowed. Claiming we
+    knew that mapping back then is not - so a read whose knowledge cutoff
+    predates the master learning anything returns nothing.
     """
 
     with conn.cursor() as cur:
-        old_code, _new_code, security_id = _jp_listing_with_a_code_change(cur)
+        fixture = _jp_listing_with_a_code_change(cur)
+        _old_from, _old_to, old_available = _window(fixture, fixture["old_code"])
+        effective = _inside_old_window(fixture)
         resolver = DatabaseResolver(conn)
 
-        known_late, _ = resolver.resolve(old_code, as_of=FIRST + timedelta(hours=1), known_at=NOW)
-        assert known_late == security_id
+        known_late, _ = resolver.resolve(fixture["old_code"], as_of=effective, known_at=NOW)
+        assert known_late == fixture["security_id"]
 
+        before_we_knew = min(old_available, fixture["state_available"]) - timedelta(days=1)
         known_early, _ = resolver.resolve(
-            old_code, as_of=FIRST + timedelta(hours=1), known_at=FIRST - timedelta(days=30)
+            fixture["old_code"], as_of=effective, known_at=before_we_knew
         )
         assert known_early is None, "the master answered a question asked before it knew anything"
 
@@ -156,13 +192,16 @@ def test_the_cache_key_carries_both_times(conn):
     which is the case this resolver exists to get right."""
 
     with conn.cursor() as cur:
-        old_code, new_code, security_id = _jp_listing_with_a_code_change(cur)
+        fixture = _jp_listing_with_a_code_change(cur)
+        new_from, _, _ = _window(fixture, fixture["new_code"])
         resolver = DatabaseResolver(conn)
 
-        resolver.resolve(new_code, as_of=NOW, known_at=NOW)
+        resolver.resolve(fixture["new_code"], as_of=new_from + timedelta(seconds=1), known_at=NOW)
         # Same code, earlier effective time. A code-only cache would return the
         # answer above; this must go back to the database and find nothing.
-        earlier, _ = resolver.resolve(new_code, as_of=FIRST + timedelta(hours=1), known_at=NOW)
+        earlier, _ = resolver.resolve(
+            fixture["new_code"], as_of=_inside_old_window(fixture), known_at=NOW
+        )
 
         assert earlier is None
         assert len(resolver._cache) == 2
