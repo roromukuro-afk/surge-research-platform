@@ -114,6 +114,9 @@
 | D-119 | 20% Threshold と Reachable Zone を列ごと分ける | 前者は参照価格への算術、後者は到達可能性の判断。`reachable_zone_basis_kinds` は `PRIOR_HIGH` を含まない閉集合で、zone を出すなら1つ以上が必須（CHECK）。両者が同じ値になったら検証器が reject する（片方がもう片方から導出されている）| 2026-09-17 / Phase 7 実装 | `20260917170000` |
 | D-120 | 有料 LLM を Production 必須にしない | `LLMProvider` interface と deterministic mock で pipeline を完成させ、実モデル接続は `analysis.llm_providers` の1行にする。mock は**自分が mock であることを rationale に書く**（結果表に無記名の mock 判定が混ざるのは罠）| 2026-09-17 / Phase 7 実装 | `20260917170000` / `workers/src/surge/analysis/llm.py` |
 | D-121 | Web は `surge_web` で接続する | `surge_readonly` はベーステーブル79個を読めるので、「画面は契約しか見ない」が規約でなく事実になるよう専用ロールを作った。`ui` スキーマの USAGE と view の SELECT だけを持ち、契約の外へ手を伸ばすと権限エラーになる。読み出し関数2つは同じ理由で SECURITY DEFINER | 2026-09-17 / UI 実装 | `20260917190000` |
+| D-122 | **TDnet は採用しない** | 二重に不可。(a) `release.tdnet.info/robots.txt` が全ホスト `User-agent: * / Disallow: /`（UA を変えても同一）、(b) 開示ページの免責事項が「無断で転用、複製又は販売等を行うことは固く禁じます」。有料 API は 基本料金 月額70,000円 + 情報量 月額100,000円〜 で Zero-Cost Core の桁外。**EDINET は代替にならない**（EDINET は法定定期開示、TDnet は当日株価を動かす適時開示）。JP の材料サイドが US より構造的に弱いことを coverage gap として記録する | 2026-09-17 / news source 調査 | `20260917210000` / [news-source-licence-review.md](research/news-source-licence-review.md) |
+| D-123 | 却下した news source もレジストリに残す | `enabled=false` + 全 permission `PROHIBITED` の policy 付きで登録する。後からコレクタを書こうとすると `assert_may_collect()` が条項を添えて落ちる。market 側と同じ「一度却下したものは理由つきで却下のままにする」原則 | 2026-09-17 / 同上 | `20260917210000` |
+| D-124 | robots と licence は別の列で持つ | JPX が実例: robots.txt は巡回を許可し、規約は保持を許可しない。「取りに行ってよいか」と「持っていてよいか」は別の問いなので `robots_allows_path` と `full_text_storage_allowed` を分ける | 2026-09-17 / 同上 | `20260917130000` |
 
 ---
 
