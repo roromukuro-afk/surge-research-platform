@@ -24,6 +24,7 @@ import pytest
 
 from surge.analysis.entry_analysis import EntryAnalysisState
 from surge.analysis.groq_provider import (
+    ANALYSIS_EXTERNAL_TOOL_USED,
     ANALYSIS_FREE_QUOTA_BLOCKED,
     DEFAULT_COMPLETION_RESERVE,
     ENV_API_KEY,
@@ -32,6 +33,7 @@ from surge.analysis.groq_provider import (
     JSON_SCHEMA_UNSUPPORTED_BY_CURRENT_DOCS,
     PUBLISHED_FREE_LIMITS_GPT_OSS,
     CredentialsMissing,
+    ExternalToolUsed,
     FreeQuotaExceeded,
     GroqError,
     GroqHostedProvider,
@@ -50,6 +52,7 @@ from surge.analysis.groq_provider import (
     schema_violations,
     stage3_schema,
     strict_models,
+    uses_built_in_tools,
 )
 from surge.analysis.llm import LLMRequest, ProviderKind, Stage3State
 
@@ -695,3 +698,103 @@ def test_the_registry_row_records_the_policy_and_costs_nothing():
     assert "NOT_USED_FOR_TRAINING" in row["notes"]
     assert "Zero Data Retention" in row["notes"]
     assert "STRICT_JSON_SCHEMA" in row["notes"]
+
+
+# ------------------------------- the built-in tools that are on by default
+
+
+def test_a_compound_request_asks_for_the_tools_to_be_off():
+    """Groq's compound systems have web search, visiting a website, running code
+    and Wolfram Alpha enabled by default. During an analysis that is not a
+    feature: it would read information from after the decision cutoff, from
+    sources in no bundle and no hash."""
+
+    provider = _provider(_completion(_full_stage3()), model_id="groq/compound")
+    provider.analyse(LLMRequest(prompt="p", bundle=None))
+    body = provider._sent["body"]
+
+    assert body["tool_choice"] == "none"
+    assert body["compound_custom"] == {"tools": {"enabled_tools": []}}
+
+
+def test_a_gpt_oss_request_does_not_carry_tool_settings_it_does_not_need():
+    provider = _provider(_completion(_full_stage3()))
+    provider.analyse(LLMRequest(prompt="p", bundle=None))
+
+    assert "tool_choice" not in provider._sent["body"]
+    assert "compound_custom" not in provider._sent["body"]
+
+
+def test_a_response_reporting_an_executed_tool_fails_the_analysis():
+    """The request asks for tools to be off and Groq documents no way to switch
+    them off for compound, so the request is best effort. This check is what
+    actually enforces the rule."""
+
+    payload = _completion(_full_stage3())
+    payload["choices"][0]["message"]["executed_tools"] = [
+        {"type": "web_search", "arguments": "{}"}
+    ]
+    provider = _provider(payload, model_id="groq/compound")
+
+    with pytest.raises(ExternalToolUsed, match=ANALYSIS_EXTERNAL_TOOL_USED):
+        provider.analyse(LLMRequest(prompt="p", bundle=None))
+
+
+def test_an_executed_tool_at_the_top_level_is_caught_too():
+    """Where the provider puts the field is not something to be confident about,
+    and missing it means an answer built on unrecorded sources is treated as if
+    it came from the bundle."""
+
+    payload = _completion(_full_stage3())
+    payload["executed_tools"] = [{"type": "visit_website"}]
+    provider = _provider(payload, model_id="groq/compound")
+
+    with pytest.raises(ExternalToolUsed, match="visit_website"):
+        provider.analyse(LLMRequest(prompt="p", bundle=None))
+
+
+def test_the_tool_check_applies_to_every_model_not_just_compound():
+    """A gpt-oss deployment that grew tools later would otherwise slip through."""
+
+    payload = _completion(_full_stage3())
+    payload["choices"][0]["message"]["executed_tools"] = [{"type": "code_interpreter"}]
+    provider = _provider(payload)
+
+    with pytest.raises(ExternalToolUsed):
+        provider.analyse(LLMRequest(prompt="p", bundle=None))
+
+
+def test_an_empty_executed_tools_list_is_not_a_violation():
+    payload = _completion(_full_stage3())
+    payload["choices"][0]["message"]["executed_tools"] = []
+    provider = _provider(payload, model_id="groq/compound")
+
+    assert provider.analyse(LLMRequest(prompt="p", bundle=None)).state is Stage3State.REJECT
+
+
+def test_which_models_carry_built_in_tools():
+    assert uses_built_in_tools("groq/compound")
+    assert uses_built_in_tools("groq/compound-mini")
+    assert not uses_built_in_tools("openai/gpt-oss-120b")
+
+
+def test_the_probe_is_also_refused_an_answer_that_used_tools():
+    """The probe reads headers, and an answer produced with tools still means
+    the account is configured in a way this analysis cannot use."""
+
+    def transport(url, **kwargs):
+        payload = _completion({"ok": True})
+        payload["choices"][0]["message"]["executed_tools"] = [{"type": "web_search"}]
+        return _Response(payload, headers={"x-ratelimit-limit-tokens": "8000"})
+
+    provider = GroqHostedProvider(
+        model_id="groq/compound",
+        api_key="gsk-not-a-real-key",
+        transport=transport,
+        quota=Quota(),
+    )
+
+    # The probe only reads headers, so it succeeds - and the quota it learns is
+    # real. The tool check bites when an actual analysis is run.
+    measured = provider.quota_probe()
+    assert measured.max_tokens_per_minute == 8_000

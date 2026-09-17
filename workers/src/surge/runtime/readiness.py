@@ -27,9 +27,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
-READINESS_VERSION = "readiness-1.3.0"
+READINESS_VERSION = "readiness-1.4.0"
 
 
 class Verdict(StrEnum):
@@ -51,11 +52,15 @@ class Liveness(StrEnum):
     NOT_BOUND = "NOT_BOUND"
     #: Implemented and bound, and nothing has actually been fetched yet.
     BOUND_NOT_LIVE_OBSERVED = "BOUND_NOT_LIVE_OBSERVED"
-    LIVE_OBSERVED = "LIVE_OBSERVED"
+    #: Rows exist, from this provider, and the newest is recent enough to act on.
+    LIVE_FRESH = "LIVE_FRESH"
+    #: Rows exist and the newest is too old. A year-old bar is not a price, and
+    #: counting it would let a pipeline that stopped last spring read as working.
+    LIVE_STALE = "LIVE_STALE"
 
     @property
     def is_working(self) -> bool:
-        return self is Liveness.LIVE_OBSERVED
+        return self is Liveness.LIVE_FRESH
 
 
 class CheckStatus(StrEnum):
@@ -211,13 +216,35 @@ SQL_CHECKS: dict[str, str] = {
     """,
     #: And these are the observations. Deliberately separate queries: one
     #: answers "is it configured", the other "has it ever produced a row".
-    "price_rows": """
-        select count(*) from market.daily_bars b
-        join ref.securities s using (security_id)
-        where s.market_code = %(market)s
+    #: Rows *from the bound provider*, with how recent they are. Counting rows
+    #: from any provider would let a decommissioned source keep a market looking
+    #: live, and counting rows without a date would let a stopped pipeline do the
+    #: same. The dataset and market are part of the question, not context.
+    "price_freshness": """
+        select count(*),
+               max(b.trade_date)::text,
+               max(b.available_at)::text
+          from market.daily_bars b
+          join ref.securities s using (security_id)
+         where s.market_code = %(market)s
+           and b.provider_id = coalesce(%(price_provider)s, b.provider_id)
     """,
-    "fx_rows": "select count(*) from market.fx_rates",
+    "fx_freshness": """
+        select count(*), max(rate_date)::text, max(available_at)::text
+          from market.fx_rates
+         where provider_id = coalesce(%(fx_provider)s, provider_id)
+    """,
 }
+
+#: How old the newest row may be before a source stops counting as working.
+#: Generous, and deliberately not zero: a market closed over a weekend has no
+#: new bar on Sunday and is not broken. Three days covers a normal weekend plus
+#: one public holiday; anything beyond that is a pipeline that has stopped.
+PRICE_MAX_AGE = timedelta(days=3)
+
+#: FX moves every business day and the eligibility filter converts with it, so
+#: a stale rate silently mis-prices the 3,000 yen test for a whole market.
+FX_MAX_AGE = timedelta(days=3)
 
 
 def check_teacher_still_zero(count: int) -> Check:
@@ -295,13 +322,17 @@ def check_capability(
     rows_observed: int,
     what_it_holds: str,
     blocker_id: str | None,
+    latest_at: datetime | None = None,
+    max_age: timedelta | None = None,
+    now: datetime | None = None,
     gates_predictions: bool = True,
 ) -> Check:
-    """One check that separates "bound" from "has ever produced data".
+    """One check that separates bound, observed and recent.
 
-    A binding with no rows is reported as a failure and described as an
-    implementation that has not run, which is a different thing to do next from
-    an unbound role: one needs a decision, the other needs a first fetch.
+    Three different things to do next, so three different answers. An unbound
+    role needs a decision; a bound one with no rows needs a first fetch; one
+    whose newest row is old needs somebody to find out why the pipeline stopped.
+    Collapsing any pair of them hides which.
     """
 
     provider = settled_provider or bound_provider
@@ -321,7 +352,7 @@ def check_capability(
             name=name,
             status=CheckStatus.FAIL,
             detail=(
-                f"{provider} is bound and enabled, and {what_it_holds} holds no rows. "
+                f"{provider} is bound and enabled, and {what_it_holds} holds no rows from it. "
                 "IMPLEMENTED and BOUND, not yet live observed: the adapter and the binding are "
                 "done and nothing has been fetched, so this cannot be reported as a working source"
             ),
@@ -331,13 +362,53 @@ def check_capability(
             liveness=Liveness.BOUND_NOT_LIVE_OBSERVED,
         )
 
+    if latest_at is None:
+        # Rows with no date at all. Not treated as fresh: "we cannot tell how old
+        # this is" is not evidence that it is new.
+        return Check(
+            name=name,
+            status=CheckStatus.FAIL,
+            detail=(
+                f"{provider} has {rows_observed:,} row(s) in {what_it_holds} and none of them "
+                "carries a date, so how recent the data is cannot be established"
+            ),
+            gates_predictions=gates_predictions,
+            is_a_capability=True,
+            blocker_id=blocker_id,
+            liveness=Liveness.LIVE_STALE,
+        )
+
+    now = now or datetime.now(UTC)
+    if latest_at.tzinfo is None:
+        latest_at = latest_at.replace(tzinfo=UTC)
+    age = now - latest_at
+
+    if max_age is not None and age > max_age:
+        return Check(
+            name=name,
+            status=CheckStatus.FAIL,
+            detail=(
+                f"{provider} has {rows_observed:,} row(s) in {what_it_holds} and the newest is "
+                f"{age.days} day(s) old, past the {max_age.days} day limit. Data this old is a "
+                "pipeline that stopped, and treating it as a working source would make a market "
+                "that went quiet in the spring read as live"
+            ),
+            gates_predictions=gates_predictions,
+            is_a_capability=True,
+            blocker_id=blocker_id,
+            liveness=Liveness.LIVE_STALE,
+        )
+
     return Check(
         name=name,
         status=CheckStatus.PASS,
-        detail=f"{provider}, with {rows_observed:,} row(s) actually observed in {what_it_holds}",
+        detail=(
+            f"{provider}, {rows_observed:,} row(s) in {what_it_holds}, newest "
+            f"{age.days} day(s) old"
+        ),
         gates_predictions=gates_predictions,
         is_a_capability=True,
-        liveness=Liveness.LIVE_OBSERVED,
+        liveness=Liveness.LIVE_FRESH,
     )
 
 
@@ -368,6 +439,11 @@ class MarketInputs:
     #: implementation, not a source.
     price_rows_observed: int = 0
     fx_rows_observed: int = 0
+    #: When the newest row from the bound provider arrived. A count on its own
+    #: cannot tell a working pipeline from one that stopped.
+    price_latest_at: datetime | None = None
+    fx_latest_at: datetime | None = None
+    now: datetime | None = None
     material_sources_live: int = 0
     #: Stage 3. Produces setups and watches, never an entry.
     eod_analysis_provider: str | None = None
@@ -419,6 +495,9 @@ def assess(inputs: MarketInputs) -> MarketReadiness:
             rows_observed=inputs.price_rows_observed,
             what_it_holds="market.daily_bars",
             blocker_id="D-102" if inputs.market_code == "JP" else "D-103-EOD",
+            latest_at=inputs.price_latest_at,
+            max_age=PRICE_MAX_AGE,
+            now=inputs.now,
         ),
         check_provider(
             "intraday_entry_price_provider",
@@ -447,6 +526,9 @@ def assess(inputs: MarketInputs) -> MarketReadiness:
                 rows_observed=inputs.fx_rows_observed,
                 what_it_holds="market.fx_rates",
                 blocker_id="D-02a",
+                latest_at=inputs.fx_latest_at,
+                max_age=FX_MAX_AGE,
+                now=inputs.now,
             )
         ),
         Check(
@@ -556,6 +638,26 @@ def assess_all(markets: Sequence[MarketInputs]) -> ReadinessReport:
     return report
 
 
+def _as_datetime(value) -> datetime | None:
+    """A date or timestamp from the database, as an aware datetime.
+
+    ``available_at`` is when this system learned the value, which is the right
+    clock for "has the pipeline run recently" - a bar's trade_date says when the
+    market traded, not when anybody fetched it.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    text = str(value)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
 def collect(conn, market_code: str, *, universe_version: str = "universe-1.0.0", **overrides):
     """Read what the database can answer, and let the caller supply the rest.
 
@@ -569,27 +671,63 @@ def collect(conn, market_code: str, *, universe_version: str = "universe-1.0.0",
 
     values: dict[str, object] = {}
     errors: list[str] = []
+
+    # The bindings are read first, because the freshness queries are *about* the
+    # bound provider. Counting rows from any provider would let a source that was
+    # decommissioned last year keep a market looking live.
+    bindings: dict[str, object] = {}
+    with conn.cursor() as cur:
+        for name in ("price_binding", "fx_binding"):
+            try:
+                cur.execute(
+                    SQL_CHECKS[name],
+                    {"market": market_code, "universe_version": universe_version,
+                     "price_provider": None, "fx_provider": None},
+                )
+                row = cur.fetchone()
+                bindings[name] = row[0] if row else None
+            except Exception as exc:  # noqa: BLE001 - an unreadable check is a failed check
+                bindings[name] = None
+                errors.append(f"{name}: {type(exc).__name__}: {exc}")
+
     with conn.cursor() as cur:
         for name, sql in SQL_CHECKS.items():
             try:
-                cur.execute(sql, {"market": market_code, "universe_version": universe_version})
+                cur.execute(
+                    sql,
+                    {
+                        "market": market_code,
+                        "universe_version": universe_version,
+                        "price_provider": bindings.get("price_binding"),
+                        "fx_provider": bindings.get("fx_binding"),
+                    },
+                )
                 row = cur.fetchone()
-                values[name] = row[0] if row else None
+                values[name] = row if row else None
             except Exception as exc:  # noqa: BLE001 - an unreadable check is a failed check
                 values[name] = None
                 errors.append(f"{name}: {type(exc).__name__}: {exc}")
 
+    def scalar(name):
+        row = values.get(name)
+        return row[0] if row else None
+
+    price = values.get("price_freshness") or (0, None, None)
+    fx = values.get("fx_freshness") or (0, None, None)
+
     inputs = MarketInputs(
         market_code=market_code,
-        security_master_fresh=values.get("security_master_freshness") is not None,
-        universe_run_published=values.get("universe_authoritative_run") is not None,
-        teacher_row_count=int(values.get("teacher_rows") or 0),
-        mock_guard_constraints=int(values.get("mock_cannot_predict") or 0),
-        material_sources_live=int(values.get("live_news_sources") or 0),
-        eod_price_binding=values.get("price_binding"),
-        fx_binding=values.get("fx_binding"),
-        price_rows_observed=int(values.get("price_rows") or 0),
-        fx_rows_observed=int(values.get("fx_rows") or 0),
+        security_master_fresh=scalar("security_master_freshness") is not None,
+        universe_run_published=scalar("universe_authoritative_run") is not None,
+        teacher_row_count=int(scalar("teacher_rows") or 0),
+        mock_guard_constraints=int(scalar("mock_cannot_predict") or 0),
+        material_sources_live=int(scalar("live_news_sources") or 0),
+        eod_price_binding=bindings.get("price_binding"),
+        fx_binding=bindings.get("fx_binding"),
+        price_rows_observed=int(price[0] or 0),
+        fx_rows_observed=int(fx[0] or 0),
+        price_latest_at=_as_datetime(price[2]),
+        fx_latest_at=_as_datetime(fx[2]),
         **overrides,
     )
     readiness = assess(inputs)
@@ -609,6 +747,8 @@ __all__ = [
     "READINESS_VERSION",
     "Check",
     "CheckStatus",
+    "FX_MAX_AGE",
+    "PRICE_MAX_AGE",
     "Liveness",
     "MarketInputs",
     "MarketReadiness",

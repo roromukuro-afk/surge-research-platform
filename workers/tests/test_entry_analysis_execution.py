@@ -201,9 +201,16 @@ def test_a_crash_before_the_answer_leaves_a_row_a_recovery_pass_can_find():
     # past this. The execution row is what makes it findable.
     assert watch.state is WatchState.IN_REANALYSIS
     plan = plan_recovery(store)
-    assert plan.total == 0  # it was failed, not left in flight
-    assert [e.status for e in store._rows.values()] == [ExecutionStatus.FAILED]
-    assert next(iter(store._rows.values())).failure_class is FailureClass.PROVIDER_ERROR
+    # RETRY_PENDING, not FAILED. A call that did not come back says nothing
+    # about the security, and failing it would strand the watch at
+    # IN_REANALYSIS with nothing left to move it - a network blip would quietly
+    # remove a stock from the system.
+    assert plan.total == 1
+    assert [e.status for e in store._rows.values()] == [ExecutionStatus.RETRY_PENDING]
+    row = next(iter(store._rows.values()))
+    assert row.attempt_count == 1
+    assert "timed out" in row.last_transient_error
+    assert row.status.is_open
 
 
 def test_a_process_that_simply_died_is_still_in_flight_and_needs_the_model():
@@ -257,7 +264,13 @@ def test_a_stored_answer_is_resumed_rather_than_asked_for_again():
         now=LATER,
     )
     watch.begin_reanalysis(at=LATER)
-    store.record_answer(begun.execution.analysis_execution_id, _entry())
+    store.record_answer(
+        begun.execution.analysis_execution_id,
+        _entry(),
+        prompt_sha256="p" * 64,
+        bundle_sha256="b" * 64,
+        canonical_prompt_sha256=CANONICAL,
+    )
 
     plan = plan_recovery(store)
     assert len(plan.resume_from_stored_answer) == 1

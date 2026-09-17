@@ -78,7 +78,13 @@ def encoding_for_family(family: str) -> str | None:
 
 @dataclass(frozen=True)
 class Count:
-    """One measurement, carrying how it was arrived at.
+    """One measurement of *prompt content*, carrying how it was arrived at.
+
+    Content, and only content. Running the published tokeniser over the prompt
+    text does not include whatever the chat API wraps around it - the role
+    framing, the schema, the harmony control tokens - so this is a floor on the
+    request, not the request. Calling it "total request tokens" would understate
+    every request by an unknown margin and in the reassuring direction.
 
     Both numbers travel together on purpose. A caller that wants to be safe uses
     ``worst``; a caller reporting to a person shows both, because "the estimate
@@ -88,6 +94,12 @@ class Count:
     estimated: int
     exact: int | None = None
     encoding: str | None = None
+
+    @property
+    def is_content_only(self) -> bool:
+        """Always true, and named so callers cannot forget what this counts."""
+
+        return True
 
     @property
     def is_exact(self) -> bool:

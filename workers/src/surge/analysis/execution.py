@@ -42,23 +42,55 @@ class ExecutionStatus(StrEnum):
     """Mirrors ``prod.analysis_execution_status``."""
 
     STARTED = "STARTED"
+    #: A transient failure. Still open, still the same execution.
+    RETRY_PENDING = "RETRY_PENDING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
+    @property
+    def is_open(self) -> bool:
+        return self in (ExecutionStatus.STARTED, ExecutionStatus.RETRY_PENDING)
+
 
 class FailureClass(StrEnum):
-    """Why an analysis produced no decision.
+    """Why an analysis produced no decision, and whether it can be tried again.
 
-    Separated because they call for different things. A provider error is worth
-    retrying; a contract violation is worth looking at; a refusal to send is a
-    fact about the account rather than about the security.
+    The distinction is not bookkeeping. A failed execution is never looked at by
+    a recovery pass, and nothing else moves a watch out of ``IN_REANALYSIS`` - so
+    marking a network timeout as FAILED strands that security permanently. A
+    blip would quietly remove a stock from the system.
     """
 
+    #: Transient. The same execution is retried; the watch stays IN_REANALYSIS
+    #: because it genuinely still is under analysis.
     PROVIDER_ERROR = "PROVIDER_ERROR"
+    PROVIDER_TIMEOUT = "PROVIDER_TIMEOUT"
+    PROVIDER_RATE_LIMITED = "PROVIDER_RATE_LIMITED"
+
+    #: Terminal. Trying again would produce the same answer, so the watch has to
+    #: be moved somewhere it can rest.
     CONTRACT_VIOLATION = "CONTRACT_VIOLATION"
     QUOTA_BLOCKED = "QUOTA_BLOCKED"
+    PRIVACY_POLICY_BLOCKED = "PRIVACY_POLICY_BLOCKED"
     COVERAGE_NOT_MET = "COVERAGE_NOT_MET"
     STAND_IN_PROVIDER = "STAND_IN_PROVIDER"
+    EXTERNAL_TOOL_USED = "EXTERNAL_TOOL_USED"
+
+    @property
+    def is_transient(self) -> bool:
+        return self in TRANSIENT_FAILURES
+
+
+#: Retried rather than failed. Deliberately a short, explicit list: anything not
+#: named here is terminal, because assuming an unrecognised failure is worth
+#: retrying is how a permanent problem becomes an infinite loop.
+TRANSIENT_FAILURES = frozenset(
+    {
+        FailureClass.PROVIDER_ERROR,
+        FailureClass.PROVIDER_TIMEOUT,
+        FailureClass.PROVIDER_RATE_LIMITED,
+    }
+)
 
 
 class ExecutionError(EntryError):
@@ -94,6 +126,9 @@ class AnalysisExecution:
     provider_kind: str
     started_at: datetime
     model_id: str | None = None
+    prompt_sha256: str | None = None
+    bundle_sha256: str | None = None
+    canonical_prompt_sha256: str | None = None
     run_id: str | None = None
     request_version: str = EXECUTION_VERSION
     #: The answer, once there is one. Its presence is what tells a recovery pass
@@ -107,10 +142,12 @@ class AnalysisExecution:
     completed_at: datetime | None = None
     failure_class: FailureClass | None = None
     failure_detail: str | None = None
+    attempt_count: int = 0
+    last_transient_error: str | None = None
 
     @property
     def is_finished(self) -> bool:
-        return self.status is not ExecutionStatus.STARTED
+        return not self.status.is_open
 
     @property
     def has_a_stored_answer(self) -> bool:
@@ -120,7 +157,7 @@ class AnalysisExecution:
     def needs_the_model(self) -> bool:
         """Whether recovery has to call the provider, or can resume from disk."""
 
-        return self.status is ExecutionStatus.STARTED and not self.has_a_stored_answer
+        return self.status.is_open and not self.has_a_stored_answer
 
     @property
     def summary(self) -> dict:
@@ -171,7 +208,18 @@ class ExecutionStore(Protocol):
     ) -> BeginResult: ...
 
     def record_answer(
-        self, execution_id: str, response: EntryAnalysisResponse, *, raw_response_ref: str | None = None
+        self,
+        execution_id: str,
+        response: EntryAnalysisResponse,
+        *,
+        prompt_sha256: str,
+        bundle_sha256: str,
+        canonical_prompt_sha256: str,
+        raw_response_ref: str | None = None,
+    ) -> None: ...
+
+    def retry(
+        self, execution_id: str, *, transient_error: str, retry_not_before: datetime | None = None
     ) -> None: ...
 
     def complete(
@@ -260,12 +308,40 @@ class InMemoryExecutionStore:
         execution_id: str,
         response: EntryAnalysisResponse,
         *,
+        prompt_sha256: str,
+        bundle_sha256: str,
+        canonical_prompt_sha256: str,
         raw_response_ref: str | None = None,
     ) -> None:
+        if not (prompt_sha256 and bundle_sha256 and canonical_prompt_sha256):
+            raise ExecutionError(
+                "an answer is stored with the hashes of what produced it; without them the "
+                "stored answer belongs to no particular request (CLAUDE.md 1-18)"
+            )
         execution = self._started(execution_id)
         execution.stored_answer = response
         execution.response_sha256 = response.response_sha256
+        execution.prompt_sha256 = prompt_sha256
+        execution.bundle_sha256 = bundle_sha256
+        execution.canonical_prompt_sha256 = canonical_prompt_sha256
         execution.raw_response_ref = raw_response_ref
+        execution.status = ExecutionStatus.STARTED
+        execution.last_transient_error = None
+
+    def retry(
+        self, execution_id: str, *, transient_error: str, retry_not_before: datetime | None = None
+    ) -> None:
+        """A transient failure. The execution stays open and so does the watch.
+
+        Failing it instead would strand the watch at IN_REANALYSIS forever: no
+        recovery pass looks at a finished execution, and nothing else moves a
+        watch out of that state.
+        """
+
+        execution = self._started(execution_id)
+        execution.status = ExecutionStatus.RETRY_PENDING
+        execution.attempt_count += 1
+        execution.last_transient_error = transient_error
 
     def complete(
         self,
@@ -304,9 +380,7 @@ class InMemoryExecutionStore:
         execution.completed_at = now
 
     def in_flight(self) -> list[AnalysisExecution]:
-        return [
-            replace(row) for row in self._rows.values() if row.status is ExecutionStatus.STARTED
-        ]
+        return [replace(row) for row in self._rows.values() if row.status.is_open]
 
     def get(self, execution_id: str) -> AnalysisExecution | None:
         return self._rows.get(execution_id)
@@ -362,6 +436,7 @@ __all__ = [
     "ExecutionKey",
     "ExecutionStatus",
     "ExecutionStore",
+    "TRANSIENT_FAILURES",
     "FailureClass",
     "InMemoryExecutionStore",
     "RecoveryPlan",

@@ -183,6 +183,62 @@ class StructuredOutputError(GroqError):
     """The model returned something the contract cannot read."""
 
 
+class ExternalToolUsed(GroqError):
+    """The model reached outside the bundle. Its answer cannot be used at all."""
+
+
+#: Reported when a response says a built-in tool ran. Not a quality problem - a
+#: provenance one, and it disqualifies the output completely.
+ANALYSIS_EXTERNAL_TOOL_USED = "ANALYSIS_EXTERNAL_TOOL_USED"
+
+#: Groq's compound systems have these on by default: web search, visiting a
+#: website, running code, and Wolfram Alpha. For this analysis that is not a
+#: feature, it is a leak. A model that can search the web during a decision:
+#:
+#: * sees information from after ``decision_cutoff_at``, which is the one thing
+#:   the entire availability model exists to prevent (CLAUDE.md 1-7, 1-16);
+#: * produces teacher data contaminated by facts the system never had;
+#: * bases a judgement on sources that are in no bundle and no hash, so the
+#:   decision cannot be reproduced or audited (CLAUDE.md 1-18);
+#: * spends money outside the zero-cost envelope.
+#:
+#: The request asks for them to be off. Groq does not currently *document* a way
+#: to switch them off for compound, so that request is best effort and cannot be
+#: relied on - which is why the response is checked, and the check is what
+#: actually enforces this.
+COMPOUND_MODEL_PREFIXES = ("groq/compound",)
+
+
+def uses_built_in_tools(model_id: str) -> bool:
+    return model_id.startswith(COMPOUND_MODEL_PREFIXES)
+
+
+def executed_tools_in(payload: dict) -> list:
+    """Any report of a tool having run, wherever the provider puts it.
+
+    Looked for in three places on purpose. The field is documented on the
+    response and its exact position is not something to be confident about, and
+    the consequence of missing it is an answer built on unrecorded sources being
+    treated as if it came from the bundle.
+    """
+
+    found: list = []
+    for container in (payload, *(payload.get("choices") or [])):
+        if not isinstance(container, dict):
+            continue
+        for key in ("executed_tools", "tool_calls"):
+            value = container.get(key)
+            if value:
+                found.extend(value if isinstance(value, list) else [value])
+        message = container.get("message")
+        if isinstance(message, dict):
+            for key in ("executed_tools", "tool_calls"):
+                value = message.get(key)
+                if value:
+                    found.extend(value if isinstance(value, list) else [value])
+    return found
+
+
 # ------------------------------------------------------------- data policy
 
 
@@ -848,6 +904,13 @@ class GroqHostedProvider:
         }
         if fmt is not None:
             payload["response_format"] = fmt
+        if uses_built_in_tools(self.model_id):
+            # Asked for, not relied on. Groq documents neither of these for the
+            # compound systems, so they may be ignored entirely; the response
+            # check is what enforces the rule. Sending them anyway costs nothing
+            # and states the intent in the request itself.
+            payload["tool_choice"] = "none"
+            payload["compound_custom"] = {"tools": {"enabled_tools": []}}
         return json.dumps(payload).encode("utf-8")
 
     def _post(self, body: bytes):
@@ -862,6 +925,18 @@ class GroqHostedProvider:
         return response
 
     def _content_of(self, payload: dict) -> str:
+        used = executed_tools_in(payload)
+        if used:
+            names = [
+                (tool.get("type") or tool.get("name") or "?") if isinstance(tool, dict) else str(tool)
+                for tool in used
+            ]
+            raise ExternalToolUsed(
+                f"{ANALYSIS_EXTERNAL_TOOL_USED}: the model ran {len(used)} built-in tool(s) "
+                f"({', '.join(sorted(set(names)))}). The answer rests on sources that are in no "
+                "bundle and no hash, and may postdate the decision cutoff, so it cannot be used "
+                "for a Stage 3 setup, an entry decision or teacher data. The analysis fails"
+            )
         try:
             choice = payload["choices"][0]
             message = choice["message"]
@@ -1080,7 +1155,12 @@ def _decimal(value) -> Decimal | None:
 
 
 __all__ = [
+    "ANALYSIS_EXTERNAL_TOOL_USED",
     "ANALYSIS_FREE_QUOTA_BLOCKED",
+    "COMPOUND_MODEL_PREFIXES",
+    "ExternalToolUsed",
+    "executed_tools_in",
+    "uses_built_in_tools",
     "PUBLISHED_FREE_LIMITS",
     "PUBLISHED_FREE_LIMITS_GPT_OSS",
     "RATE_LIMIT_HEADERS",

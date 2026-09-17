@@ -41,6 +41,11 @@ from surge.runtime.runner import (
 )
 
 MONDAY = datetime(2026, 9, 14, 7, 0, tzinfo=UTC)
+#: Any check that reads a row count now also reads how recent the newest row is,
+#: so a fixture that means "this source is working" has to say both.
+FRESH = datetime(2026, 9, 17, 6, 0, tzinfo=UTC)
+NOW = datetime(2026, 9, 17, 12, 0, tzinfo=UTC)
+
 
 
 @pytest.fixture()
@@ -284,6 +289,8 @@ def _connected(**overrides) -> dict:
         "material_sources_live": 1,
         "eod_price_provider": "a settled provider",
         "price_rows_observed": 5_000,
+        "price_latest_at": FRESH,
+        "now": NOW,
         "intraday_price_provider": "a settled provider",
         "eod_analysis_provider": "a real model",
         "eod_analysis_is_a_stand_in": False,
@@ -344,6 +351,7 @@ def test_the_us_price_question_is_two_questions():
             **_connected(
                 fx_provider="ECB",
                 fx_rows_observed=900,
+                fx_latest_at=FRESH,
                 eod_price_provider="alpaca_historical_sip (delayed SIP)",
                 intraday_price_provider=None,
             )
@@ -371,7 +379,9 @@ def test_the_two_markets_are_judged_separately():
     report = assess_all(
         [
             _market("JP", material_sources_live=1),
-            _market("US", **_connected(fx_provider="ECB", fx_rows_observed=900)),
+            _market(
+                "US", **_connected(fx_provider="ECB", fx_rows_observed=900, fx_latest_at=FRESH)
+            ),
         ]
     )
     verdicts = {m.market_code: m.verdict for m in report.markets}
@@ -543,18 +553,60 @@ def test_an_unbound_role_reads_differently_from_a_bound_one():
     assert "no provider is bound" in unbound.detail
 
 
-def test_rows_actually_observed_make_it_a_capability():
-    readiness = assess(_market("US", fx_binding="ecb", fx_rows_observed=1_234))
+def test_recent_rows_from_the_bound_provider_make_it_a_capability():
+    readiness = assess(
+        _market("US", fx_binding="ecb", fx_rows_observed=1_234, fx_latest_at=FRESH, now=NOW)
+    )
     check = _fx_check(readiness)
 
     assert check.status is CheckStatus.PASS
-    assert check.liveness is Liveness.LIVE_OBSERVED
-    assert "1,234 row(s) actually observed" in check.detail
+    assert check.liveness is Liveness.LIVE_FRESH
+    assert "1,234 row(s)" in check.detail
     assert check.is_a_capability
 
 
+def test_rows_that_stopped_arriving_are_stale_rather_than_live():
+    """A count above zero is not a working pipeline. Without this, a market that
+    went quiet in the spring reads as live all year."""
+
+    stale = datetime(2026, 5, 1, tzinfo=UTC)
+    readiness = assess(
+        _market("US", fx_binding="ecb", fx_rows_observed=50_000, fx_latest_at=stale, now=NOW)
+    )
+    check = _fx_check(readiness)
+
+    assert check.status is CheckStatus.FAIL
+    assert check.liveness is Liveness.LIVE_STALE
+    assert "day(s) old" in check.detail
+    assert check.blocks
+
+
+def test_a_weekend_does_not_make_a_source_stale():
+    """A market closed on Sunday has no new bar and is not broken."""
+
+    friday = datetime(2026, 9, 15, 21, 0, tzinfo=UTC)
+    sunday = datetime(2026, 9, 17, 9, 0, tzinfo=UTC)
+    readiness = assess(
+        _market("US", fx_binding="ecb", fx_rows_observed=10, fx_latest_at=friday, now=sunday)
+    )
+
+    assert _fx_check(readiness).liveness is Liveness.LIVE_FRESH
+
+
+def test_rows_with_no_date_are_not_assumed_to_be_recent():
+    """"We cannot tell how old this is" is not evidence that it is new."""
+
+    readiness = assess(
+        _market("US", fx_binding="ecb", fx_rows_observed=10, fx_latest_at=None, now=NOW)
+    )
+    check = _fx_check(readiness)
+
+    assert check.liveness is Liveness.LIVE_STALE
+    assert "cannot be established" in check.detail
+
+
 def test_a_bound_price_source_with_no_bars_still_blocks():
-    readiness = assess(_market("JP", eod_price_binding="jquants", price_rows_observed=0))
+    readiness = assess(_market("JP", eod_price_binding="jquants", price_rows_observed=0, now=NOW))
     check = next(c for c in readiness.checks if c.name == "eod_price_provider")
 
     assert check.blocks
@@ -562,7 +614,7 @@ def test_a_bound_price_source_with_no_bars_still_blocks():
 
 
 def test_the_liveness_of_each_check_is_in_the_summary():
-    summary = assess(_market("US", fx_binding="ecb", fx_rows_observed=0)).summary
+    summary = assess(_market("US", fx_binding="ecb", fx_rows_observed=0, now=NOW)).summary
 
     assert summary["liveness"]["fx_provider"] == "BOUND_NOT_LIVE_OBSERVED"
 
@@ -579,8 +631,9 @@ class _FakeCursor:
     def execute(self, sql, params):
         for key, value in self._answers.items():
             if key in sql:
-                self._row = (value,)
+                self._row = value if isinstance(value, tuple) else (value,)
                 self.seen.append(key)
+                self.params = params
                 return
         self._row = None
 
@@ -611,8 +664,8 @@ def test_collect_reads_the_bindings_and_the_row_counts():
     conn = _FakeConn(
         {
             "provider_role_bindings": "ecb",
-            "market.fx_rates": 0,
-            "market.daily_bars": 0,
+            "market.fx_rates": (0, None, None),
+            "market.daily_bars": (0, None, None),
             "labels.objective_labels": 0,
             "pg_constraint": 1,
             "news.sources": 1,
@@ -624,6 +677,16 @@ def test_collect_reads_the_bindings_and_the_row_counts():
 
     assert check.liveness is Liveness.BOUND_NOT_LIVE_OBSERVED
     assert "ecb is bound and enabled" in check.detail
+
+
+def test_the_freshness_query_is_scoped_to_the_bound_provider():
+    """Counting any provider's rows would let a source decommissioned last year
+    keep a market looking live."""
+
+    from surge.runtime.readiness import SQL_CHECKS
+
+    assert "provider_id = coalesce(%(fx_provider)s" in SQL_CHECKS["fx_freshness"]
+    assert "b.provider_id = coalesce(%(price_provider)s" in SQL_CHECKS["price_freshness"]
 
 
 def test_a_query_that_cannot_be_run_is_reported_as_a_failed_check():
@@ -644,10 +707,9 @@ def test_a_query_that_cannot_be_run_is_reported_as_a_failed_check():
             cursor.execute = execute
             return cursor
 
-    readiness = _Exploding({"market.daily_bars": 0}).cursor  # noqa: F841
-    readiness = collect(_Exploding({"market.daily_bars": 0}), "US")
+    readiness = collect(_Exploding({"market.daily_bars": (0, None, None)}), "US")
 
     failed = [c for c in readiness.checks if c.name == "database_check_failed"]
     assert failed
-    assert "fx_rows" in failed[0].detail
+    assert "fx_freshness" in failed[0].detail
     assert failed[0].blocks

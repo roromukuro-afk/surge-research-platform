@@ -308,16 +308,22 @@ class EntryAnalysisJob:
             try:
                 response = self.provider.analyse_entry(request)
             except Exception as exc:
+                # Retried, not failed. A call that did not come back says nothing
+                # about the security, and failing it would strand the watch at
+                # IN_REANALYSIS with nothing left to move it.
                 if self.executions is not None and execution_id is not None:
-                    self.executions.fail(
-                        execution_id,
-                        failure_class=FailureClass.PROVIDER_ERROR,
-                        failure_detail=f"{type(exc).__name__}: {exc}",
-                        now=now,
+                    self.executions.retry(
+                        execution_id, transient_error=f"{type(exc).__name__}: {exc}"
                     )
                 raise
             if self.executions is not None and execution_id is not None:
-                self.executions.record_answer(execution_id, response)
+                self.executions.record_answer(
+                    execution_id,
+                    response,
+                    prompt_sha256=request.prompt_sha256,
+                    bundle_sha256=bundle.bundle_sha256,
+                    canonical_prompt_sha256=bundle.canonical_prompt_sha256,
+                )
 
         validation = validate_entry_analysis(response, facts, bundle=bundle)
 
@@ -345,6 +351,9 @@ class EntryAnalysisJob:
             )
             decision.failure_class = FailureClass.CONTRACT_VIOLATION
             if self.executions is not None and execution_id is not None:
+                # After the rearm above, never before: a terminal failure whose
+                # watch is still IN_REANALYSIS strands the security, and the
+                # database refuses it for that reason.
                 self.executions.fail(
                     execution_id,
                     failure_class=FailureClass.CONTRACT_VIOLATION,
