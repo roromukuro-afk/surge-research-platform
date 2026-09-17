@@ -52,7 +52,8 @@ create or replace view ui.dashboard_daily as
     select as_of_date,
            count(*) filter (where state = 'TECHNICAL_SETUP_EOD') as technical_setups,
            count(*) filter (where state = 'POST_CLOSE_CATALYST_SETUP') as catalyst_setups,
-           count(*) filter (where state like 'WATCH%') as watching,
+           -- Cast before matching: there is no LIKE operator on an enum.
+           count(*) filter (where state::text like 'WATCH%') as watching,
            count(*) filter (where state = 'REJECT') as rejected,
            count(*) filter (where validation_status = 'REJECTED') as failed_validation,
            count(*) filter (where provider_kind = 'DETERMINISTIC_MOCK') as from_the_stand_in
