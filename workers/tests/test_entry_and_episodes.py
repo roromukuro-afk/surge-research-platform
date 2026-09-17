@@ -575,3 +575,132 @@ def test_everything_produced_here_is_marked_not_live_verified():
 
     assert outcome.prediction.verification.value == "IMPLEMENTED_NOT_LIVE_VERIFIED"
     assert outcome.attempt.verification.value == "IMPLEMENTED_NOT_LIVE_VERIFIED"
+
+
+# ------------------------------------------- the post-close / priced-in split
+
+
+class _Bundle:
+    def __init__(self, routes):
+        self.sections = {"routes": routes}
+
+
+class _Response:
+    def __init__(self, rationale):
+        self.rationale = rationale
+
+
+class _Answer:
+    """The parts of a Stage 3 result that the setup mapping reads."""
+
+    def __init__(self, state, *, security_id="sec-1", routes=None, price=1000.0):
+        self.state = state
+        self.security_id = security_id
+        self.bundle = _Bundle(routes or {"technical_routes": ["A"], "material_routes": []})
+        self.response = _Response("because the rules said so")
+        self.threshold_reference_price = price
+
+
+def test_a_post_close_catalyst_is_never_marked_as_priced_in():
+    """The close cannot have priced in something published after it (RF-05)."""
+
+    from surge.analysis.llm import Stage3State
+    from surge.entry.from_stage3 import to_setups
+    from surge.entry.models import AnalysisKind
+
+    report = to_setups(
+        [_Answer(Stage3State.POST_CLOSE_CATALYST_SETUP)],
+        as_of_date=date(2026, 9, 17),
+        price_cutoff_at=CUTOFF,
+        knowledge_cutoff_at=COMPLETED,
+        analysis_kind=AnalysisKind.POST_CLOSE_MATERIAL,
+    )
+
+    assert report.setups[0].priced_in_status == "NOT_EVALUATED_AGAINST_EOD"
+    assert any("the next session's question" in note for note in report.notes)
+
+
+def test_a_technical_setup_from_the_daily_pass_is_evaluated_against_the_close():
+    from surge.analysis.llm import Stage3State
+    from surge.entry.from_stage3 import to_setups
+
+    report = to_setups(
+        [_Answer(Stage3State.TECHNICAL_SETUP_EOD)],
+        as_of_date=date(2026, 9, 17),
+        price_cutoff_at=CUTOFF,
+        knowledge_cutoff_at=CUTOFF,
+    )
+
+    assert report.setups[0].priced_in_status == "EVALUATED_AGAINST_EOD"
+
+
+def test_an_intraday_pass_does_not_produce_setups():
+    from surge.analysis.llm import Stage3State
+    from surge.entry.from_stage3 import to_setups
+
+    with pytest.raises(ValueError, match="does not produce setups"):
+        to_setups(
+            [_Answer(Stage3State.TECHNICAL_SETUP_EOD)],
+            as_of_date=date(2026, 9, 17),
+            price_cutoff_at=CUTOFF,
+            knowledge_cutoff_at=CUTOFF,
+            analysis_kind=AnalysisKind.ENTRY_DECISION,
+        )
+
+
+def test_the_thesis_key_is_built_from_the_state_and_the_routes_that_fired():
+    from surge.analysis.llm import Stage3State
+    from surge.entry.from_stage3 import thesis_key_for
+
+    answer = _Answer(
+        Stage3State.TECHNICAL_SETUP_EOD,
+        routes={"technical_routes": ["C", "A"], "material_routes": ["M1"]},
+    )
+
+    assert thesis_key_for(answer) == "TECHNICAL_SETUP_EOD|A|C|M1"
+
+
+def test_two_answers_with_the_same_drivers_get_the_same_thesis_key():
+    """Which is what makes the episode deduplication rule mean anything."""
+
+    from surge.analysis.llm import Stage3State
+    from surge.entry.from_stage3 import thesis_key_for
+
+    first = _Answer(Stage3State.WATCH_BREAKOUT, routes={"technical_routes": ["A"]})
+    second = _Answer(Stage3State.WATCH_BREAKOUT, routes={"technical_routes": ["A"]})
+
+    assert thesis_key_for(first) == thesis_key_for(second)
+
+
+def test_watch_other_says_it_has_no_level_rather_than_inventing_one():
+    """WATCH_OTHER is where the analysis lands when it cannot assert either
+    setup - most often because PRE_CLOSE vs POST_CLOSE is UNKNOWN. A made-up
+    trigger level would turn that uncertainty into a number."""
+
+    from surge.analysis.llm import Stage3State
+    from surge.entry.from_stage3 import to_setups
+
+    report = to_setups(
+        [_Answer(Stage3State.WATCH_OTHER)],
+        as_of_date=date(2026, 9, 17),
+        price_cutoff_at=CUTOFF,
+        knowledge_cutoff_at=CUTOFF,
+    )
+
+    assert "not specific enough to state a level" in report.setups[0].trigger_description
+
+
+def test_a_reject_leaves_a_setup_row_but_no_watch():
+    from surge.analysis.llm import Stage3State
+    from surge.entry.from_stage3 import to_setups
+
+    report = to_setups(
+        [_Answer(Stage3State.REJECT)],
+        as_of_date=date(2026, 9, 17),
+        price_cutoff_at=CUTOFF,
+        knowledge_cutoff_at=CUTOFF,
+    )
+
+    assert report.setups[0].state.value == "REJECT"
+    assert not report.setups[0].arms_a_watch
+    assert report.summary["watches_armed"] == 0

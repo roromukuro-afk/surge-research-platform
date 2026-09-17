@@ -32,6 +32,7 @@ from enum import StrEnum
 from surge.analysis.stage3 import Stage3Job, Stage3Report
 from surge.chart.obstacles import find_obstacles
 from surge.chart.stage2 import Stage2Assessment, assess
+from surge.entry.from_stage3 import SetupReport, to_setups
 from surge.jobs.screening import EligibilityReport, PriceEligibilityJob, Stage1Report, Stage1ScreeningJob
 from surge.market.eligibility import DEFAULT_RULE, FilterRule, FxObservation
 from surge.market.models import CanonicalAction, CanonicalBar
@@ -95,6 +96,9 @@ class EodReport:
     stage2: list[Stage2Assessment] = field(default_factory=list)
     obstacles: dict = field(default_factory=dict)
     stage3: Stage3Report | None = None
+    #: Phase 8's first record. Every surviving Stage 3 answer becomes a setup
+    #: row, including the rejections; the three WATCH_* states also arm a watch.
+    setups: SetupReport | None = None
 
     stage_status: dict[str, StageStatus] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
@@ -118,6 +122,7 @@ class EodReport:
             "union_by_origin": origins,
             "stage2_assessed": len(self.stage2),
             "stage3": self.stage3.summary if self.stage3 else {},
+            "setups": self.setups.summary if self.setups else {},
             "stage_status": {stage: status.value for stage, status in self.stage_status.items()},
         }
 
@@ -355,6 +360,29 @@ class EodPipeline:
             },
         )
         report.stage_status["stage3"] = ran if report.stage3.results else StageStatus.SKIPPED_NO_INPUT
+
+        # --- 7. Setups and watches -----------------------------------------
+        # Only the answers that survived validation. A verdict the validator
+        # rejected is a record of what the model said, not a setup to act on
+        # tomorrow.
+        stored = report.stage3.stored
+        if not stored:
+            report.stage_status["setups"] = StageStatus.SKIPPED_NO_INPUT
+            return report
+
+        report.setups = to_setups(
+            stored,
+            as_of_date=as_of_date,
+            price_cutoff_at=knowledge_cutoff,
+            knowledge_cutoff_at=knowledge_cutoff,
+        )
+        report.stage_status["setups"] = ran
+        if report.analysis_is_a_stand_in:
+            report.notes.append(
+                "the setups came from the deterministic stand-in. They are stored and monitorable; "
+                "no entry may be taken from one, and the prediction guard refuses a stand-in "
+                "provider outright"
+            )
         return report
 
     @staticmethod

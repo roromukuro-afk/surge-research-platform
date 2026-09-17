@@ -21,6 +21,8 @@ const CONTRACTS = [
   { name: "ui.unfilled_roles", sql: "select * from ui.unfilled_roles limit 1" },
   { name: "ui.pipeline_runs", sql: "select * from ui.pipeline_runs limit 1" },
   { name: "ui.not_live_verified", sql: "select * from ui.not_live_verified limit 1" },
+  { name: "ui.open_episodes", sql: "select * from ui.open_episodes limit 1" },
+  { name: "ui.entry_attempt_ledger", sql: "select * from ui.entry_attempt_ledger limit 1" },
   {
     name: "ui.materials_as_of",
     sql: "select * from ui.materials_as_of(clock_timestamp()) limit 1",

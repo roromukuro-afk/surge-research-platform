@@ -400,3 +400,67 @@ def test_the_gate_summary_counts_all_three_decisions():
     assert summary["UNRESOLVED"] == 1
     assert summary["promoted"] == 1
     assert summary["held_research_only"] == 2
+
+
+# ------------------------------------------------------- the hand-off to Phase 8
+
+
+def test_every_surviving_answer_becomes_a_setup_row():
+    """Including the rejections. A rejected security is a decision that was made,
+    and leaving it out would make the setup table a list of hopes."""
+
+    report = _run()
+
+    assert report.setups is not None
+    assert len(report.setups.setups) == len(report.stage3.stored)
+    assert report.stage_status["setups"] is not StageStatus.SKIPPED_NO_INPUT
+
+
+def test_no_setup_carries_the_entry_state():
+    """analysis.stage3_state has no ENTRY member, so there is nothing to
+    translate - and this is the assertion that would notice if one appeared."""
+
+    report = _run()
+
+    assert all(setup.state.value != "ENTRY" for setup in report.setups.setups)
+
+
+def test_only_the_watch_states_arm_a_watch():
+    report = _run()
+
+    for setup in report.setups.setups:
+        expected = setup.state.value.startswith("WATCH_")
+        assert setup.arms_a_watch is expected
+
+
+def test_a_setup_from_the_stand_in_says_so():
+    report = _run()
+
+    assert report.analysis_is_a_stand_in
+    assert any("no entry may be taken from one" in note for note in report.notes)
+
+
+def test_setups_are_marked_not_live_verified():
+    report = _run()
+
+    assert all(
+        setup.verification.value == "IMPLEMENTED_NOT_LIVE_VERIFIED"
+        for setup in report.setups.setups
+    )
+
+
+def test_a_thesis_key_is_recorded_for_every_setup():
+    """Provisional (D-17a is unsettled) and recorded verbatim, so replacing the
+    definition later is a versioned change rather than a silent reinterpretation
+    of episodes that already exist."""
+
+    report = _run()
+
+    assert all(setup.thesis_key for setup in report.setups.setups)
+
+
+def test_nothing_reaches_the_setup_stage_when_stage3_did_not_run():
+    report = _run(canonical_prompt_sha256="")
+
+    assert report.setups is None
+    assert report.stage_status.get("setups") in (None, StageStatus.SKIPPED_NO_INPUT)

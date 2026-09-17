@@ -12,6 +12,8 @@ const TABS = [
   { href: "/universe", label: "Universe" },
   { href: "/materials", label: "Materials" },
   { href: "/watch", label: "Watch & setup" },
+  { href: "/episodes", label: "Episodes" },
+  { href: "/entries", label: "Entry decisions" },
   { href: "/coverage", label: "Coverage" },
   { href: "/diagnostics", label: "Pipeline" },
 ];

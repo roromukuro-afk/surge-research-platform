@@ -229,3 +229,62 @@ export const DECISION_LABELS: Record<PriceDecision, string> = {
   STALE_PRICE: "Price too old to use",
   STALE_FX: "FX rate too old to use",
 };
+
+/**
+ * Mirrors `prod.entry_attempt_status`. Six of the seven produce no prediction,
+ * and all seven are in the same view on purpose: the ones that produced nothing
+ * are the denominator of any honest hit rate.
+ */
+export type EntryAttemptStatus =
+  | "PREDICTION_CREATED"
+  | "ENTRY_ABORTED_PRICE_LIMIT"
+  | "REJECTED_HARD_FILTER_AT_DECISION"
+  | "REJECTED_BY_ANALYSIS"
+  | "REJECTED_NOT_IN_UNIVERSE"
+  | "REAFFIRMED_EXISTING_EPISODE"
+  | "NO_ENTRY_REFERENCE_PRICE";
+
+export const ATTEMPT_LABELS: Record<EntryAttemptStatus, string> = {
+  PREDICTION_CREATED: "Entered",
+  ENTRY_ABORTED_PRICE_LIMIT: "Aborted at the limit",
+  REJECTED_HARD_FILTER_AT_DECISION: "Over 3,000 yen",
+  REJECTED_BY_ANALYSIS: "Analysis said no",
+  REJECTED_NOT_IN_UNIVERSE: "Outside the universe",
+  REAFFIRMED_EXISTING_EPISODE: "Reaffirmed",
+  NO_ENTRY_REFERENCE_PRICE: "No tradeable price",
+};
+
+/** Mirrors `ui.open_episodes`. */
+export type OpenEpisodeRow = {
+  episode_id: string;
+  security_id: string;
+  thesis_key: string;
+  opened_at: string;
+  entry_price_observed_at: string;
+  horizon_sessions: number;
+  entry_reference_price: string;
+  entry_price_currency: string;
+  target_price: string;
+  /** Fixed at creation. What the outcome is judged against. */
+  initial_failure_line: string;
+  /** May move on reanalysis, and never closes an episode. */
+  current_risk_line: string | null;
+  provider_id: string;
+  verification: string;
+  transition_count: string;
+};
+
+/** Mirrors `ui.entry_attempt_ledger`. */
+export type EntryAttemptRow = {
+  attempt_id: string;
+  security_id: string;
+  status: EntryAttemptStatus;
+  analysis_kind: string;
+  decision_completed_at: string;
+  decision_price_jpy: string | null;
+  entry_price_jpy: string | null;
+  universe_decision: string | null;
+  reject_reason: string | null;
+  verification: string;
+  produced_a_prediction: boolean;
+};
