@@ -701,6 +701,46 @@ def test_the_freshness_query_is_scoped_to_the_bound_provider():
     assert "b.provider_id = coalesce(%(price_provider)s" in SQL_CHECKS["price_freshness"]
 
 
+def test_an_open_analysis_that_is_merely_recent_is_not_a_blocker():
+    """One that started a minute ago is in progress, not stuck. Reporting it as
+    a failure would make every busy afternoon look broken."""
+
+    readiness = assess(_market(material_sources_live=1, analyses_in_flight=2, analyses_stuck=0))
+    check = next(c for c in readiness.checks if c.name == "nothing_stuck_in_reanalysis")
+
+    assert check.status is CheckStatus.WARN
+    assert not check.blocks
+
+
+def test_an_analysis_past_the_deadline_blocks():
+    """It holds a watch at IN_REANALYSIS, and the watch machine has exactly one
+    way out of that state: the decision that never came."""
+
+    readiness = assess(
+        _market(
+            material_sources_live=1,
+            analyses_in_flight=3,
+            analyses_stuck=1,
+            oldest_in_flight_cutoff="2026-09-17T02:15:00+00:00",
+        )
+    )
+    check = next(c for c in readiness.checks if c.name == "nothing_stuck_in_reanalysis")
+
+    assert check.status is CheckStatus.FAIL
+    assert check.blocks
+    assert "2026-09-17T02:15:00+00:00" in check.detail
+
+
+def test_no_open_analysis_is_the_quiet_pass():
+    check = next(
+        c for c in assess(_market()).checks if c.name == "nothing_stuck_in_reanalysis"
+    )
+
+    assert check.status is CheckStatus.PASS
+    # Not a capability: nothing being stuck is not something running.
+    assert not check.is_a_capability
+
+
 def test_one_broken_check_does_not_take_the_rest_of_the_report_with_it():
     """Inside a transaction, Postgres refuses every statement after an error
     until somebody rolls back. Without a savepoint per check, one genuinely

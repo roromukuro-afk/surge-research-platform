@@ -15,6 +15,7 @@ could tell them from real ones.
 from __future__ import annotations
 
 import os
+import warnings
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -122,8 +123,16 @@ def conn():
                     cur.execute("delete from prod.watch_transitions where watch_id = %s", (watch_id,))
                     cur.execute("delete from prod.watches where watch_id = %s", (watch_id,))
             connection.commit()
-        except Exception:  # noqa: BLE001 - cleanup must not mask a real failure
+        except Exception as exc:  # noqa: BLE001 - cleanup must not mask a real failure
             connection.rollback()
+            # Not silent. These tests commit, so a failed cleanup leaves real
+            # rows in a real database, and swallowing the reason makes the next
+            # test's global count the first place anyone notices.
+            warnings.warn(
+                f"could not clean up after this test: {type(exc).__name__}: {exc}. "
+                f"Watches left behind: {created}",
+                stacklevel=1,
+            )
         connection.close()
 
 
@@ -288,6 +297,7 @@ def test_a_transient_provider_failure_is_retried_rather_than_failed(conn):
     result = _run(runner, watch_id, security_id, trigger_id)
 
     assert result.retried
+    assert result.failure_class is FailureClass.PROVIDER_TIMEOUT
     assert result.prediction_id is None
     status, watch_state = _status(conn, result.analysis_execution_id)
     assert status == "RETRY_PENDING"
@@ -365,11 +375,14 @@ def test_recovery_reports_what_it_could_not_resume(conn):
     )
 
     assert recovery.resumed == []
-    assert len(recovery.unresumable) == 1
-    stuck = recovery.unresumable[0]
-    assert stuck["watch_id"] == watch_id
-    assert "IN_REANALYSIS" in stuck["why"]
-    assert recovery.summary["stuck"] == [started.analysis_execution_id]
+    # Scoped to this test's own watch. in_flight() is a question about the whole
+    # database, and an assertion on its total would be an assertion about every
+    # other test that happened to leave a row behind.
+    mine = [u for u in recovery.unresumable if u["watch_id"] == watch_id]
+    assert len(mine) == 1
+    assert mine[0]["analysis_execution_id"] == started.analysis_execution_id
+    assert "IN_REANALYSIS" in mine[0]["why"]
+    assert started.analysis_execution_id in recovery.summary["stuck"]
 
 
 # ------------------------------------------- 2. crash after TX2 commits

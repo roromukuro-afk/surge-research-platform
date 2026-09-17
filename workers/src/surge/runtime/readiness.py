@@ -32,7 +32,7 @@ from enum import StrEnum
 
 from surge.runtime.schema_drift import compare
 
-READINESS_VERSION = "readiness-1.5.0"
+READINESS_VERSION = "readiness-1.6.0"
 
 
 class Verdict(StrEnum):
@@ -195,6 +195,20 @@ SQL_CHECKS: dict[str, str] = {
              + (select count(*) from labels.pipeline_miss_records)
              + (select count(*) from labels.datasets)
     """,
+    #: Analyses that started and never finished. Each one is a watch sitting at
+    #: IN_REANALYSIS, and nothing except a recovery pass moves a watch out of
+    #: that state - so an unswept execution is a security quietly removed from
+    #: the system. Counting them here means it shows up even when no runner is
+    #: sweeping, which today is the case: there is no intraday schedule until an
+    #: intraday price source exists (D-103-LIVE / D-06b).
+    "analyses_in_flight": """
+        select count(*),
+               count(*) filter (
+                 where decision_cutoff_at < now() - interval '30 minutes'
+               ),
+               min(decision_cutoff_at)::text
+          from ui.entry_analysis_in_flight
+    """,
     "mock_cannot_predict": """
         select count(*) from pg_constraint
         where conname = 'predictions_not_from_a_mock'
@@ -313,6 +327,46 @@ def check_provider(
         gates_predictions=gates_predictions,
         is_a_capability=is_a_capability,
         blocker_id=None if configured else blocker_id,
+    )
+
+
+def check_nothing_stuck_in_reanalysis(
+    in_flight: int, stuck: int, oldest_cutoff: str | None
+) -> Check:
+    """An analysis nobody finished is a security nobody will look at again.
+
+    The watch machine has exactly one way out of IN_REANALYSIS - the decision
+    that never came - so an execution left open holds its security there
+    indefinitely. That is worth reporting even though the recovery pass exists,
+    because the recovery pass has to be *run*, and until an intraday price
+    source is settled there is no intraday schedule to run it from.
+
+    An open analysis is not by itself a problem: one that started a minute ago is
+    simply in progress. Past the deadline it is, because by then its answer would
+    be about a different market even if it arrived.
+    """
+
+    if stuck:
+        return Check(
+            name="nothing_stuck_in_reanalysis",
+            status=CheckStatus.FAIL,
+            detail=(
+                f"{stuck} of {in_flight} open entry analyses are past the deadline (oldest "
+                f"cutoff {oldest_cutoff}). Each one holds a watch at IN_REANALYSIS, and nothing "
+                "but a recovery pass moves a watch out of that state"
+            ),
+        )
+    if in_flight:
+        return Check(
+            name="nothing_stuck_in_reanalysis",
+            status=CheckStatus.WARN,
+            detail=f"{in_flight} entry analysis/es in flight and none past the deadline",
+            gates_predictions=False,
+        )
+    return Check(
+        name="nothing_stuck_in_reanalysis",
+        status=CheckStatus.PASS,
+        detail="no entry analysis is open, so no watch is held at IN_REANALYSIS",
     )
 
 
@@ -460,6 +514,11 @@ class MarketInputs:
     universe_run_published: bool = False
     teacher_row_count: int = 0
     mock_guard_constraints: int = 0
+    #: Analyses that started and never finished, and how many of those are past
+    #: the deadline after which their answer would be about a different market.
+    analyses_in_flight: int = 0
+    analyses_stuck: int = 0
+    oldest_in_flight_cutoff: str | None = None
     migrations_in_sync: bool = False
     #: What the comparison actually found, so the report can name the drifted
     #: functions instead of repeating a sentence that is true of every failure.
@@ -599,6 +658,11 @@ def assess(inputs: MarketInputs) -> MarketReadiness:
         ),
         check_teacher_still_zero(inputs.teacher_row_count),
         check_mock_guard(inputs.mock_guard_constraints),
+        check_nothing_stuck_in_reanalysis(
+            inputs.analyses_in_flight,
+            inputs.analyses_stuck,
+            inputs.oldest_in_flight_cutoff,
+        ),
         Check(
             name="migrations_in_sync",
             status=CheckStatus.PASS if inputs.migrations_in_sync else CheckStatus.FAIL,
@@ -746,6 +810,7 @@ def collect(conn, market_code: str, *, universe_version: str = "universe-1.0.0",
 
     price = values.get("price_freshness") or (0, None, None)
     fx = values.get("fx_freshness") or (0, None, None)
+    in_flight = values.get("analyses_in_flight") or (0, 0, None)
 
     # Whether the schema matches git is a fact about this database, so it is
     # measured here rather than asserted on a command line. A caller saying the
@@ -769,6 +834,9 @@ def collect(conn, market_code: str, *, universe_version: str = "universe-1.0.0",
         teacher_row_count=int(scalar("teacher_rows") or 0),
         mock_guard_constraints=int(scalar("mock_cannot_predict") or 0),
         material_sources_live=int(scalar("live_news_sources") or 0),
+        analyses_in_flight=int(in_flight[0] or 0),
+        analyses_stuck=int(in_flight[1] or 0),
+        oldest_in_flight_cutoff=in_flight[2],
         eod_price_binding=bindings.get("price_binding"),
         fx_binding=bindings.get("fx_binding"),
         price_rows_observed=int(price[0] or 0),
@@ -804,5 +872,6 @@ __all__ = [
     "assess",
     "assess_all",
     "check_capability",
+    "check_nothing_stuck_in_reanalysis",
     "collect",
 ]

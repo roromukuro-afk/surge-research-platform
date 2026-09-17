@@ -107,6 +107,21 @@ class RunResult:
         }
 
 
+def _transient_class(exc: BaseException) -> FailureClass:
+    """Which transient failure this was, for the record rather than the flow.
+
+    All three are retried identically, so this changes nothing about what
+    happens - but "PROVIDER_ERROR" on every timeout makes the one column that
+    could tell an outage from a rate limit say the same thing either way.
+    """
+
+    if isinstance(exc, TimeoutError):
+        return FailureClass.PROVIDER_TIMEOUT
+    if "rate limit" in str(exc).lower() or type(exc).__name__ == "RateLimited":
+        return FailureClass.PROVIDER_RATE_LIMITED
+    return FailureClass.PROVIDER_ERROR
+
+
 @dataclass
 class ProductionEntryAnalysis:
     """One provider, one connection, three transactions."""
@@ -178,12 +193,11 @@ class ProductionEntryAnalysis:
             request = LLMRequest(prompt=prompt, bundle=bundle)
             answer = self._tx2(execution, request, bundle, now=now, result=result)
             if answer is None:
-                result.retried = True
-                result.failure_class = FailureClass.PROVIDER_ERROR
-                result.notes.append(
-                    "a transient provider failure; the execution stays open and the watch stays "
-                    "IN_REANALYSIS, because it is"
-                )
+                # _tx2 has already recorded which of the two it was - a retry
+                # that leaves the execution open, or a terminal failure that
+                # moved the watch. Setting it again here is how the result came
+                # to say "retried, transient" about an execution the database
+                # had recorded as FAILED.
                 return result
             response = answer
         else:
@@ -263,9 +277,12 @@ class ProductionEntryAnalysis:
                 except Exception:
                     self.conn.rollback()
                     raise
+                result.retried = True
+                result.failure_class = _transient_class(exc)
                 result.notes.append(
-                    f"transient failure, retry {execution.attempt_count + 1} of "
-                    f"{MAX_TRANSIENT_ATTEMPTS}: {detail}"
+                    f"a transient provider failure ({detail}); the execution stays open and the "
+                    f"watch stays IN_REANALYSIS, because it is. Retry "
+                    f"{execution.attempt_count + 1} of {MAX_TRANSIENT_ATTEMPTS}"
                 )
                 return None
 
