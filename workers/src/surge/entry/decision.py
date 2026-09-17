@@ -271,6 +271,7 @@ def decide(request: EntryRequest) -> EntryOutcome:
         bundle_sha256=analysis.bundle_sha256,
         canonical_prompt_sha256=analysis.canonical_prompt_sha256,
         universe_decision=request.universe.decision,
+        run_id=request.run_id,
         source_setup_ids=request.setup_ids,
         verification=request.verification,
         rule_version=DECISION_VERSION,

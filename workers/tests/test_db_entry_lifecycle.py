@@ -3,8 +3,14 @@
 The Python layer refuses these things too. That is not duplication for its own
 sake: the Python check gives a job a clear error before it does the wrong thing,
 and the database check holds when some future path does not come through the
-Python at all. These tests are about the second one - every case here bypasses
-``surge.entry.decision`` deliberately and writes straight to the table.
+Python at all. Every case here bypasses ``surge.entry.decision`` deliberately
+and writes straight to the table.
+
+Several of these exist because the first version of the guard did not hold. The
+watch machine trusted the caller's ``from_state`` and used a simple CASE whose
+``when null`` branch cannot match, so a brand new watch could be inserted
+straight into ENTERED - which it was, against the live database, before this was
+fixed.
 """
 
 from __future__ import annotations
@@ -12,7 +18,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 import pytest
 
@@ -28,6 +34,29 @@ pytestmark = [
 CUTOFF = datetime(2026, 9, 17, 2, 0, tzinfo=UTC)
 COMPLETED = datetime(2026, 9, 17, 2, 5, tzinfo=UTC)
 ENTRY_AT = datetime(2026, 9, 17, 2, 6, tzinfo=UTC)
+
+#: The fields an attempt and its prediction must agree on. Kept in one place so
+#: the happy path agrees by construction and each test can break exactly one.
+SHARED = {
+    "thesis_key": "t-1",
+    "analysis_kind": "ENTRY_DECISION",
+    "decision_price": Decimal("1000"),
+    "decision_price_observed_at": CUTOFF,
+    "decision_price_jpy": Decimal("1000"),
+    "entry_reference_price": Decimal("1010"),
+    "entry_price_observed_at": ENTRY_AT,
+    "entry_price_jpy": Decimal("1010"),
+    "entry_price_method": "first trade after the decision completed",
+    "universe_decision": "INCLUDED",
+    "provider_id": "hosted-1",
+    "verification": "IMPLEMENTED_NOT_LIVE_VERIFIED",
+}
+
+
+def target_for(price: Decimal) -> Decimal:
+    """The same arithmetic the constraint does, and the same rounding."""
+
+    return (price * Decimal("1.20")).quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
 
 
 @pytest.fixture()
@@ -45,34 +74,32 @@ def _security() -> str:
     return str(uuid.uuid4())
 
 
-def _attempt(cur, **overrides) -> str:
+def _attempt(cur, **overrides):
     params = {
         "security_id": _security(),
         "status": "PREDICTION_CREATED",
-        "analysis_kind": "ENTRY_DECISION",
         "decision_cutoff_at": CUTOFF,
         "decision_completed_at": COMPLETED,
-        "decision_price": Decimal("1000"),
-        "decision_price_observed_at": CUTOFF,
-        "decision_price_jpy": Decimal("1000"),
-        "entry_reference_price": Decimal("1010"),
-        "entry_price_observed_at": ENTRY_AT,
-        "entry_price_jpy": Decimal("1010"),
-        "universe_decision": "INCLUDED",
+        "decision_price_currency": "JPY",
+        **SHARED,
     }
     params.update(overrides)
     cur.execute(
         """
         insert into prod.entry_attempts (
           security_id, status, analysis_kind, decision_cutoff_at, decision_completed_at,
-          decision_price, decision_price_observed_at, decision_price_jpy,
-          entry_reference_price, entry_price_observed_at, entry_price_jpy, universe_decision
+          decision_price, decision_price_observed_at, decision_price_currency, decision_price_jpy,
+          entry_reference_price, entry_price_observed_at, entry_price_method, entry_price_jpy,
+          universe_decision, thesis_key, provider_id, verification
         ) values (
           %(security_id)s, %(status)s::prod.entry_attempt_status,
           %(analysis_kind)s::prod.analysis_kind, %(decision_cutoff_at)s, %(decision_completed_at)s,
-          %(decision_price)s, %(decision_price_observed_at)s, %(decision_price_jpy)s,
-          %(entry_reference_price)s, %(entry_price_observed_at)s, %(entry_price_jpy)s,
-          %(universe_decision)s::universe.decision
+          %(decision_price)s, %(decision_price_observed_at)s, %(decision_price_currency)s,
+          %(decision_price_jpy)s,
+          %(entry_reference_price)s, %(entry_price_observed_at)s, %(entry_price_method)s,
+          %(entry_price_jpy)s,
+          %(universe_decision)s::universe.decision, %(thesis_key)s, %(provider_id)s,
+          %(verification)s::prod.verification_status
         ) returning attempt_id, security_id
         """,
         params,
@@ -80,13 +107,13 @@ def _attempt(cur, **overrides) -> str:
     return cur.fetchone()
 
 
-def _episode(cur, security_id: str, thesis_key: str = "t-1") -> str:
+def _episode(cur, security_id: str, thesis_key: str = "t-1", entry_at=ENTRY_AT) -> str:
     cur.execute(
         """
         insert into prod.episodes (security_id, thesis_key, opened_at, entry_price_observed_at)
         values (%s, %s, %s, %s) returning episode_id
         """,
-        (security_id, thesis_key, ENTRY_AT, ENTRY_AT),
+        (security_id, thesis_key, entry_at, entry_at),
     )
     return cur.fetchone()[0]
 
@@ -96,41 +123,33 @@ def _prediction(cur, *, episode_id, attempt_id, security_id, **overrides):
         "episode_id": episode_id,
         "attempt_id": attempt_id,
         "security_id": security_id,
-        "thesis_key": "t-1",
-        "analysis_kind": "ENTRY_DECISION",
-        "entry_reference_price": Decimal("1010"),
-        "entry_price_observed_at": ENTRY_AT,
         "entry_price_currency": "JPY",
-        "entry_price_jpy": Decimal("1010"),
-        "decision_price": Decimal("1000"),
-        "decision_price_observed_at": CUTOFF,
-        "decision_price_jpy": Decimal("1000"),
         "initial_failure_line": Decimal("940"),
-        "target_price": Decimal("1010") * Decimal("1.20"),
+        "target_price": target_for(SHARED["entry_reference_price"]),
         "data_cutoff": CUTOFF,
-        "provider_id": "hosted-1",
         "provider_kind": "HOSTED_LLM",
         "rule_version": "entry-decision-1.0.0",
-        "universe_decision": "INCLUDED",
+        **SHARED,
     }
     params.update(overrides)
     cur.execute(
         """
         insert into prod.predictions (
           episode_id, attempt_id, security_id, thesis_key, analysis_kind,
-          entry_reference_price, entry_price_observed_at, entry_price_currency, entry_price_jpy,
+          entry_reference_price, entry_price_observed_at, entry_price_currency,
+          entry_price_method, entry_price_jpy,
           decision_price, decision_price_observed_at, decision_price_jpy,
           initial_failure_line, target_price, data_cutoff,
-          provider_id, provider_kind, rule_version, universe_decision
+          provider_id, provider_kind, rule_version, universe_decision, verification
         ) values (
           %(episode_id)s, %(attempt_id)s, %(security_id)s, %(thesis_key)s,
           %(analysis_kind)s::prod.analysis_kind,
           %(entry_reference_price)s, %(entry_price_observed_at)s, %(entry_price_currency)s,
-          %(entry_price_jpy)s,
+          %(entry_price_method)s, %(entry_price_jpy)s,
           %(decision_price)s, %(decision_price_observed_at)s, %(decision_price_jpy)s,
           %(initial_failure_line)s, %(target_price)s, %(data_cutoff)s,
           %(provider_id)s, %(provider_kind)s, %(rule_version)s,
-          %(universe_decision)s::universe.decision
+          %(universe_decision)s::universe.decision, %(verification)s::prod.verification_status
         ) returning prediction_id
         """,
         params,
@@ -138,18 +157,26 @@ def _prediction(cur, *, episode_id, attempt_id, security_id, **overrides):
     return cur.fetchone()[0]
 
 
+def _entered(cur):
+    """A complete, consistent entry. The baseline every guard test breaks."""
+
+    attempt_id, security_id = _attempt(cur)
+    episode_id = _episode(cur, security_id)
+    prediction_id = _prediction(
+        cur, episode_id=episode_id, attempt_id=attempt_id, security_id=security_id
+    )
+    return attempt_id, episode_id, prediction_id, security_id
+
+
 # --------------------------------------------------------------- the happy path
 
 
 def test_a_complete_entry_writes_an_attempt_an_episode_and_a_prediction(conn):
     with conn.cursor() as cur:
-        attempt_id, security_id = _attempt(cur)
-        episode_id = _episode(cur, security_id)
-        prediction_id = _prediction(
-            cur, episode_id=episode_id, attempt_id=attempt_id, security_id=security_id
+        _, _, prediction_id, _ = _entered(cur)
+        cur.execute(
+            "select count(*) from prod.predictions where prediction_id = %s", (prediction_id,)
         )
-
-        cur.execute("select count(*) from prod.predictions where prediction_id = %s", (prediction_id,))
         assert cur.fetchone()[0] == 1
 
 
@@ -158,13 +185,13 @@ def test_a_complete_entry_writes_an_attempt_an_episode_and_a_prediction(conn):
 
 def test_a_prediction_over_the_limit_is_refused_by_the_database(conn):
     with conn.cursor() as cur:
-        attempt_id, security_id = _attempt(
-            cur,
-            entry_reference_price=Decimal("3005"),
-            entry_price_jpy=Decimal("3005"),
-            decision_price=Decimal("2990"),
-            decision_price_jpy=Decimal("2990"),
-        )
+        over = {
+            "entry_reference_price": Decimal("3005"),
+            "entry_price_jpy": Decimal("3005"),
+            "decision_price": Decimal("2990"),
+            "decision_price_jpy": Decimal("2990"),
+        }
+        attempt_id, security_id = _attempt(cur, **over)
         episode_id = _episode(cur, security_id)
         with pytest.raises(psycopg2.errors.CheckViolation, match="entry_under_limit"):
             _prediction(
@@ -172,18 +199,15 @@ def test_a_prediction_over_the_limit_is_refused_by_the_database(conn):
                 episode_id=episode_id,
                 attempt_id=attempt_id,
                 security_id=security_id,
-                entry_reference_price=Decimal("3005"),
-                entry_price_jpy=Decimal("3005"),
-                decision_price=Decimal("2990"),
-                decision_price_jpy=Decimal("2990"),
                 initial_failure_line=Decimal("2800"),
-                target_price=Decimal("3005") * Decimal("1.20"),
+                target_price=target_for(Decimal("3005")),
+                **over,
             )
 
 
 def test_a_prediction_from_a_stand_in_provider_is_refused(conn):
     with conn.cursor() as cur:
-        attempt_id, security_id = _attempt(cur)
+        attempt_id, security_id = _attempt(cur, provider_id="deterministic_mock")
         episode_id = _episode(cur, security_id)
         with pytest.raises(psycopg2.errors.CheckViolation, match="not_from_a_mock"):
             _prediction(
@@ -208,22 +232,6 @@ def test_a_prediction_outside_the_universe_is_refused(conn, decision):
                 attempt_id=attempt_id,
                 security_id=security_id,
                 universe_decision=decision,
-            )
-
-
-def test_a_target_that_is_not_twenty_percent_of_entry_is_refused(conn):
-    """The one that would silently change what a success means."""
-
-    with conn.cursor() as cur:
-        attempt_id, security_id = _attempt(cur)
-        episode_id = _episode(cur, security_id)
-        with pytest.raises(psycopg2.errors.CheckViolation, match="target_is_twenty_percent"):
-            _prediction(
-                cur,
-                episode_id=episode_id,
-                attempt_id=attempt_id,
-                security_id=security_id,
-                target_price=Decimal("1000") * Decimal("1.20"),
             )
 
 
@@ -265,17 +273,165 @@ def test_a_post_close_catalyst_may_not_claim_to_be_priced_in(conn):
             )
 
 
-# ---------------------------------------------------------- append-only
+# ------------------------------------------- D. the target, without a tolerance
+
+
+def test_the_target_must_equal_the_rounded_arithmetic_exactly(conn):
+    """Was a tolerance comparison. Two numerics have nothing to tolerate, and a
+    tolerance is a place a wrong number can sit."""
+
+    with conn.cursor() as cur:
+        attempt_id, security_id = _attempt(cur)
+        episode_id = _episode(cur, security_id)
+        exact = target_for(Decimal("1010"))
+
+        with pytest.raises(psycopg2.errors.CheckViolation, match="target_is_twenty_percent"):
+            _prediction(
+                cur,
+                episode_id=episode_id,
+                attempt_id=attempt_id,
+                security_id=security_id,
+                target_price=exact + Decimal("0.000001"),
+            )
+
+
+def test_a_price_whose_twenty_percent_needs_rounding_still_matches(conn):
+    """1234.567891 * 1.2 has more decimals than the column holds. Python and the
+    database have to round it the same way or nothing with an odd price stores."""
+
+    with conn.cursor() as cur:
+        price = Decimal("1234.567891")
+        shared = {"entry_reference_price": price, "entry_price_jpy": price}
+        attempt_id, security_id = _attempt(cur, **shared)
+        episode_id = _episode(cur, security_id)
+
+        _prediction(
+            cur,
+            episode_id=episode_id,
+            attempt_id=attempt_id,
+            security_id=security_id,
+            target_price=target_for(price),
+            initial_failure_line=Decimal("1100"),
+            **shared,
+        )
+
+        cur.execute("select target_price from prod.predictions where attempt_id = %s", (attempt_id,))
+        assert cur.fetchone()[0] == target_for(price)
+
+
+def test_the_python_and_database_targets_agree():
+    """The two implementations of the same arithmetic, compared directly."""
+
+    from surge.entry.models import target_for as python_target
+
+    for raw in ("1010", "1234.567891", "0.000001", "2999.999999", "3000"):
+        assert python_target(Decimal(raw)) == target_for(Decimal(raw))
+
+
+# ------------------------------------------ B. prediction / attempt / episode
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("thesis_key", "a-different-thesis"),
+        ("analysis_kind", "REANALYSIS"),
+        ("decision_price_jpy", Decimal("999")),
+        ("entry_price_method", "something else"),
+        ("provider_id", "another-provider"),
+        ("verification", "LIVE_VERIFIED"),
+        ("data_cutoff", CUTOFF - timedelta(minutes=1)),
+    ],
+)
+def test_a_prediction_that_disagrees_with_its_attempt_anywhere_is_refused(conn, field, value):
+    """One honest attempt, one flattering prediction beside it. Every field that
+    could carry the flattery is compared."""
+
+    with conn.cursor() as cur:
+        attempt_id, security_id = _attempt(cur)
+        episode_id = _episode(cur, security_id)
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="disagrees with its attempt"):
+            _prediction(
+                cur,
+                episode_id=episode_id,
+                attempt_id=attempt_id,
+                security_id=security_id,
+                **{field: value},
+            )
+
+
+def test_a_prediction_may_not_come_from_an_aborted_attempt(conn):
+    with conn.cursor() as cur:
+        over = {"entry_reference_price": Decimal("3005"), "entry_price_jpy": Decimal("3005")}
+        attempt_id, security_id = _attempt(cur, status="ENTRY_ABORTED_PRICE_LIMIT", **over)
+        episode_id = _episode(cur, security_id)
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="only PREDICTION_CREATED"):
+            _prediction(
+                cur, episode_id=episode_id, attempt_id=attempt_id, security_id=security_id, **over
+            )
+
+
+def test_a_prediction_cannot_borrow_another_securitys_episode(conn):
+    with conn.cursor() as cur:
+        attempt_id, security_id = _attempt(cur)
+        other_episode = _episode(cur, _security())
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="but episode .* is on"):
+            _prediction(
+                cur,
+                episode_id=other_episode,
+                attempt_id=attempt_id,
+                security_id=security_id,
+            )
+
+
+def test_a_prediction_cannot_join_an_episode_under_a_different_thesis(conn):
+    with conn.cursor() as cur:
+        attempt_id, security_id = _attempt(cur)
+        episode_id = _episode(cur, security_id, thesis_key="a-different-thesis")
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="under thesis"):
+            _prediction(
+                cur, episode_id=episode_id, attempt_id=attempt_id, security_id=security_id
+            )
+
+
+def test_an_episode_that_starts_its_horizon_elsewhere_is_refused(conn):
+    """S0 and the entry are the same moment. An episode starting earlier would
+    give the prediction extra sessions."""
+
+    with conn.cursor() as cur:
+        attempt_id, security_id = _attempt(cur)
+        episode_id = _episode(cur, security_id, entry_at=ENTRY_AT - timedelta(days=2))
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="S0 and the entry"):
+            _prediction(
+                cur, episode_id=episode_id, attempt_id=attempt_id, security_id=security_id
+            )
+
+
+def test_an_abort_must_show_a_price_over_the_limit(conn):
+    """An abort recorded without the price that caused it is unfalsifiable."""
+
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg2.errors.CheckViolation, match="abort_shows_the_price"):
+            _attempt(cur, status="ENTRY_ABORTED_PRICE_LIMIT")
+
+
+def test_an_entry_price_observed_before_the_decision_finished_is_refused(conn):
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg2.errors.CheckViolation, match="entry_after_decision"):
+            _attempt(cur, entry_price_observed_at=COMPLETED - timedelta(seconds=1))
+
+
+# ------------------------------------------------- C. the mutation boundary
 
 
 def test_a_prediction_cannot_be_updated(conn):
     with conn.cursor() as cur:
-        attempt_id, security_id = _attempt(cur)
-        episode_id = _episode(cur, security_id)
-        prediction_id = _prediction(
-            cur, episode_id=episode_id, attempt_id=attempt_id, security_id=security_id
-        )
-
+        _, _, prediction_id, _ = _entered(cur)
         with pytest.raises(psycopg2.errors.RaiseException, match="append-only"):
             cur.execute(
                 "update prod.predictions set initial_failure_line = 900 where prediction_id = %s",
@@ -285,20 +441,33 @@ def test_a_prediction_cannot_be_updated(conn):
 
 def test_a_prediction_cannot_be_deleted(conn):
     with conn.cursor() as cur:
-        attempt_id, security_id = _attempt(cur)
-        episode_id = _episode(cur, security_id)
-        prediction_id = _prediction(
-            cur, episode_id=episode_id, attempt_id=attempt_id, security_id=security_id
-        )
-
+        _, _, prediction_id, _ = _entered(cur)
         with pytest.raises(psycopg2.errors.RaiseException, match="append-only"):
             cur.execute("delete from prod.predictions where prediction_id = %s", (prediction_id,))
 
 
+def test_a_setup_cannot_be_edited_after_the_fact(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into prod.setups (
+              security_id, as_of_date, state, analysis_kind, price_cutoff_at, knowledge_cutoff_at
+            ) values (%s, %s, 'WATCH_BREAKOUT'::prod.decision_state, 'EOD'::prod.analysis_kind, %s, %s)
+            returning setup_id
+            """,
+            (_security(), CUTOFF.date(), CUTOFF, CUTOFF),
+        )
+        setup_id = cur.fetchone()[0]
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="append-only"):
+            cur.execute(
+                "update prod.setups set rationale = 'reworded' where setup_id = %s", (setup_id,)
+            )
+
+
 def test_a_risk_line_update_cannot_be_rewritten(conn):
     with conn.cursor() as cur:
-        attempt_id, security_id = _attempt(cur)
-        episode_id = _episode(cur, security_id)
+        _, episode_id, _, _ = _entered(cur)
         cur.execute(
             """
             insert into prod.risk_line_updates (episode_id, risk_line, reason, effective_at)
@@ -315,61 +484,97 @@ def test_a_risk_line_update_cannot_be_rewritten(conn):
             )
 
 
-# ------------------------------------------------ prediction matches its attempt
+def _close(cur, episode_id, reason="TARGET_HIT", at=None):
+    cur.execute(
+        """
+        update prod.episodes
+           set status = 'CLOSED', closed_at = %s, close_reason = %s::prod.episode_close_reason
+         where episode_id = %s
+        """,
+        (at or ENTRY_AT + timedelta(days=5), reason, episode_id),
+    )
 
 
-def test_a_prediction_may_not_come_from_an_aborted_attempt(conn):
+def test_an_episode_can_be_closed_once(conn):
     with conn.cursor() as cur:
-        attempt_id, security_id = _attempt(
-            cur,
-            status="ENTRY_ABORTED_PRICE_LIMIT",
-            entry_reference_price=Decimal("3005"),
-            entry_price_jpy=Decimal("3005"),
+        _, episode_id, _, _ = _entered(cur)
+        _close(cur, episode_id)
+
+        cur.execute(
+            "select status::text, close_reason::text from prod.episodes where episode_id = %s",
+            (episode_id,),
         )
-        episode_id = _episode(cur, security_id)
+        assert cur.fetchone() == ("CLOSED", "TARGET_HIT")
 
-        with pytest.raises(psycopg2.errors.RaiseException, match="only PREDICTION_CREATED"):
-            _prediction(
-                cur, episode_id=episode_id, attempt_id=attempt_id, security_id=security_id
+
+def test_a_closed_episode_cannot_be_reopened(conn):
+    with conn.cursor() as cur:
+        _, episode_id, _, _ = _entered(cur)
+        _close(cur, episode_id)
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="is closed"):
+            cur.execute(
+                """
+                update prod.episodes set status = 'OPEN', closed_at = null, close_reason = null
+                 where episode_id = %s
+                """,
+                (episode_id,),
             )
 
 
-def test_a_prediction_may_not_carry_different_prices_than_its_attempt(conn):
-    """The failure this catches: an attempt recorded honestly, and a prediction
-    written beside it with a better entry price."""
+def test_a_closed_episode_cannot_have_its_reason_changed(conn):
+    """Which outcome an episode ended with is decided once."""
 
     with conn.cursor() as cur:
-        attempt_id, security_id = _attempt(cur)
-        episode_id = _episode(cur, security_id)
+        _, episode_id, _, _ = _entered(cur)
+        _close(cur, episode_id, reason="INITIAL_FAILURE_HIT")
 
-        with pytest.raises(psycopg2.errors.RaiseException, match="does not carry the prices"):
-            _prediction(
-                cur,
-                episode_id=episode_id,
-                attempt_id=attempt_id,
-                security_id=security_id,
-                entry_reference_price=Decimal("995"),
-                entry_price_jpy=Decimal("995"),
-                target_price=Decimal("995") * Decimal("1.20"),
+        with pytest.raises(psycopg2.errors.RaiseException, match="is closed"):
+            cur.execute(
+                "update prod.episodes set close_reason = 'TARGET_HIT' where episode_id = %s",
+                (episode_id,),
             )
 
 
-def test_an_abort_must_show_a_price_over_the_limit(conn):
-    """An abort recorded without the price that caused it is unfalsifiable."""
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("entry_price_observed_at", ENTRY_AT - timedelta(days=3)),
+        ("thesis_key", "something-else"),
+        ("opened_at", ENTRY_AT - timedelta(days=3)),
+        ("verification", "LIVE_VERIFIED"),
+    ],
+)
+def test_the_identity_columns_of_an_episode_are_frozen(conn, column, value):
+    """Moving entry_price_observed_at would move S0, and therefore the horizon,
+    after the outcome is already visible."""
 
     with conn.cursor() as cur:
-        with pytest.raises(psycopg2.errors.CheckViolation, match="abort_shows_the_price"):
-            _attempt(
-                cur,
-                status="ENTRY_ABORTED_PRICE_LIMIT",
-                entry_price_jpy=Decimal("1010"),
+        _, episode_id, _, _ = _entered(cur)
+        cast = "::prod.verification_status" if column == "verification" else ""
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="only status, closed_at"):
+            cur.execute(
+                f"update prod.episodes set {column} = %s{cast} where episode_id = %s",
+                (value, episode_id),
             )
 
 
-def test_an_entry_price_observed_before_the_decision_finished_is_refused(conn):
+def test_an_episode_cannot_be_deleted(conn):
     with conn.cursor() as cur:
-        with pytest.raises(psycopg2.errors.CheckViolation, match="entry_after_decision"):
-            _attempt(cur, entry_price_observed_at=COMPLETED - timedelta(seconds=1))
+        _, episode_id, _, _ = _entered(cur)
+        with pytest.raises(psycopg2.errors.RaiseException, match="not deleted from"):
+            cur.execute("delete from prod.episodes where episode_id = %s", (episode_id,))
+
+
+def test_closing_without_a_reason_is_refused(conn):
+    with conn.cursor() as cur:
+        _, episode_id, _, _ = _entered(cur)
+        with pytest.raises(psycopg2.errors.RaiseException, match="both closed_at and close_reason"):
+            cur.execute(
+                "update prod.episodes set status = 'CLOSED', closed_at = %s where episode_id = %s",
+                (ENTRY_AT, episode_id),
+            )
 
 
 # ------------------------------------------------------------ episodes
@@ -387,27 +592,16 @@ def test_only_one_episode_may_be_open_per_security_and_thesis(conn):
 def test_a_second_episode_under_a_different_thesis_is_allowed(conn):
     with conn.cursor() as cur:
         security_id = _security()
-        first = _episode(cur, security_id, "thesis-a")
-        second = _episode(cur, security_id, "thesis-b")
-
-        assert first != second
+        assert _episode(cur, security_id, "thesis-a") != _episode(cur, security_id, "thesis-b")
 
 
 def test_a_closed_episode_frees_the_thesis_for_a_new_one(conn):
     with conn.cursor() as cur:
         security_id = _security()
         first = _episode(cur, security_id, "thesis-a")
-        cur.execute(
-            """
-            update prod.episodes
-               set status = 'CLOSED', closed_at = %s, close_reason = 'TARGET_HIT'
-             where episode_id = %s
-            """,
-            (ENTRY_AT + timedelta(days=5), first),
-        )
+        _close(cur, first)
 
-        second = _episode(cur, security_id, "thesis-a")
-        assert second != first
+        assert _episode(cur, security_id, "thesis-a") != first
 
 
 def test_the_horizon_cannot_be_set_to_anything_but_twenty(conn):
@@ -436,11 +630,11 @@ def test_a_closed_episode_must_say_why(conn):
             )
 
 
-# ------------------------------------------------------------ the watch machine
+# ----------------------------------------- A. the watch machine, for real
 
 
-def _watch(cur) -> tuple[str, str]:
-    security_id = _security()
+def _setup(cur, security_id=None) -> tuple[str, str]:
+    security_id = security_id or _security()
     cur.execute(
         """
         insert into prod.setups (
@@ -450,7 +644,11 @@ def _watch(cur) -> tuple[str, str]:
         """,
         (security_id, CUTOFF.date(), CUTOFF, CUTOFF),
     )
-    setup_id = cur.fetchone()[0]
+    return cur.fetchone()[0], security_id
+
+
+def _watch(cur) -> tuple[str, str]:
+    setup_id, security_id = _setup(cur)
     cur.execute(
         """
         insert into prod.watches (setup_id, security_id, trigger_description)
@@ -471,12 +669,60 @@ def _move(cur, watch_id, frm, to, *, kind=None, at=CUTOFF):
     )
 
 
+def _arm_and_trigger(cur):
+    watch_id, _ = _watch(cur)
+    _move(cur, watch_id, "ARMED", "TRIGGER_HIT", kind="WATCH_MONITOR")
+    return watch_id
+
+
+def test_a_fresh_watch_cannot_be_inserted_straight_into_entered(conn):
+    """The hole this migration exists for.
+
+    ``case new.from_state when null then ...`` compares with ``=``, so NULL never
+    matched and ``legal`` stayed NULL; ``if not NULL`` is not true, so nothing was
+    raised. Probed against the live database before the fix: the watch reached
+    ENTERED with no trigger and no reanalysis.
+    """
+
+    with conn.cursor() as cur:
+        watch_id, _ = _watch(cur)
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="being armed"):
+            _move(cur, watch_id, None, "ENTERED", kind="REANALYSIS")
+
+
+def test_a_null_origin_may_only_arm(conn):
+    with conn.cursor() as cur:
+        watch_id, _ = _watch(cur)
+        with pytest.raises(psycopg2.errors.RaiseException, match="being armed"):
+            _move(cur, watch_id, None, "TRIGGER_HIT", kind="WATCH_MONITOR")
+
+
+def test_a_watch_cannot_be_armed_twice(conn):
+    with conn.cursor() as cur:
+        watch_id, _ = _watch(cur)
+        _move(cur, watch_id, None, "ARMED")
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="already armed"):
+            _move(cur, watch_id, None, "ARMED")
+
+
+def test_a_declared_from_state_that_disagrees_with_the_watch_is_refused(conn):
+    """The second half of the hole: the trigger believed the caller about where
+    the watch was, so a caller could simply claim to be one step further on."""
+
+    with conn.cursor() as cur:
+        watch_id, _ = _watch(cur)
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="is in state ARMED, not"):
+            _move(cur, watch_id, "IN_REANALYSIS", "ENTERED", kind="REANALYSIS")
+
+
 def test_a_watch_cannot_go_from_trigger_straight_to_entered(conn):
     """CLAUDE.md 1-5, at the level where it cannot be bypassed."""
 
     with conn.cursor() as cur:
-        watch_id, _ = _watch(cur)
-        _move(cur, watch_id, "ARMED", "TRIGGER_HIT", kind="WATCH_MONITOR")
+        watch_id = _arm_and_trigger(cur)
 
         with pytest.raises(psycopg2.errors.RaiseException, match="REANALYSIS must run first"):
             _move(cur, watch_id, "TRIGGER_HIT", "ENTERED", kind="REANALYSIS")
@@ -484,8 +730,7 @@ def test_a_watch_cannot_go_from_trigger_straight_to_entered(conn):
 
 def test_the_legal_path_through_a_reanalysis_is_accepted(conn):
     with conn.cursor() as cur:
-        watch_id, _ = _watch(cur)
-        _move(cur, watch_id, "ARMED", "TRIGGER_HIT", kind="WATCH_MONITOR")
+        watch_id = _arm_and_trigger(cur)
         _move(cur, watch_id, "TRIGGER_HIT", "IN_REANALYSIS", kind="REANALYSIS")
         _move(cur, watch_id, "IN_REANALYSIS", "ENTERED", kind="REANALYSIS")
 
@@ -495,8 +740,7 @@ def test_the_legal_path_through_a_reanalysis_is_accepted(conn):
 
 def test_entering_without_a_reanalysis_kind_is_refused(conn):
     with conn.cursor() as cur:
-        watch_id, _ = _watch(cur)
-        _move(cur, watch_id, "ARMED", "TRIGGER_HIT", kind="WATCH_MONITOR")
+        watch_id = _arm_and_trigger(cur)
         _move(cur, watch_id, "TRIGGER_HIT", "IN_REANALYSIS", kind="REANALYSIS")
 
         with pytest.raises(psycopg2.errors.RaiseException, match="requires analysis_kind"):
@@ -505,8 +749,7 @@ def test_entering_without_a_reanalysis_kind_is_refused(conn):
 
 def test_a_rejected_watch_is_terminal(conn):
     with conn.cursor() as cur:
-        watch_id, _ = _watch(cur)
-        _move(cur, watch_id, "ARMED", "TRIGGER_HIT", kind="WATCH_MONITOR")
+        watch_id = _arm_and_trigger(cur)
         _move(cur, watch_id, "TRIGGER_HIT", "IN_REANALYSIS", kind="REANALYSIS")
         _move(cur, watch_id, "IN_REANALYSIS", "REJECTED", kind="REANALYSIS")
 
@@ -516,8 +759,7 @@ def test_a_rejected_watch_is_terminal(conn):
 
 def test_a_watch_transition_cannot_be_rewritten(conn):
     with conn.cursor() as cur:
-        watch_id, _ = _watch(cur)
-        _move(cur, watch_id, "ARMED", "TRIGGER_HIT", kind="WATCH_MONITOR")
+        watch_id = _arm_and_trigger(cur)
 
         with pytest.raises(psycopg2.errors.RaiseException, match="append-only"):
             cur.execute(
@@ -526,14 +768,52 @@ def test_a_watch_transition_cannot_be_rewritten(conn):
             )
 
 
+def test_the_watch_head_cannot_be_updated_directly(conn):
+    """The head row moves from inside the transition trigger and nowhere else."""
+
+    with conn.cursor() as cur:
+        watch_id, _ = _watch(cur)
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="not by updating this row"):
+            cur.execute(
+                "update prod.watches set state = 'ENTERED' where watch_id = %s", (watch_id,)
+            )
+
+
+def test_a_watch_cannot_be_created_half_way_through_the_machine(conn):
+    with conn.cursor() as cur:
+        setup_id, security_id = _setup(cur)
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="starts ARMED"):
+            cur.execute(
+                """
+                insert into prod.watches (setup_id, security_id, trigger_description, state)
+                values (%s, %s, 'probe', 'IN_REANALYSIS'::prod.watch_state)
+                """,
+                (setup_id, security_id),
+            )
+
+
+def test_a_watch_must_be_on_the_same_security_as_its_setup(conn):
+    with conn.cursor() as cur:
+        setup_id, _ = _setup(cur)
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="different security"):
+            cur.execute(
+                """
+                insert into prod.watches (setup_id, security_id, trigger_description)
+                values (%s, %s, 'probe')
+                """,
+                (setup_id, _security()),
+            )
+
+
 # ------------------------------------------------------------ the read contracts
 
 
 def test_the_open_episode_view_shows_both_failure_lines(conn):
     with conn.cursor() as cur:
-        attempt_id, security_id = _attempt(cur)
-        episode_id = _episode(cur, security_id)
-        _prediction(cur, episode_id=episode_id, attempt_id=attempt_id, security_id=security_id)
+        _, episode_id, _, _ = _entered(cur)
         cur.execute(
             """
             insert into prod.risk_line_updates (episode_id, risk_line, reason, effective_at)

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 
 #: CLAUDE.md 1-4 and the implementation instructions. Not configurable: a
@@ -274,6 +274,9 @@ class Prediction:
     provider_kind: str
     universe_decision: str
     rule_version: str = ENTRY_RULE_VERSION
+    #: Carried from the attempt. The database requires the two to agree, so a
+    #: prediction cannot be attributed to a different run than the decision.
+    run_id: str | None = None
     entry_price_method: str | None = None
     model_id: str | None = None
     prompt_sha256: str | None = None
@@ -373,15 +376,28 @@ class SessionCalendarUnknown(Exception):
         )
 
 
+#: The scale prices are stored at (``numeric(18, 6)``). The target is rounded to
+#: it here so that the value Python computes is the value the database stores,
+#: and the constraint can be an equality rather than a tolerance.
+PRICE_SCALE = Decimal("0.000001")
+
+
 def target_for(entry_reference_price: Decimal) -> Decimal:
-    """+20% of the entry price, in the security's own currency.
+    """+20% of the entry price, rounded to the stored scale.
 
     Of the entry price and nothing else: CLAUDE.md 1-4 gives the threshold one
     basis, and computing it from the signal or decision price would move the
     target by however far the price travelled while the decision was being made.
+
+    ROUND_HALF_UP to match Postgres ``round(numeric, 6)``, which rounds half away
+    from zero. The database checks ``target_price = round(entry * 1.20, 6)``
+    exactly; a tolerance would be a place for a wrong number to sit undetected,
+    and two numerics do not need one.
     """
 
-    return entry_reference_price * TARGET_MULTIPLE
+    return (entry_reference_price * TARGET_MULTIPLE).quantize(
+        PRICE_SCALE, rounding=ROUND_HALF_UP
+    )
 
 
 def sessions_from(entry_at: datetime, sessions: list[date]) -> dict[int, date]:

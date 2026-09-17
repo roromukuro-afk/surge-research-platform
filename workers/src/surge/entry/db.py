@@ -222,7 +222,7 @@ def prediction_params(
         "label_version": label_version,
         "universe_decision": prediction.universe_decision,
         "verification": prediction.verification.value,
-        "run_id": None,
+        "run_id": prediction.run_id,
     }
 
 
