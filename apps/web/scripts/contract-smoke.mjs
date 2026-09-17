@@ -23,6 +23,8 @@ const CONTRACTS = [
   { name: "ui.not_live_verified", sql: "select * from ui.not_live_verified limit 1" },
   { name: "ui.open_episodes", sql: "select * from ui.open_episodes limit 1" },
   { name: "ui.entry_attempt_ledger", sql: "select * from ui.entry_attempt_ledger limit 1" },
+  { name: "ui.episode_results", sql: "select * from ui.episode_results limit 1" },
+  { name: "ui.outcome_counts", sql: "select * from ui.outcome_counts limit 1" },
   {
     name: "ui.materials_as_of",
     sql: "select * from ui.materials_as_of(clock_timestamp()) limit 1",

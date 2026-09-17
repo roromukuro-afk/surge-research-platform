@@ -14,6 +14,7 @@ const TABS = [
   { href: "/watch", label: "Watch & setup" },
   { href: "/episodes", label: "Episodes" },
   { href: "/entries", label: "Entry decisions" },
+  { href: "/results", label: "Results" },
   { href: "/coverage", label: "Coverage" },
   { href: "/diagnostics", label: "Pipeline" },
 ];

@@ -288,3 +288,68 @@ export type EntryAttemptRow = {
   verification: string;
   produced_a_prediction: boolean;
 };
+
+/**
+ * Mirrors `prod.episode_close_reason`. The last three are not results: a session
+ * that touched both lines has two plausible answers, and folding them into
+ * either would let "we could not tell" become whichever was convenient.
+ */
+export type PrimaryOutcome =
+  | "TARGET_HIT"
+  | "INITIAL_FAILURE_HIT"
+  | "THESIS_INVALIDATED"
+  | "HORIZON_EXPIRED"
+  | "AMBIGUOUS_PATH"
+  | "UNRESOLVED_MISSING_DATA"
+  | "CORPORATE_ACTION_SUSPECTED";
+
+export const OUTCOME_LABELS: Record<PrimaryOutcome, string> = {
+  TARGET_HIT: "Reached +20%",
+  INITIAL_FAILURE_HIT: "Hit the failure line",
+  THESIS_INVALIDATED: "Thesis invalidated",
+  HORIZON_EXPIRED: "Neither, by S20",
+  AMBIGUOUS_PATH: "Order unknowable",
+  UNRESOLVED_MISSING_DATA: "Data missing",
+  CORPORATE_ACTION_SUSPECTED: "Corporate action suspected",
+};
+
+/** Mirrors `ui.episode_results`. */
+export type EpisodeResultRow = {
+  episode_id: string;
+  security_id: string;
+  thesis_key: string;
+  entry_price_observed_at: string;
+  closed_at: string | null;
+  entry_reference_price: string;
+  entry_price_currency: string;
+  target_price: string;
+  initial_failure_line: string;
+  current_risk_line: string | null;
+  primary_outcome: PrimaryOutcome;
+  primary_path_resolution: string | null;
+  resolution_granularity: string | null;
+  resolved_session_index: number | null;
+  resolution_detail: string | null;
+  /** Research only. Never the answer to "was this prediction right". */
+  counterfactual_path_resolution: string | null;
+  later_target_hit: boolean;
+  later_target_hit_session_index: number | null;
+  mfe: string | null;
+  mae: string | null;
+  sessions_observed: number | null;
+  corporate_action_ids_applied: string[];
+  outcome_currency: string | null;
+  engine_version: string | null;
+  outcome_notes: string | null;
+  provider_id: string;
+  verification: string;
+};
+
+/** Mirrors `ui.outcome_counts`. */
+export type OutcomeCountRow = {
+  outcome: PrimaryOutcome;
+  episodes: string;
+  later_reached_target: string;
+  worst_excursion: string | null;
+  best_excursion: string | null;
+};
