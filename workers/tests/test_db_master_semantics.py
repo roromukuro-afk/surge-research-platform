@@ -97,6 +97,7 @@ def _add_snapshot_row(
     country: str = "US",
     source_id: str = "nasdaq_trader_symbol_directory",
     security_identity_source: str = "SEC_CIK",
+    issuer_name_source: str | None = "sec_company_tickers",
 ) -> None:
     cur.execute(
         f"""
@@ -116,7 +117,7 @@ def _add_snapshot_row(
             issuer_source, issuer_key, issuer_confidence,
             security_identity_source, identity_key, security_confidence,
             decision, reason, observed_at, observed_at,
-            issuer_name, "sec_company_tickers" if issuer_name else None,
+            issuer_name, issuer_name_source if issuer_name else None,
         ),
     )
 

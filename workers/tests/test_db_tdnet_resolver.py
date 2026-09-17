@@ -49,7 +49,15 @@ def conn():
 
 
 def _jp_listing_with_a_code_change(cur) -> dict:
-    """One JP security that traded under one code and then another."""
+    """One JP security that traded under one code and then another.
+
+    Deliberately synthetic in one respect: the real JP identity key is derived
+    from the local code (``JP:JPX:7203``), so a genuine code change would create
+    a new identity rather than a second symbol under the same one. The fixture
+    supplies a stable identity key so the symbol history exists at all - the
+    resolver has to read it correctly whichever market produced it, and the US
+    market makes exactly this shape under stable CIK identity.
+    """
 
     suffix = uuid.uuid4().hex[:3].upper()
     old_code = f"1{suffix}"
@@ -72,8 +80,9 @@ def _jp_listing_with_a_code_change(cur) -> dict:
             market_code="JP",
             currency="JPY",
             country="JP",
-            source_id="jpx_listed_companies",
+            source_id="jpx_listed_issues",
             security_identity_source="JPX_LOCAL_CODE",
+            issuer_name_source="edinet_code_list",
         )
         _apply(cur, run)
 
