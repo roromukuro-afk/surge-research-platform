@@ -856,3 +856,162 @@ def test_the_attempt_ledger_counts_the_attempts_that_produced_nothing(conn):
 
         assert produced is False
         assert status == "ENTRY_ABORTED_PRICE_LIMIT"
+
+
+# --------------------------------------- Phase 9: closing and recording as one
+
+
+def _outcome(cur, episode_id, **overrides):
+    params = {
+        "episode_id": episode_id,
+        "primary_outcome": "TARGET_HIT",
+        "closed_at": ENTRY_AT + timedelta(days=5),
+        "path_resolution": "TARGET_FIRST",
+        "granularity": "DAY",
+        "resolved_session_index": 3,
+        "resolved_at": None,
+        "primary_detail": "the high reached the target",
+        "counterfactual_path": "TARGET_FIRST",
+        "later_target_hit": True,
+        "later_target_hit_at": None,
+        "later_target_hit_session_index": 3,
+        "mfe": Decimal("0.21"),
+        "mae": Decimal("-0.03"),
+        "sessions_observed": 21,
+        "corporate_action_ids": [],
+        "outcome_currency": "JPY",
+        "engine_version": "outcome-engine-1.0.0",
+        "label_version": None,
+        "notes": None,
+    }
+    params.update(overrides)
+    cur.execute(
+        """
+        select prod.close_episode_with_outcome(
+          %(episode_id)s::uuid, %(primary_outcome)s::prod.episode_close_reason, %(closed_at)s,
+          %(path_resolution)s::prod.path_resolution, %(granularity)s, %(resolved_session_index)s,
+          %(resolved_at)s, %(primary_detail)s,
+          %(counterfactual_path)s::prod.path_resolution, %(later_target_hit)s,
+          %(later_target_hit_at)s, %(later_target_hit_session_index)s,
+          %(mfe)s, %(mae)s, %(sessions_observed)s, %(corporate_action_ids)s,
+          %(outcome_currency)s, %(engine_version)s, %(label_version)s, %(notes)s
+        )
+        """,
+        params,
+    )
+    return cur.fetchone()[0]
+
+
+def test_closing_an_episode_and_recording_its_outcome_is_one_call(conn):
+    with conn.cursor() as cur:
+        _, episode_id, _, _ = _entered(cur)
+        _outcome(cur, episode_id)
+
+        cur.execute(
+            """
+            select e.status::text, e.close_reason::text, o.primary_episode_outcome::text
+            from prod.episodes e join prod.episode_outcomes o using (episode_id)
+            where e.episode_id = %s
+            """,
+            (episode_id,),
+        )
+        assert cur.fetchone() == ("CLOSED", "TARGET_HIT", "TARGET_HIT")
+
+
+def test_an_episode_cannot_be_closed_twice(conn):
+    with conn.cursor() as cur:
+        _, episode_id, _, _ = _entered(cur)
+        _outcome(cur, episode_id)
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="closed once"):
+            _outcome(cur, episode_id, primary_outcome="HORIZON_EXPIRED")
+
+
+def test_an_outcome_cannot_be_written_for_an_open_episode(conn):
+    """The outcome is the record of how an episode ended."""
+
+    with conn.cursor() as cur:
+        _, episode_id, _, _ = _entered(cur)
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="still open"):
+            cur.execute(
+                """
+                insert into prod.episode_outcomes (episode_id, primary_episode_outcome)
+                values (%s, 'TARGET_HIT')
+                """,
+                (episode_id,),
+            )
+
+
+def test_an_outcome_that_disagrees_with_the_close_reason_is_refused(conn):
+    """The same fact written twice with two different answers."""
+
+    with conn.cursor() as cur:
+        _, episode_id, _, _ = _entered(cur)
+        _outcome(cur, episode_id, primary_outcome="INITIAL_FAILURE_HIT")
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="the same fact"):
+            cur.execute(
+                """
+                update prod.episode_outcomes set primary_episode_outcome = 'TARGET_HIT'
+                 where episode_id = %s
+                """,
+                (episode_id,),
+            )
+
+
+def test_an_unresolved_path_is_a_close_reason_of_its_own(conn):
+    with conn.cursor() as cur:
+        _, episode_id, _, _ = _entered(cur)
+        _outcome(
+            cur,
+            episode_id,
+            primary_outcome="AMBIGUOUS_PATH",
+            path_resolution="AMBIGUOUS_PATH",
+            granularity="INTRADAY_BAR",
+            counterfactual_path="AMBIGUOUS_PATH",
+        )
+
+        cur.execute(
+            "select outcome, episodes from ui.outcome_counts where outcome = 'AMBIGUOUS_PATH'"
+        )
+        assert cur.fetchone()[1] == 1
+
+
+def test_the_results_view_shows_both_layers(conn):
+    """A later target hit after an invalidated thesis has to be visible as what
+    it is, and not as the answer."""
+
+    with conn.cursor() as cur:
+        _, episode_id, _, _ = _entered(cur)
+        _outcome(
+            cur,
+            episode_id,
+            primary_outcome="THESIS_INVALIDATED",
+            path_resolution=None,
+            granularity=None,
+            later_target_hit=True,
+            later_target_hit_session_index=12,
+        )
+
+        cur.execute(
+            """
+            select primary_outcome, later_target_hit, later_target_hit_session_index,
+                   mfe, mae, sessions_observed, outcome_currency
+            from ui.episode_results where episode_id = %s
+            """,
+            (episode_id,),
+        )
+        row = cur.fetchone()
+
+        assert row[0] == "THESIS_INVALIDATED"
+        assert row[1] is True
+        assert row[2] == 12
+        assert row[6] == "JPY"
+
+
+def test_a_resolved_session_beyond_the_horizon_is_refused(conn):
+    with conn.cursor() as cur:
+        _, episode_id, _, _ = _entered(cur)
+        with pytest.raises(psycopg2.errors.CheckViolation, match="resolved_session_within_horizon"):
+            _outcome(cur, episode_id, resolved_session_index=21)
