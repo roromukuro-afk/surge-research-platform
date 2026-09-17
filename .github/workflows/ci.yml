@@ -105,5 +105,8 @@ jobs:
       # data may ever land in history.
       - name: gitleaks
         run: |
+          # --verbose names the file, line and rule for every finding. The value
+          # stays hidden behind --redact, so a failure is actionable without the
+          # log itself becoming the leak.
           docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest \
-            detect --source=/repo --no-banner --redact --exit-code 1
+            detect --source=/repo --no-banner --redact --verbose --exit-code 1
