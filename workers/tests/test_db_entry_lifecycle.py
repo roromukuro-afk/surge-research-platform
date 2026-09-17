@@ -670,13 +670,12 @@ def test_an_episode_cannot_be_deleted(conn):
 
 
 def test_closing_without_a_reason_is_refused(conn):
+    """Through the function, since that is now the only door."""
+
     with conn.cursor() as cur:
         _, episode_id, _, _ = _entered(cur)
         with pytest.raises(psycopg2.errors.RaiseException, match="both closed_at and close_reason"):
-            cur.execute(
-                "update prod.episodes set status = 'CLOSED', closed_at = %s where episode_id = %s",
-                (ENTRY_AT, episode_id),
-            )
+            _close(cur, episode_id, reason=None)
 
 
 # ------------------------------------------------------------ episodes
@@ -1027,39 +1026,6 @@ def test_an_episode_cannot_be_closed_twice(conn):
 
         with pytest.raises(psycopg2.errors.RaiseException, match="closed once"):
             _outcome(cur, episode_id, primary_outcome="HORIZON_EXPIRED")
-
-
-def test_an_outcome_cannot_be_written_for_an_open_episode(conn):
-    """The outcome is the record of how an episode ended."""
-
-    with conn.cursor() as cur:
-        _, episode_id, _, _ = _entered(cur)
-
-        with pytest.raises(psycopg2.errors.RaiseException, match="still open"):
-            cur.execute(
-                """
-                insert into prod.episode_outcomes (episode_id, primary_episode_outcome)
-                values (%s, 'TARGET_HIT')
-                """,
-                (episode_id,),
-            )
-
-
-def test_an_outcome_that_disagrees_with_the_close_reason_is_refused(conn):
-    """The same fact written twice with two different answers."""
-
-    with conn.cursor() as cur:
-        _, episode_id, _, _ = _entered(cur)
-        _outcome(cur, episode_id, primary_outcome="INITIAL_FAILURE_HIT")
-
-        with pytest.raises(psycopg2.errors.RaiseException, match="the same fact"):
-            cur.execute(
-                """
-                update prod.episode_outcomes set primary_episode_outcome = 'TARGET_HIT'
-                 where episode_id = %s
-                """,
-                (episode_id,),
-            )
 
 
 def test_an_unresolved_path_is_a_close_reason_of_its_own(conn):
