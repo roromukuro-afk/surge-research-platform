@@ -15,6 +15,12 @@ import pytest
 
 psycopg2 = pytest.importorskip("psycopg2")
 
+# A PREDICTED observation must point at a real episode - the constraint says so,
+# and a teacher row claiming a prediction that does not exist is the thing it
+# is there to prevent. Reusing the entry fixtures keeps one definition of what
+# a well-formed episode looks like.
+from test_db_entry_lifecycle import _episode as _make_episode  # noqa: E402
+
 DSN = os.environ.get("SURGE_TEST_DATABASE_URL")
 
 pytestmark = [
@@ -39,11 +45,16 @@ def conn():
 
 
 def _objective(cur, **overrides) -> tuple[str, str]:
+    security_id = overrides.pop("security_id", str(uuid.uuid4()))
+    kind = overrides.get("observation_kind", "PREDICTED")
+    episode_id = overrides.pop(
+        "episode_id", _make_episode(cur, security_id) if kind == "PREDICTED" else None
+    )
     params = {
-        "security_id": str(uuid.uuid4()),
+        "security_id": security_id,
         "as_of_date": AS_OF,
-        "observation_kind": "PREDICTED",
-        "episode_id": None,
+        "observation_kind": kind,
+        "episode_id": episode_id,
         "path_resolution": "TARGET_FIRST",
         "primary_episode_outcome": "TARGET_HIT",
         "hit_20": True,
