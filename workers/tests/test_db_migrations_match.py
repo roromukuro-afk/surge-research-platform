@@ -1,29 +1,31 @@
-"""Does the database actually contain what the migrations say?
+"""Does the database contain what the migrations say?
 
-`supabase/migrations/` is the single source of truth for the schema (CLAUDE.md
-§4). That is a rule about intent, and intent is not self-enforcing: a function
-applied from a paste rather than from the file leaves the two agreeing on
-behaviour and disagreeing on text, and the next person to read the file is
-reading something the database is not running.
+Worth being exact about what this proves *here*. Continuous integration builds
+its Postgres by applying these same files to an empty database, so in CI the
+comparison is very nearly a tautology: the only thing it can catch is a bug in
+the parsing, where a definition the files contain is not the one this module
+extracts. That is not nothing - it caught exactly that on 2026-09-18, where the
+newest definition of ``pipeline.snapshot_securities`` used ``create function``
+rather than ``create or replace function`` and so was invisible - but it is not
+the drift the rule exists to prevent.
 
-This caught a real drift on 2026-09-17: two functions had been applied with
-their explanatory comments stripped, so the file explained reasoning the
-database did not carry.
-
-Compares whitespace-normalised bodies, because formatting is not the point and
-Postgres does not preserve it exactly. Names not present in any migration file
-are ignored, so this does not object to functions created by extensions.
+The drift that matters happens in the cloud database, which CI never opens. That
+is what ``python -m surge.jobs.schema_drift_cli`` is for, and running it found
+ten functions whose comments had been stripped on the way in. The comparison
+itself lives in ``surge.runtime.schema_drift`` so that both callers run the same
+code. The parsing is covered on its own in ``test_schema_drift.py``, which
+needs no database and so runs in the unit job too.
 """
 
 from __future__ import annotations
 
 import os
-import pathlib
-import re
 
 import pytest
 
 psycopg2 = pytest.importorskip("psycopg2")
+
+from surge.runtime.schema_drift import compare  # noqa: E402
 
 DSN = os.environ.get("SURGE_TEST_DATABASE_URL")
 
@@ -31,38 +33,6 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not DSN, reason="SURGE_TEST_DATABASE_URL is not set"),
 ]
-
-MIGRATIONS = pathlib.Path(__file__).resolve().parents[2] / "supabase" / "migrations"
-
-#: `create or replace function <schema>.<name>(...) ... as $tag$ <body> $tag$`.
-#: The tag may be empty - most of this project's functions use a bare `$$` - so
-#: `\w*` rather than `\w+`. Requiring a tag matched a tenth of them and would
-#: have made this guard look like it was watching the whole schema.
-_FUNCTION = re.compile(
-    r"create\s+or\s+replace\s+function\s+(\w+)\.(\w+)\s*\(.*?\$(\w*)\$(.*?)\$\3\$",
-    re.S | re.I,
-)
-
-
-def _normalise(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _bodies_in_the_files() -> dict[tuple[str, str], set[str]]:
-    """Every body each function name is given across the migrations.
-
-    A set rather than "the last one wins", because a name can be overloaded:
-    ``ref.listings_as_of`` has two signatures and the database holds both. A
-    last-wins map would call the older signature drifted for no better reason
-    than that it is not the newer one.
-    """
-
-    bodies: dict[tuple[str, str], set[str]] = {}
-    for path in sorted(MIGRATIONS.glob("*.sql")):
-        text = path.read_text(encoding="utf-8")
-        for schema, name, _tag, body in _FUNCTION.findall(text):
-            bodies.setdefault((schema.lower(), name.lower()), set()).add(_normalise(body))
-    return bodies
 
 
 @pytest.fixture()
@@ -76,43 +46,33 @@ def conn():
         connection.close()
 
 
-def test_the_migrations_define_functions_at_all():
-    """A guard on the guard: if the regex stopped matching, every other
-    assertion here would pass vacuously."""
-
-    bodies = _bodies_in_the_files()
-
-    assert len(bodies) > 60
-    assert ("prod", "begin_entry_analysis") in bodies
-
-
 def test_every_function_in_the_database_matches_its_migration(conn):
-    bodies = _bodies_in_the_files()
+    report = compare(conn)
 
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            select n.nspname, p.proname, p.prosrc
-              from pg_proc p
-              join pg_namespace n on n.oid = p.pronamespace
-             where n.nspname in ('prod', 'labels', 'market', 'analysis', 'ref',
-                                 'pipeline', 'universe', 'news', 'research', 'ui')
-            """
-        )
-        live = cur.fetchall()
-
-    drifted = []
-    for schema, name, source in live:
-        expected = bodies.get((schema.lower(), name.lower()))
-        if not expected:
-            # Not defined by a `create or replace` in any migration - a `create
-            # function` without `or replace`, or something an extension owns.
-            continue
-        if _normalise(source) not in expected:
-            drifted.append(f"{schema}.{name}")
-
-    assert drifted == [], (
+    assert report.drifted == (), (
         "these functions differ between supabase/migrations and the database: "
-        + ", ".join(sorted(drifted))
+        + ", ".join(report.drifted)
         + ". The migrations are the source of truth, so the database is what has to change"
     )
+
+
+def test_no_function_exists_that_no_migration_defines(conn):
+    """The other direction. A hand-made function survives every body comparison
+    by never being compared to anything."""
+
+    report = compare(conn)
+
+    assert report.unmanaged == (), (
+        "these functions exist in the database and in no migration: "
+        + ", ".join(report.unmanaged)
+        + ". Either add the migration that creates them or drop them"
+    )
+
+
+def test_the_comparison_examined_something(conn):
+    """`drifted == ()` is also what a query that returned no rows looks like."""
+
+    report = compare(conn)
+
+    assert report.examined > 60
+    assert report.in_sync

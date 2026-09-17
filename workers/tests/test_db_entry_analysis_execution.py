@@ -147,7 +147,10 @@ def test_beginning_from_a_watch_that_is_not_at_its_trigger_is_refused(conn):
         )
         transition_id = cur.fetchone()[0]
 
-        with pytest.raises(psycopg2.errors.RaiseException, match="no unanswered trigger"):
+        # The transition itself is checked before the watch's state is, so this
+        # is the first thing that fails: the transition moved the watch to
+        # EXPIRED and only a TRIGGER_HIT can be answered by a reanalysis.
+        with pytest.raises(psycopg2.errors.RaiseException, match="not TRIGGER_HIT"):
             _begin(DatabaseExecutionStore(conn), str(watch_id), str(security_id), transition_id)
 
 

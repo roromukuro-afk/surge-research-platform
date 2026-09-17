@@ -55,7 +55,6 @@ def _overrides_for(market: str, args) -> dict:
         "entry_analysis_is_a_stand_in": not args.entry_analysis_is_real,
         "scheduler_configured": args.scheduler,
         "object_store_configured": args.object_store,
-        "migrations_in_sync": args.migrations_in_sync,
         "ci_head_green": args.ci_green,
     }
 
@@ -73,7 +72,13 @@ def _inputs_for(market: str, args) -> MarketInputs:
         entry_analysis_is_a_stand_in=not args.entry_analysis_is_real,
         scheduler_configured=args.scheduler,
         object_store_configured=args.object_store,
-        migrations_in_sync=args.migrations_in_sync,
+        # Never claimed from a flag. Whether the schema matches git is read
+        # from the database itself in collect(); with no connection the
+        # honest answer is that nobody looked.
+        migrations_in_sync=False,
+        migrations_drift_detail=(
+            "no database connection, so the schema was never compared with supabase/migrations"
+        ),
         ci_head_green=args.ci_green,
     )
 
@@ -111,7 +116,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--scheduler", action="store_true")
     parser.add_argument("--object-store", action="store_true")
-    parser.add_argument("--migrations-in-sync", action="store_true")
     parser.add_argument("--ci-green", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)

@@ -30,7 +30,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
-READINESS_VERSION = "readiness-1.4.0"
+from surge.runtime.schema_drift import compare
+
+READINESS_VERSION = "readiness-1.5.0"
 
 
 class Verdict(StrEnum):
@@ -230,7 +232,7 @@ SQL_CHECKS: dict[str, str] = {
            and b.provider_id = coalesce(%(price_provider)s, b.provider_id)
     """,
     "fx_freshness": """
-        select count(*), max(rate_date)::text, max(available_at)::text
+        select count(*), max(source_date)::text, max(available_at)::text
           from market.fx_rates
          where provider_id = coalesce(%(fx_provider)s, provider_id)
     """,
@@ -459,6 +461,9 @@ class MarketInputs:
     teacher_row_count: int = 0
     mock_guard_constraints: int = 0
     migrations_in_sync: bool = False
+    #: What the comparison actually found, so the report can name the drifted
+    #: functions instead of repeating a sentence that is true of every failure.
+    migrations_drift_detail: str | None = None
     ci_head_green: bool = False
 
 
@@ -598,10 +603,13 @@ def assess(inputs: MarketInputs) -> MarketReadiness:
             name="migrations_in_sync",
             status=CheckStatus.PASS if inputs.migrations_in_sync else CheckStatus.FAIL,
             detail=(
-                "the cloud schema matches supabase/migrations"
-                if inputs.migrations_in_sync
-                else "the cloud schema and the migrations in git disagree; the migrations are the "
-                "only source of truth for the schema"
+                inputs.migrations_drift_detail
+                or (
+                    "the schema matches supabase/migrations"
+                    if inputs.migrations_in_sync
+                    else "the schema and the migrations in git disagree; the migrations are the "
+                    "only source of truth for the schema"
+                )
             ),
         ),
         Check(
@@ -658,6 +666,32 @@ def _as_datetime(value) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+def _ask(conn, cur, sql, params):
+    """Run one check, and let a failure be a failure of that check alone.
+
+    Without this, a single broken query takes the rest of the report with it:
+    inside a transaction Postgres refuses every later statement until someone
+    rolls back, so the report would show one real finding followed by a dozen
+    checks that look equally broken and are not. A savepoint keeps the blast
+    radius at one question. In autocommit there is no transaction to poison and
+    no savepoint to take.
+    """
+
+    savepoint = not conn.autocommit
+    if savepoint:
+        cur.execute("savepoint readiness_check")
+    try:
+        cur.execute(sql, params)
+        row = cur.fetchone()
+    except Exception as exc:  # noqa: BLE001 - an unreadable check is a failed check
+        if savepoint:
+            cur.execute("rollback to savepoint readiness_check")
+        return None, f"{type(exc).__name__}: {exc}"
+    if savepoint:
+        cur.execute("release savepoint readiness_check")
+    return row, None
+
+
 def collect(conn, market_code: str, *, universe_version: str = "universe-1.0.0", **overrides):
     """Read what the database can answer, and let the caller supply the rest.
 
@@ -678,35 +712,33 @@ def collect(conn, market_code: str, *, universe_version: str = "universe-1.0.0",
     bindings: dict[str, object] = {}
     with conn.cursor() as cur:
         for name in ("price_binding", "fx_binding"):
-            try:
-                cur.execute(
-                    SQL_CHECKS[name],
-                    {"market": market_code, "universe_version": universe_version,
-                     "price_provider": None, "fx_provider": None},
-                )
-                row = cur.fetchone()
-                bindings[name] = row[0] if row else None
-            except Exception as exc:  # noqa: BLE001 - an unreadable check is a failed check
-                bindings[name] = None
-                errors.append(f"{name}: {type(exc).__name__}: {exc}")
+            row, error = _ask(
+                conn,
+                cur,
+                SQL_CHECKS[name],
+                {"market": market_code, "universe_version": universe_version,
+                 "price_provider": None, "fx_provider": None},
+            )
+            bindings[name] = row[0] if row else None
+            if error:
+                errors.append(f"{name}: {error}")
 
     with conn.cursor() as cur:
         for name, sql in SQL_CHECKS.items():
-            try:
-                cur.execute(
-                    sql,
-                    {
-                        "market": market_code,
-                        "universe_version": universe_version,
-                        "price_provider": bindings.get("price_binding"),
-                        "fx_provider": bindings.get("fx_binding"),
-                    },
-                )
-                row = cur.fetchone()
-                values[name] = row if row else None
-            except Exception as exc:  # noqa: BLE001 - an unreadable check is a failed check
-                values[name] = None
-                errors.append(f"{name}: {type(exc).__name__}: {exc}")
+            row, error = _ask(
+                conn,
+                cur,
+                sql,
+                {
+                    "market": market_code,
+                    "universe_version": universe_version,
+                    "price_provider": bindings.get("price_binding"),
+                    "fx_provider": bindings.get("fx_binding"),
+                },
+            )
+            values[name] = row if row else None
+            if error:
+                errors.append(f"{name}: {error}")
 
     def scalar(name):
         row = values.get(name)
@@ -715,8 +747,23 @@ def collect(conn, market_code: str, *, universe_version: str = "universe-1.0.0",
     price = values.get("price_freshness") or (0, None, None)
     fx = values.get("fx_freshness") or (0, None, None)
 
+    # Whether the schema matches git is a fact about this database, so it is
+    # measured here rather than asserted on a command line. A caller saying the
+    # migrations are in sync does not make the bodies agree - the same reason
+    # the row counts are not taken from a flag either.
+    overrides.pop("migrations_in_sync", None)
+    try:
+        drift = compare(conn)
+        migrations_in_sync = drift.in_sync
+        drift_detail = drift.summary()
+    except Exception as exc:  # noqa: BLE001 - an unanswerable question is not a yes
+        migrations_in_sync = False
+        drift_detail = f"the comparison could not be made - {type(exc).__name__}: {exc}"
+
     inputs = MarketInputs(
         market_code=market_code,
+        migrations_in_sync=migrations_in_sync,
+        migrations_drift_detail=drift_detail,
         security_master_fresh=scalar("security_master_freshness") is not None,
         universe_run_published=scalar("universe_authoritative_run") is not None,
         teacher_row_count=int(scalar("teacher_rows") or 0),

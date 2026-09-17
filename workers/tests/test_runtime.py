@@ -623,12 +623,16 @@ def test_the_liveness_of_each_check_is_in_the_summary():
 
 
 class _FakeCursor:
-    def __init__(self, answers):
+    def __init__(self, answers, statements=None):
         self._answers = answers
         self._row = None
         self.seen = []
+        #: Every statement executed, savepoints included, so a test can show
+        #: that one failing check did not silently disable the rest.
+        self.statements = statements if statements is not None else []
 
-    def execute(self, sql, params):
+    def execute(self, sql, params=None):
+        self.statements.append(" ".join(sql.split())[:80])
         for key, value in self._answers.items():
             if key in sql:
                 self._row = value if isinstance(value, tuple) else (value,)
@@ -640,6 +644,9 @@ class _FakeCursor:
     def fetchone(self):
         return self._row
 
+    def fetchall(self):
+        return []
+
     def __enter__(self):
         return self
 
@@ -648,11 +655,16 @@ class _FakeCursor:
 
 
 class _FakeConn:
+    #: psycopg2 connections carry this, so the double does too. A test that
+    #: wants the transactional path sets it to False.
+    autocommit = True
+
     def __init__(self, answers):
         self.answers = answers
+        self.statements = []
 
     def cursor(self):
-        return _FakeCursor(self.answers)
+        return _FakeCursor(self.answers, self.statements)
 
 
 def test_collect_reads_the_bindings_and_the_row_counts():
@@ -689,6 +701,40 @@ def test_the_freshness_query_is_scoped_to_the_bound_provider():
     assert "b.provider_id = coalesce(%(price_provider)s" in SQL_CHECKS["price_freshness"]
 
 
+def test_one_broken_check_does_not_take_the_rest_of_the_report_with_it():
+    """Inside a transaction, Postgres refuses every statement after an error
+    until somebody rolls back. Without a savepoint per check, one genuinely
+    broken query would be followed by a dozen checks that only look broken -
+    and the report would name the wrong thing as the problem."""
+
+    from surge.runtime.readiness import collect
+
+    class _Transactional(_FakeConn):
+        autocommit = False
+
+        def cursor(self):
+            cursor = _FakeCursor(self.answers, self.statements)
+            original = cursor.execute
+
+            def execute(sql, params=None):
+                if "fx_rates" in sql:
+                    raise RuntimeError("relation does not exist")
+                return original(sql, params)
+
+            cursor.execute = execute
+            return cursor
+
+    conn = _Transactional({"news.sources": 1, "market.daily_bars": (0, None, None)})
+    readiness = collect(conn, "US")
+
+    failed = [c for c in readiness.checks if c.name == "database_check_failed"]
+    assert len(failed) == 1
+    assert "fx_freshness" in failed[0].detail
+    # The check after the broken one still ran, which is the whole point.
+    assert any("rollback to savepoint" in s for s in conn.statements)
+    assert any("news.sources" in s for s in conn.statements)
+
+
 def test_a_query_that_cannot_be_run_is_reported_as_a_failed_check():
     """An unreadable check is a failed check, and it says which one."""
 
@@ -699,7 +745,7 @@ def test_a_query_that_cannot_be_run_is_reported_as_a_failed_check():
             cursor = _FakeCursor(self.answers)
             original = cursor.execute
 
-            def execute(sql, params):
+            def execute(sql, params=None):
                 if "fx_rates" in sql:
                     raise RuntimeError("relation does not exist")
                 return original(sql, params)
