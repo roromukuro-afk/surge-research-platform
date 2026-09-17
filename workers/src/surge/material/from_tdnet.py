@@ -110,18 +110,25 @@ def to_event(item: DiscoveredItem, *, document_id: str | None = None) -> Materia
 def to_relation(item: DiscoveredItem) -> EntityRelation | None:
     """The link from the disclosure to the security, or None if unmapped.
 
-    Confidence is REGISTRY_ANCHORED rather than STRONG: the security code came
-    from the exchange, which is a registry, but it reached us through a third
-    party and was normalised by a rule of ours. That is one step removed from
-    reading the identifier off the registry directly, and the vocabulary has a
-    word for it.
+    The confidence is **carried through from the mapping**, never re-asserted
+    here. An exact code match against the exchange's own listing is
+    REGISTRY_ANCHORED; a match that only worked on the four-character base is
+    PROVISIONAL, and stays PROVISIONAL. Re-stamping every relation as
+    REGISTRY_ANCHORED at this boundary would promote a weaker claim to a
+    stronger one at exactly the point where nobody would notice - the mapping
+    step records the distinction and the relation is where it gets used.
+
+    Neither is STRONG: the code came from a registry but reached us through a
+    third party and was normalised by a rule of ours, which is one step removed
+    from reading the identifier off the registry directly.
     """
 
     if item.security_id is None:
         return None
+    confidence = _confidence_for(item)
     return EntityRelation(
         relation_type=RelationType.DIRECT_COMPANY,
-        confidence=LinkConfidence.REGISTRY_ANCHORED,
+        confidence=confidence,
         extractor="tdnet-discovery",
         extractor_version=FEATURE_VERSION,
         security_id=item.security_id,
@@ -129,10 +136,23 @@ def to_relation(item: DiscoveredItem) -> EntityRelation | None:
             "raw_company_code": item.item.code.raw,
             "normalised_company_code": item.item.code.normalised,
             "code_normalisation": item.item.code.kind.value,
+            "matched_lookup_key": item.matched_key,
+            "matched_on_base": item.matched_on_base,
+            "mapping_confidence": confidence.value,
             "company_name": item.item.company_name,
             "disclosure_type": item.classification.disclosure_type.value,
         },
     )
+
+
+def _confidence_for(item: DiscoveredItem) -> LinkConfidence:
+    """Read the mapping's own verdict rather than deciding one here."""
+
+    recorded = item.mapping_confidence
+    if recorded is None:
+        # Unmapped items never reach this point, but a caller could hand us one.
+        return LinkConfidence.PROVISIONAL
+    return LinkConfidence(recorded)
 
 
 def to_features(item: DiscoveredItem, *, knowledge_cutoff: datetime) -> EventSecurityFeatures | None:

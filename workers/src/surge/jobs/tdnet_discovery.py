@@ -293,14 +293,34 @@ class TdnetDiscoveryJob:
         matched_key: str | None = None
         matched_on_base = False
 
+        # The four times come first, because the mapping needs one of them. The
+        # code is resolved as of the disclosure's publication (which listing was
+        # in force then) using everything the master knows as of our collection
+        # (which is the only knowledge we actually have). Backfilling a 2025
+        # disclosure in 2026 therefore resolves it correctly and does not claim
+        # we knew that mapping in 2025.
+        times = KnowledgeTimes.observed(
+            first_seen_at=result.fetched_at,
+            ingested_at=now if now >= result.fetched_at else result.fetched_at,
+            source_published_at=item.pubdate,
+            source_published_precision=TimePrecision.EXACT,
+        )
+
         if item.code.kind is CodeNormalisation.UNEXPECTED_SHAPE:
             unmapped_reason = f"code {item.code.raw!r} is not a shape the normaliser recognises"
         else:
             resolve_code = getattr(self._resolver, "resolve_code", None)
             if resolve_code is not None:
-                security_id, market_code, matched_key = resolve_code(item.code, as_of=item.pubdate)
+                security_id, market_code, matched_key = _call_resolver(
+                    resolve_code, item.code, item.pubdate, times.available_to_model_at
+                )
             else:
-                security_id, market_code = self._resolver.resolve(item.code.normalised, as_of=item.pubdate)
+                security_id, market_code = _call_resolver_simple(
+                    self._resolver.resolve,
+                    item.code.normalised,
+                    item.pubdate,
+                    times.available_to_model_at,
+                )
                 matched_key = item.code.normalised if security_id else None
 
             if security_id is None:
@@ -314,16 +334,6 @@ class TdnetDiscoveryJob:
                 # suffix - but "almost always" is why this is recorded as a
                 # weaker claim rather than treated as an exact hit.
                 matched_on_base = True
-
-        # The four times. available_to_model_at is when we stored the index row,
-        # never the disclosure's own pubdate - a disclosure published at 13:00
-        # and collected at 14:20 became knowable at 14:20.
-        times = KnowledgeTimes.observed(
-            first_seen_at=result.fetched_at,
-            ingested_at=now if now >= result.fetched_at else result.fetched_at,
-            source_published_at=item.pubdate,
-            source_published_precision=TimePrecision.EXACT,
-        )
 
         document = CollectedDocument(
             source_key=SOURCE_KEY,
@@ -365,6 +375,27 @@ class TdnetDiscoveryJob:
         )
 
 
+def _call_resolver(resolve_code, code, effective_at: datetime, known_at: datetime):
+    """Pass known_at where the resolver accepts it, and not where it does not.
+
+    Test doubles and the null resolver predate the bitemporal signature. Probing
+    rather than requiring keeps them working, and keeps the production resolver
+    getting both times.
+    """
+
+    try:
+        return resolve_code(code, as_of=effective_at, known_at=known_at)
+    except TypeError:
+        return resolve_code(code, as_of=effective_at)
+
+
+def _call_resolver_simple(resolve, code: str, effective_at: datetime, known_at: datetime):
+    try:
+        return resolve(code, as_of=effective_at, known_at=known_at)
+    except TypeError:
+        return resolve(code, as_of=effective_at)
+
+
 def _fingerprint(item: TdnetItem) -> str:
     """Hash of what we hold for this item.
 
@@ -384,43 +415,79 @@ def _fingerprint(item: TdnetItem) -> str:
 
 
 class DatabaseResolver:
-    """Resolves a normalised TDnet code against the Phase 1 security master.
+    """Resolves a TDnet code against the security master, bitemporally.
 
-    Reads as of the disclosure's own publication time, not as of now: a code
-    listed last week was not resolvable when a disclosure from last month was
-    published, and the master carries the history that says so.
+    Two times, and they are not the same time.
 
-    Takes a connection rather than opening one, so the caller owns the
-    transaction and a discovery pass commits once.
+    ``effective_at`` is when the disclosure was published - which listing was in
+    force then. A code reassigned after a delisting must resolve to whoever held
+    it on the day, not to whoever holds it now.
+
+    ``known_at`` is when *we* learned the master's answer, which is now. Reading
+    a 2025 disclosure in 2026 is allowed to use everything the master has learned
+    since; what it is not allowed to do is claim we knew that mapping in 2025.
+    The two arguments keep those apart, and ``ref.listings_as_of`` is the only
+    read path that enforces it - a direct query on current rows silently answers
+    both questions with today's knowledge.
+
+    The cache is keyed on all three of code, effective date and known date.
+    Keying on the code alone would let the first answer for 7203 stand in for
+    every later question about 7203, including ones asked as of a different day.
     """
 
     def __init__(self, conn) -> None:
         self._conn = conn
-        self._cache: dict[str, tuple[str | None, str | None]] = {}
+        self._cache: dict[tuple[str, str, str], tuple[str | None, str | None]] = {}
 
     SQL = """
-    select s.security_id::text, s.market_code::text
-    from ref.listings l
-    join ref.securities s using (security_id)
-    where l.local_code = %(code)s
+    select l.security_id::text, s.market_code::text
+    from ref.listings_as_of(%(effective_at)s, %(known_at)s) l
+    join ref.securities s on s.security_id = l.security_id
+    where l.symbol = %(code)s
       and s.market_code = 'JP'
-      and l.effective_to is null
-      and l.available_at <= %(as_of)s
-    order by l.is_primary desc nulls last, l.effective_from desc
+    order by l.symbol_effective_from desc nulls last
     limit 1
     """
 
-    def resolve(self, normalised_code: str, *, as_of: datetime) -> tuple[str | None, str | None]:
-        if normalised_code in self._cache:
-            return self._cache[normalised_code]
+    @staticmethod
+    def _bucket(moment: datetime) -> str:
+        """Day granularity for the cache key.
+
+        A listing does not change within a day in this master, and bucketing to
+        the day keeps one collection pass to a handful of queries instead of one
+        per item. Bucketing any coarser would start merging days.
+        """
+
+        return moment.astimezone(UTC).date().isoformat()
+
+    def resolve(
+        self,
+        normalised_code: str,
+        *,
+        as_of: datetime,
+        known_at: datetime | None = None,
+    ) -> tuple[str | None, str | None]:
+        known_at = known_at or datetime.now(UTC)
+        key = (normalised_code, self._bucket(as_of), self._bucket(known_at))
+        if key in self._cache:
+            return self._cache[key]
         with self._conn.cursor() as cur:
-            cur.execute(self.SQL, {"code": normalised_code, "as_of": as_of})
+            cur.execute(
+                self.SQL,
+                {"code": normalised_code, "effective_at": as_of, "known_at": known_at},
+            )
             row = cur.fetchone()
         resolved = (row[0], row[1]) if row else (None, None)
-        self._cache[normalised_code] = resolved
+        self._cache[key] = resolved
         return resolved
 
-    def resolve_code(self, code, *, as_of: datetime) -> tuple[str | None, str | None, str | None]:
+    def resolve_code(
+        self,
+        code,
+        *,
+        as_of: datetime,
+        known_at: datetime | None = None,
+    ) -> tuple[str | None, str | None, str | None]:
         """Try each lookup key in turn and say which one matched.
 
         Returns ``(security_id, market_code, matched_key)``. A match on the
@@ -430,7 +497,7 @@ class DatabaseResolver:
         """
 
         for key in code.lookup_keys:
-            security_id, market_code = self.resolve(key, as_of=as_of)
+            security_id, market_code = self.resolve(key, as_of=as_of, known_at=known_at)
             if security_id is not None:
                 return security_id, market_code, key
         return None, None, None

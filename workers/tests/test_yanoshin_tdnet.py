@@ -572,3 +572,83 @@ def test_the_row_records_which_key_matched():
     assert row["matched_lookup_key"] == "9273"
     assert row["mapping_confidence"] == "REGISTRY_ANCHORED"
     assert row["raw_company_code"] == "92730"
+
+
+# ------------------------------------- mapping confidence reaches the relation
+
+
+def _discovered_with(confidence_key, *, base_only=False):
+    """One discovery whose mapping matched exactly, or only on the base."""
+
+    from surge.jobs.tdnet_discovery import TdnetDiscoveryJob
+
+    class Resolver:
+        def resolve(self, normalised_code, *, as_of, known_at=None):
+            target = "1326" if base_only else "9273"
+            return ("sec-1", "JP") if normalised_code == target else (None, None)
+
+        def resolve_code(self, code, *, as_of, known_at=None):
+            for key in code.lookup_keys:
+                sid, market = self.resolve(key, as_of=as_of, known_at=known_at)
+                if sid:
+                    return sid, market, key
+            return None, None, None
+
+    text = _RESPONSE_TEXT
+    if base_only:
+        text = text.replace('"company_code": "587A4"', '"company_code": "13264"')
+    payload = text.encode("utf-8")
+
+    class Stub:
+        limit = 300
+
+        def fetch_recent(self, *, now=None):
+            return parse_response(payload, endpoint="stub", fetched_at=FETCHED)
+
+        def window_is_safe(self, result):
+            return True
+
+        def advance_cursor(self, result):
+            return result.max_id
+
+    report = TdnetDiscoveryJob(source=Stub(), resolver=Resolver()).run(now=FETCHED)
+    return next(d for d in report.items if d.is_mapped)
+
+
+def test_an_exact_mapping_reaches_the_relation_as_registry_anchored():
+    from surge.material.from_tdnet import to_relation
+
+    item = _discovered_with("exact")
+    assert item.mapping_confidence == "REGISTRY_ANCHORED"
+    assert to_relation(item).confidence.value == "REGISTRY_ANCHORED"
+
+
+def test_a_base_fallback_reaches_the_relation_as_provisional():
+    """PROVISIONAL is never promoted on the way through.
+
+    The mapping step knows the match only worked on the four-character base.
+    Re-stamping the relation as REGISTRY_ANCHORED at this boundary would upgrade
+    a weaker claim at exactly the point where nobody would look.
+    """
+
+    from surge.material.from_tdnet import to_relation
+
+    item = _discovered_with("base", base_only=True)
+    assert item.matched_on_base is True
+    assert item.matched_key == "1326"
+    assert item.mapping_confidence == "PROVISIONAL"
+
+    relation = to_relation(item)
+    assert relation.confidence.value == "PROVISIONAL"
+    assert relation.evidence["matched_lookup_key"] == "1326"
+    assert relation.evidence["matched_on_base"] is True
+
+
+def test_the_two_confidences_are_actually_different():
+    """Guards against a change that makes both branches return the same value."""
+
+    from surge.material.from_tdnet import to_relation
+
+    exact = to_relation(_discovered_with("exact")).confidence.value
+    base = to_relation(_discovered_with("base", base_only=True)).confidence.value
+    assert exact != base

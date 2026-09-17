@@ -98,6 +98,21 @@ class MarketRelevance(StrEnum):
     UNCERTAIN = "UNCERTAIN"
 
 
+class SessionTiming(StrEnum):
+    """Whether a material landed before or after the session closed.
+
+    Three values, not two. Deciding between a chart setup and a catalyst setup
+    turns on this, and without a verified trading calendar the honest answer is
+    that we do not know - so ``UNKNOWN`` exists and neither downstream state may
+    be asserted from it. Defaulting an unknown to PRE_CLOSE would quietly claim
+    the close had priced something it may never have seen.
+    """
+
+    PRE_CLOSE = "PRE_CLOSE"
+    POST_CLOSE = "POST_CLOSE"
+    UNKNOWN = "UNKNOWN"
+
+
 class LinkConfidence(StrEnum):
     """How a link was established, not how strongly anyone feels about it."""
 

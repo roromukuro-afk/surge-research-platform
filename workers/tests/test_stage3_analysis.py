@@ -198,10 +198,51 @@ def test_post_close_material_is_a_catalyst_setup_not_a_chart_setup():
 
     bundle = _bundle(
         routes={"technical_routes": ["A"], "material_routes": ["M1"]},
-        materials=[{"event_id": "e1", "after_close": True}],
+        materials=[{"event_id": "e1", "session_timing": "POST_CLOSE"}],
     )
     response = DeterministicMockProvider().analyse(LLMRequest(prompt="p", bundle=bundle))
     assert response.state is Stage3State.POST_CLOSE_CATALYST_SETUP
+
+
+def test_unknown_session_timing_asserts_neither_setup_state():
+    """Three-valued on purpose.
+
+    Whether the close had already priced the disclosure decides between a
+    technical setup and a catalyst setup. Without a verified trading calendar
+    that is not known, and picking the more convenient of the two claims would
+    be the whole failure mode the tri-state exists to prevent.
+    """
+
+    bundle = _bundle(
+        routes={"technical_routes": ["A"], "material_routes": ["M1"]},
+        materials=[{"event_id": "e1", "session_timing": "UNKNOWN"}],
+    )
+    response = DeterministicMockProvider().analyse(LLMRequest(prompt="p", bundle=bundle))
+
+    assert response.state is Stage3State.WATCH_OTHER
+    assert response.state is not Stage3State.TECHNICAL_SETUP_EOD
+    assert response.state is not Stage3State.POST_CLOSE_CATALYST_SETUP
+    assert "no verified trading calendar" in response.rationale
+
+
+def test_a_material_with_no_timing_field_at_all_is_treated_as_unknown():
+    """A missing field is not a quiet PRE_CLOSE."""
+
+    bundle = _bundle(
+        routes={"technical_routes": ["A"], "material_routes": ["M1"]},
+        materials=[{"event_id": "e1"}],
+    )
+    response = DeterministicMockProvider().analyse(LLMRequest(prompt="p", bundle=bundle))
+    assert response.state is Stage3State.WATCH_OTHER
+
+
+def test_pre_close_material_can_still_reach_a_technical_setup():
+    bundle = _bundle(
+        routes={"technical_routes": ["A"], "material_routes": ["M1"]},
+        materials=[{"event_id": "e1", "session_timing": "PRE_CLOSE"}],
+    )
+    response = DeterministicMockProvider().analyse(LLMRequest(prompt="p", bundle=bundle))
+    assert response.state is Stage3State.TECHNICAL_SETUP_EOD
 
 
 def test_the_zone_is_built_from_volatility_and_resistance_never_from_an_old_high():

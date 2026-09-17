@@ -109,6 +109,13 @@ def _run(pipeline=None, **overrides):
                              provider_id="fixture"),
         "canonical_text": "CANONICAL BODY",
         "canonical_prompt_sha256": CANONICAL_SHA,
+        # The universe rule is global. Without a read, the gate promotes nothing -
+        # so a test about routes has to supply one or it is testing the gate.
+        "universe": {
+            "sec-chart": ("INCLUDED", "TARGET_MARKET_COMMON_STOCK"),
+            "sec-news": ("INCLUDED", "TARGET_MARKET_COMMON_STOCK"),
+            "sec-expensive": ("INCLUDED", "TARGET_MARKET_COMMON_STOCK"),
+        },
     }
     kwargs.update(overrides)
     return (pipeline or EodPipeline()).run(**kwargs)
@@ -263,3 +270,133 @@ def test_the_data_question_and_the_model_question_are_separate():
     # so it is visible which one is outstanding.
     assert "data_is_fixture" in report.summary
     assert "analysis_is_a_stand_in" in report.summary
+
+
+# ------------------------------------------------------------ the universe gate
+
+
+def test_an_excluded_security_is_stored_and_not_promoted():
+    """An ETF's disclosure is a real disclosure and a real record.
+
+    It is not something this platform predicts on, and the universe rule says so
+    for the material side exactly as it does for the technical one - otherwise a
+    fund would reach Stage 3 through a filing while being excluded from every
+    price screen.
+    """
+
+    event, evaluation = _material_evaluation(security_id="sec-etf")
+    report = _run(
+        material_evaluations={"sec-etf": evaluation},
+        events_by_id={event.event_key: event},
+        universe={"sec-etf": ("EXCLUDED", "ETF"), "sec-chart": ("INCLUDED", "TARGET_MARKET_COMMON_STOCK")},
+    )
+
+    assert report.material_candidates == []
+    assert [c.security_id for c in report.material_held_by_universe] == ["sec-etf"]
+    assert "sec-etf" not in {candidate.security_id for candidate in report.union}
+    verdict = report.universe_gate.verdicts["sec-etf"]
+    assert verdict.decision.value == "EXCLUDED"
+    assert verdict.research_visible is True
+    assert verdict.formal_candidate is False
+
+
+def test_an_unresolved_security_is_research_visible_but_not_a_formal_candidate():
+    """UNRESOLVED is not a synonym for excluded. Nothing is discarded; it is
+    simply not promoted while the question is open."""
+
+    event, evaluation = _material_evaluation(security_id="sec-open")
+    report = _run(
+        material_evaluations={"sec-open": evaluation},
+        events_by_id={event.event_key: event},
+        universe={"sec-open": ("UNRESOLVED", "FOREIGN_STOCK_RULE_PENDING")},
+    )
+
+    verdict = report.universe_gate.verdicts["sec-open"]
+    assert verdict.decision.value == "UNRESOLVED"
+    assert verdict.research_visible is True
+    assert verdict.formal_candidate is False
+    assert [c.security_id for c in report.material_held_by_universe] == ["sec-open"]
+    assert "sec-open" not in {candidate.security_id for candidate in report.union}
+
+
+def test_an_included_security_is_promoted():
+    event, evaluation = _material_evaluation(security_id="sec-news")
+    report = _run(material_evaluations={"sec-news": evaluation}, events_by_id={event.event_key: event})
+
+    assert [c.security_id for c in report.material_candidates] == ["sec-news"]
+    assert report.material_held_by_universe == []
+    assert "sec-news" in {candidate.security_id for candidate in report.union}
+
+
+def test_a_security_the_snapshot_has_never_heard_of_is_held_open_not_excluded():
+    """A listing newer than the snapshot is an unanswered question.
+
+    Deciding it the convenient way would quietly delete new issuers, which is
+    the population most likely to move.
+    """
+
+    event, evaluation = _material_evaluation(security_id="sec-brand-new")
+    report = _run(
+        material_evaluations={"sec-brand-new": evaluation},
+        events_by_id={event.event_key: event},
+        universe={"sec-chart": ("INCLUDED", "TARGET_MARKET_COMMON_STOCK")},
+    )
+
+    verdict = report.universe_gate.verdicts["sec-brand-new"]
+    assert verdict.decision.value == "UNRESOLVED"
+    assert verdict.reason_code == "NOT_IN_UNIVERSE_SNAPSHOT"
+    assert verdict.formal_candidate is False
+
+
+def test_no_universe_read_promotes_nothing_and_says_why():
+    """A missing input, not a finding about the day."""
+
+    event, evaluation = _material_evaluation(security_id="sec-news")
+    report = _run(
+        material_evaluations={"sec-news": evaluation},
+        events_by_id={event.event_key: event},
+        universe=None,
+    )
+
+    assert report.material_candidates == []
+    assert any("missing input, not a finding" in note for note in report.notes)
+
+
+def test_the_technical_side_is_not_filtered_by_the_material_gate():
+    """The two routes stay independent. The gate is a global rule, not a route."""
+
+    event, evaluation = _material_evaluation(security_id="sec-etf")
+    report = _run(
+        material_evaluations={"sec-etf": evaluation},
+        events_by_id={event.event_key: event},
+        universe={"sec-etf": ("EXCLUDED", "ETF"), "sec-chart": ("INCLUDED", "TARGET_MARKET_COMMON_STOCK")},
+    )
+
+    origins = {candidate.security_id: candidate.origin for candidate in report.union}
+    assert origins["sec-chart"] == "TECHNICAL_ONLY"
+
+
+def test_the_gate_summary_counts_all_three_decisions():
+    events = {}
+    evaluations = {}
+    for security_id in ("sec-in", "sec-out", "sec-open"):
+        event, evaluation = _material_evaluation(security_id=security_id, event_key=f"evt-{security_id}")
+        events[event.event_key] = event
+        evaluations[security_id] = evaluation
+
+    report = _run(
+        material_evaluations=evaluations,
+        events_by_id=events,
+        universe={
+            "sec-in": ("INCLUDED", "TARGET_MARKET_COMMON_STOCK"),
+            "sec-out": ("EXCLUDED", "ETF"),
+            "sec-open": ("UNRESOLVED", "FOREIGN_STOCK_RULE_PENDING"),
+        },
+    )
+
+    summary = report.universe_gate.summary
+    assert summary["INCLUDED"] == 1
+    assert summary["EXCLUDED"] == 1
+    assert summary["UNRESOLVED"] == 1
+    assert summary["promoted"] == 1
+    assert summary["held_research_only"] == 2

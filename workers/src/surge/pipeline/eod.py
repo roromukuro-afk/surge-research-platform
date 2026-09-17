@@ -36,8 +36,9 @@ from surge.jobs.screening import EligibilityReport, PriceEligibilityJob, Stage1R
 from surge.market.eligibility import DEFAULT_RULE, FilterRule, FxObservation
 from surge.market.models import CanonicalAction, CanonicalBar
 from surge.market.series import SeriesError, build_comparable_series
-from surge.material.models import MaterialEvent
+from surge.material.models import MaterialEvent, SessionTiming
 from surge.material.routes import MATERIAL_ROUTE_VERSION, MaterialCandidate, build_candidate
+from surge.material.universe_gate import GateReport, apply_gate
 
 EOD_PIPELINE_VERSION = "eod-pipeline-1.0.0"
 
@@ -86,6 +87,10 @@ class EodReport:
     eligibility: EligibilityReport | None = None
     screening: Stage1Report | None = None
     material_candidates: list[MaterialCandidate] = field(default_factory=list)
+    #: Candidates the material side found but the universe rule will not promote.
+    #: Stored and research-visible; not sent to Stage 2 or Stage 3.
+    material_held_by_universe: list[MaterialCandidate] = field(default_factory=list)
+    universe_gate: GateReport | None = None
     union: list[UnionCandidate] = field(default_factory=list)
     stage2: list[Stage2Assessment] = field(default_factory=list)
     obstacles: dict = field(default_factory=dict)
@@ -107,6 +112,8 @@ class EodReport:
             "eligible": len(self.eligibility.eligible_symbols) if self.eligibility else 0,
             "technical_candidates": len(self.screening.candidates) if self.screening else 0,
             "material_candidates": len(self.material_candidates),
+            "material_held_by_universe": len(self.material_held_by_universe),
+            "universe_gate": self.universe_gate.summary if self.universe_gate else {},
             "union": len(self.union),
             "union_by_origin": origins,
             "stage2_assessed": len(self.stage2),
@@ -174,6 +181,7 @@ class EodPipeline:
         fx: FxObservation | None = None,
         material_evaluations: Mapping[str, Sequence] | None = None,
         events_by_id: Mapping[str, MaterialEvent] | None = None,
+        universe: Mapping[str, tuple[str, str | None]] | None = None,
         canonical_text: str = "",
         canonical_prompt_sha256: str = "",
         addenda_texts: Sequence[str] = (),
@@ -234,10 +242,33 @@ class EodPipeline:
 
         # --- 3. the material side, run independently -----------------------
         if material_evaluations:
+            found: list[MaterialCandidate] = []
             for security_id, evaluations in material_evaluations.items():
                 candidate = build_candidate(security_id, evaluations)
                 if candidate.is_candidate:
+                    found.append(candidate)
+
+            # The universe rule is global, not one of the routes. Applying it to
+            # the technical side only would let an ETF reach Stage 3 through a
+            # disclosure while being excluded from every price screen.
+            report.universe_gate = apply_gate([c.security_id for c in found], universe)
+            for candidate in found:
+                verdict = report.universe_gate.verdicts[candidate.security_id]
+                if verdict.formal_candidate:
                     report.material_candidates.append(candidate)
+                else:
+                    report.material_held_by_universe.append(candidate)
+
+            if report.material_held_by_universe:
+                report.notes.append(
+                    f"{len(report.material_held_by_universe)} material candidate(s) held by the universe "
+                    "rule: stored and research-visible, not promoted to Stage 2 or Stage 3"
+                )
+            if universe is None:
+                report.notes.append(
+                    "no authoritative universe read was supplied, so nothing from the material side was "
+                    "promoted. That is a missing input, not a finding about the day"
+                )
             report.stage_status["material_routes"] = ran
         else:
             report.stage_status["material_routes"] = StageStatus.SKIPPED_NO_INPUT
@@ -380,19 +411,36 @@ def _materials_section(candidate: UnionCandidate, events_by_id: Mapping[str, Mat
                 # Whether the material landed after the close decides whether this
                 # is a chart setup or a catalyst setup, and the two are kept apart
                 # so post-close news is never read as if the close had priced it.
-                "after_close": bool(event and _after_close(event)),
+                # Three-valued: without a verified trading calendar the answer is
+                # UNKNOWN, and neither setup state may be asserted from it.
+                "session_timing": _session_timing(event).value,
             }
         )
     return materials
 
 
-def _after_close(event: MaterialEvent) -> bool:
-    """Whether the event became knowable after the session closed.
+def _session_timing(event: MaterialEvent | None) -> SessionTiming:
+    """Whether the event landed before or after the close, or is unknown.
 
-    Currently a placeholder that reads a flag the caller may set, because a real
-    answer needs a trading calendar and this project does not have a verified one
-    yet. Returning False by default is the safe direction: it treats material as
-    a chart setup rather than claiming the close had not priced it.
+    Answering this properly needs a verified trading calendar - the session end
+    differs by market, moves on half-days, and is not derivable from a timestamp
+    alone. This project does not have one yet, so the default is UNKNOWN rather
+    than a guess in either direction.
+
+    The previous version returned False for unknown, which read as "before the
+    close" and would have let an evening disclosure be treated as something the
+    close had already priced. A caller that genuinely knows may set
+    ``session_timing`` on the event; nothing else may infer it.
     """
 
-    return bool(getattr(event, "after_close", False))
+    if event is None:
+        return SessionTiming.UNKNOWN
+    declared = getattr(event, "session_timing", None)
+    if isinstance(declared, SessionTiming):
+        return declared
+    if isinstance(declared, str):
+        try:
+            return SessionTiming(declared)
+        except ValueError:
+            return SessionTiming.UNKNOWN
+    return SessionTiming.UNKNOWN

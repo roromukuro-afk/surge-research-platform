@@ -232,10 +232,27 @@ class DeterministicMockProvider:
         # A material that arrived after the close is a catalyst setup rather than
         # a chart setup, and the project keeps those apart so that post-close
         # news is never read as if the close had already priced it.
-        if material_routes and any(m.get("after_close") for m in materials if isinstance(m, dict)):
+        # A missing field is UNKNOWN, not "not post-close". Reading None as
+        # absence-of-post-close is precisely how an evening disclosure would be
+        # treated as something the close had already priced.
+        timings = {
+            (m.get("session_timing") or "UNKNOWN") for m in materials if isinstance(m, dict)
+        }
+        if material_routes and "POST_CLOSE" in timings:
             return (
                 Stage3State.POST_CLOSE_CATALYST_SETUP,
                 f"material routes {sorted(material_routes)} fired on material published after the close",
+            )
+        if material_routes and "UNKNOWN" in timings:
+            # Neither setup state may be asserted. Whether the close had already
+            # priced this decides between them, and without a verified trading
+            # calendar that is not known - so the answer is to watch rather than
+            # to pick the more convenient of two claims.
+            return (
+                Stage3State.WATCH_OTHER,
+                f"material routes {sorted(material_routes)} fired, but whether the disclosure landed "
+                "before or after the close is UNKNOWN - no verified trading calendar - so neither a "
+                "technical setup nor a catalyst setup can be asserted",
             )
 
         if "FAILED_BREAKOUT" in concepts:
