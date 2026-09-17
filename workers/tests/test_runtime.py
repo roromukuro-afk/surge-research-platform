@@ -10,6 +10,7 @@ a check it could not run is a check that failed.
 from __future__ import annotations
 
 import json
+import pathlib
 from datetime import UTC, datetime, timedelta
 from datetime import time as clock_time
 
@@ -277,16 +278,22 @@ def test_live_materials_without_a_price_is_partial_live():
     assert "D-06b" in readiness.blocker_ids
 
 
+def _connected(**overrides) -> dict:
+    base = {
+        "material_sources_live": 1,
+        "eod_price_provider": "a settled provider",
+        "intraday_price_provider": "a settled provider",
+        "eod_analysis_provider": "a real model",
+        "eod_analysis_is_a_stand_in": False,
+        "entry_analysis_provider": "a real model",
+        "entry_analysis_is_a_stand_in": False,
+    }
+    base.update(overrides)
+    return base
+
+
 def test_everything_connected_is_live_ready():
-    readiness = assess(
-        _market(
-            material_sources_live=1,
-            eod_price_provider="a settled provider",
-            intraday_price_provider="a settled provider",
-            analysis_provider="a real model",
-            analysis_provider_is_a_stand_in=False,
-        )
-    )
+    readiness = assess(_market(**_connected()))
 
     assert readiness.verdict is Verdict.LIVE_READY
     assert readiness.blockers == []
@@ -295,16 +302,54 @@ def test_everything_connected_is_live_ready():
 def test_a_stand_in_analysis_provider_blocks_on_its_own():
     readiness = assess(
         _market(
-            material_sources_live=1,
-            eod_price_provider="a settled provider",
-            intraday_price_provider="a settled provider",
-            analysis_provider="deterministic_mock",
-            analysis_provider_is_a_stand_in=True,
+            **_connected(
+                eod_analysis_provider="deterministic_mock",
+                eod_analysis_is_a_stand_in=True,
+                entry_analysis_provider="deterministic_mock",
+                entry_analysis_is_a_stand_in=True,
+            )
         )
     )
 
     assert readiness.verdict is Verdict.PARTIAL_LIVE
-    assert readiness.blocker_ids == ["D-32"]
+    assert readiness.blocker_ids == ["D-32-ENTRY", "D-32-EOD"]
+
+
+def test_a_connected_stage3_alone_is_not_ready_to_predict():
+    """Stage 3 has no ENTRY state and runs against a closed market. A model
+    wired in there produces setups, and a setup is not a prediction."""
+
+    readiness = assess(
+        _market(
+            **_connected(
+                entry_analysis_provider="deterministic_mock",
+                entry_analysis_is_a_stand_in=True,
+            )
+        )
+    )
+
+    assert readiness.verdict is Verdict.PARTIAL_LIVE
+    assert readiness.blocker_ids == ["D-32-ENTRY"]
+
+
+def test_the_us_price_question_is_two_questions():
+    """Delayed consolidated history can answer the outcome engine and cannot
+    answer what a decision could have been taken at."""
+
+    readiness = assess(
+        _market(
+            "US",
+            **_connected(
+                fx_provider="ECB",
+                eod_price_provider="alpaca_historical_sip (delayed SIP)",
+                intraday_price_provider=None,
+            )
+        )
+    )
+
+    assert "D-103-LIVE" in readiness.blocker_ids
+    assert "D-103-EOD" not in readiness.blocker_ids
+    assert readiness.verdict is Verdict.PARTIAL_LIVE
 
 
 def test_a_passing_non_capability_does_not_make_a_market_look_live():
@@ -323,15 +368,7 @@ def test_the_two_markets_are_judged_separately():
     report = assess_all(
         [
             _market("JP", material_sources_live=1),
-            _market(
-                "US",
-                material_sources_live=1,
-                eod_price_provider="a settled provider",
-                intraday_price_provider="a settled provider",
-                fx_provider="ECB",
-                analysis_provider="a real model",
-                analysis_provider_is_a_stand_in=False,
-            ),
+            _market("US", **_connected(fx_provider="ECB")),
         ]
     )
     verdicts = {m.market_code: m.verdict for m in report.markets}
@@ -374,3 +411,100 @@ def test_the_report_names_the_decision_behind_each_blocker():
     # is a list of things to do rather than a list of things that are wrong.
     assert ids
     assert all(i.startswith("D-") for i in ids)
+
+
+# ------------------------------------------------- the CLI the scheduler calls
+
+
+def _cli(tmp_path, *argv) -> tuple[int, dict]:
+    import io
+    from contextlib import redirect_stdout
+
+    from surge.jobs import runner_cli
+
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        code = runner_cli.main(["--state-dir", str(tmp_path / "state"), *argv])
+    return code, json.loads(buffer.getvalue())
+
+
+def test_a_dry_run_takes_no_lock_and_writes_nothing(tmp_path):
+    """A dry run that took the lock could block the real run it was checking."""
+
+    code, out = _cli(tmp_path, "dry-run", "--job", "jp_eod")
+
+    assert code == 0
+    assert out["did_anything"] is False
+    assert out["lock_held_by"] is None
+    assert not (tmp_path / "state" / "runner.lock").exists()
+
+
+def test_the_gap_detector_refuses_before_the_machine_was_initialised(tmp_path):
+    """Otherwise a fresh install would write a month of RUNTIME_OFFLINE rows for
+    days on which this system did not exist - and afterwards those are
+    indistinguishable from real outages."""
+
+    code, out = _cli(tmp_path, "gaps", "--job", "jp_eod")
+
+    assert code == 1
+    assert out["recorded_offline"] == []
+    assert "never been initialised" in out["note"]
+
+
+def test_after_init_gaps_are_counted_from_the_marker(tmp_path):
+    _cli(tmp_path, "init")
+    code, out = _cli(tmp_path, "gaps", "--job", "jp_eod")
+
+    assert code == 0
+    assert out["recorded_offline"] == []
+    assert out["counted_from"]
+
+
+def test_the_install_marker_is_never_moved_forward(tmp_path):
+    """Moving it would erase an outage rather than record one."""
+
+    from surge.jobs.runner_cli import installed_at, record_installation
+
+    state = tmp_path / "state"
+    first = record_installation(state, now=MONDAY)
+    second = record_installation(state, now=MONDAY + timedelta(days=7))
+
+    assert first == MONDAY
+    assert second == MONDAY
+    assert installed_at(state) == MONDAY
+
+
+def test_an_absent_heartbeat_counts_as_stale(tmp_path):
+    """A monitor that read "no heartbeat file" as healthy would report a runner
+    that has never started as running."""
+
+    code, out = _cli(tmp_path, "heartbeat")
+
+    assert code == 1
+    assert out["is_stale"] is True
+    assert out["heartbeat"] is None
+
+
+def test_a_job_with_no_provider_fails_rather_than_reporting_success(tmp_path):
+    """A placeholder returning {} would write SUCCEEDED rows for work nobody did,
+    and the run log would become evidence of a pipeline that was not running."""
+
+    code, out = _cli(tmp_path, "--attempts", "1", "run", "--job", "jp_eod")
+
+    assert code == 1
+    assert out["status"] == "FAILED"
+    assert "no live provider bound" in out["error"]
+
+
+def test_the_schedules_are_the_ones_the_installer_registers(tmp_path):
+    """The PowerShell installer names four jobs. A name that drifts out of the
+    CLI would register a task that fails every day with an unknown-job error."""
+
+    from surge.jobs.runner_cli import SCHEDULES
+
+    installer = (
+        pathlib.Path(__file__).resolve().parents[2] / "ops" / "windows" / "Install-SurgeTasks.ps1"
+    ).read_text(encoding="utf-8")
+
+    for name in SCHEDULES:
+        assert f'"{name}"' in installer

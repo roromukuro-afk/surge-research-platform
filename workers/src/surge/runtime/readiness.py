@@ -29,7 +29,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-READINESS_VERSION = "readiness-1.0.0"
+READINESS_VERSION = "readiness-1.1.0"
 
 
 class Verdict(StrEnum):
@@ -251,12 +251,23 @@ class MarketInputs:
     """
 
     market_code: str
+    #: The consolidated session series the outcome engine reads. For the US this
+    #: is D-103-EOD, which Alpaca's delayed SIP history may be able to answer.
     eod_price_provider: str | None = None
+    #: A price that could actually have been traded at the moment of a decision.
+    #: For the US this is D-103-LIVE and it is a different question with a
+    #: different answer: a feed that is deliberately fifteen minutes old cannot
+    #: supply an entry_reference_price, however good it is for history.
     intraday_price_provider: str | None = None
     fx_provider: str | None = None
     material_sources_live: int = 0
-    analysis_provider: str | None = None
-    analysis_provider_is_a_stand_in: bool = True
+    #: Stage 3. Produces setups and watches, never an entry.
+    eod_analysis_provider: str | None = None
+    eod_analysis_is_a_stand_in: bool = True
+    #: The intraday contract. This is the one a formal prediction comes from, so
+    #: a connected Stage 3 on its own must never read as ready.
+    entry_analysis_provider: str | None = None
+    entry_analysis_is_a_stand_in: bool = True
     scheduler_configured: bool = False
     object_store_configured: bool = False
     security_master_fresh: bool = False
@@ -299,22 +310,23 @@ def assess(inputs: MarketInputs) -> MarketReadiness:
             detail=(
                 f"{inputs.eod_price_provider}"
                 if inputs.eod_price_provider
-                else "no settled end-of-day price source. Without session OHLC there is no outcome "
-                "resolution, because the path ladder reads the session high and low"
+                else "no settled end-of-day price source. Without consolidated session OHLC there "
+                "is no outcome resolution, because the path ladder reads the session high and low"
             ),
-            blocker_id="D-102" if inputs.market_code == "JP" else "D-103",
+            blocker_id="D-102" if inputs.market_code == "JP" else "D-103-EOD",
             is_a_capability=True,
         ),
         check_provider(
-            "intraday_price_provider",
+            "intraday_entry_price_provider",
             configured=bool(inputs.intraday_price_provider),
             detail=(
                 f"{inputs.intraday_price_provider}"
                 if inputs.intraday_price_provider
                 else "no intraday source, so no entry_reference_price can be observed and no formal "
-                "prediction can be made"
+                "prediction can be made. A delayed historical feed does not answer this: a price "
+                "from fifteen minutes ago is not a price a decision could have been taken at"
             ),
-            blocker_id="D-06b" if inputs.market_code == "JP" else "D-103",
+            blocker_id="D-06b" if inputs.market_code == "JP" else "D-103-LIVE",
         ),
         check_provider(
             "fx_provider",
@@ -341,16 +353,31 @@ def assess(inputs: MarketInputs) -> MarketReadiness:
             is_a_capability=True,
         ),
         check_provider(
-            "analysis_provider",
-            configured=bool(inputs.analysis_provider) and not inputs.analysis_provider_is_a_stand_in,
-            detail=(
-                f"{inputs.analysis_provider}"
-                if inputs.analysis_provider and not inputs.analysis_provider_is_a_stand_in
-                else "the only analysis provider is the deterministic stand-in, which cannot "
-                "produce a formal prediction. Its verdicts are evidence the pipeline runs and no "
-                "evidence about any security"
+            "eod_analysis_provider",
+            configured=(
+                bool(inputs.eod_analysis_provider) and not inputs.eod_analysis_is_a_stand_in
             ),
-            blocker_id="D-32",
+            detail=(
+                f"{inputs.eod_analysis_provider} (Stage 3)"
+                if inputs.eod_analysis_provider and not inputs.eod_analysis_is_a_stand_in
+                else "the only Stage 3 provider is the deterministic stand-in. Its verdicts are "
+                "evidence the pipeline runs and no evidence about any security"
+            ),
+            blocker_id="D-32-EOD",
+        ),
+        check_provider(
+            "entry_analysis_provider",
+            configured=(
+                bool(inputs.entry_analysis_provider) and not inputs.entry_analysis_is_a_stand_in
+            ),
+            detail=(
+                f"{inputs.entry_analysis_provider} (intraday entry contract)"
+                if inputs.entry_analysis_provider and not inputs.entry_analysis_is_a_stand_in
+                else "no real intraday entry analysis. Stage 3 cannot produce an entry - it has no "
+                "ENTRY state and runs against a closed market - so connecting a model there leaves "
+                "this unanswered. A formal prediction comes only from the intraday contract"
+            ),
+            blocker_id="D-32-ENTRY",
         ),
         check_provider(
             "scheduler",
@@ -404,8 +431,11 @@ def assess_all(markets: Sequence[MarketInputs]) -> ReadinessReport:
 
     if not report.any_market_live:
         report.notes.append(
-            "no market is live. Every remaining blocker below is a contract, a credential or an "
-            "answer from a third party - none of them is code"
+            "no market is live. Each blocker names the decision that would clear it; read those "
+            "before concluding anything about what is left. An earlier version of this note "
+            "asserted that every remaining blocker was a contract or a credential, which was "
+            "wrong - D-103 was two questions wearing one id, and one of them had an adapter "
+            "waiting to be written"
         )
     partial = [m.market_code for m in report.markets if m.verdict is Verdict.PARTIAL_LIVE]
     if partial:

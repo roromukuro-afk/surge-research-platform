@@ -35,8 +35,10 @@ def _inputs_for(market: str, args) -> MarketInputs:
         eod_price_provider=getattr(args, f"{prefix}_eod", None),
         intraday_price_provider=getattr(args, f"{prefix}_intraday", None),
         fx_provider=args.fx,
-        analysis_provider=args.analysis_provider,
-        analysis_provider_is_a_stand_in=not args.analysis_provider_is_real,
+        eod_analysis_provider=args.eod_analysis_provider,
+        eod_analysis_is_a_stand_in=not args.eod_analysis_is_real,
+        entry_analysis_provider=args.entry_analysis_provider,
+        entry_analysis_is_a_stand_in=not args.entry_analysis_is_real,
         scheduler_configured=args.scheduler,
         object_store_configured=args.object_store,
         migrations_in_sync=args.migrations_in_sync,
@@ -52,11 +54,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--us-eod", default=None)
     parser.add_argument("--us-intraday", default=None)
     parser.add_argument("--fx", default=None)
-    parser.add_argument("--analysis-provider", default="deterministic_mock")
     parser.add_argument(
-        "--analysis-provider-is-real",
+        "--eod-analysis-provider",
+        default="deterministic_mock",
+        help="the Stage 3 provider: produces setups and watches, never an entry",
+    )
+    parser.add_argument(
+        "--eod-analysis-is-real",
         action="store_true",
-        help="assert the analysis provider is not the deterministic stand-in",
+        help="assert the Stage 3 provider is not the deterministic stand-in",
+    )
+    parser.add_argument(
+        "--entry-analysis-provider",
+        default="deterministic_mock",
+        help=(
+            "the intraday entry provider. This is the one a formal prediction comes from; a "
+            "connected Stage 3 does not answer it"
+        ),
+    )
+    parser.add_argument(
+        "--entry-analysis-is-real",
+        action="store_true",
+        help="assert the intraday entry provider is not the deterministic stand-in",
     )
     parser.add_argument("--scheduler", action="store_true")
     parser.add_argument("--object-store", action="store_true")
