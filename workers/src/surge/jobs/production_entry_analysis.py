@@ -40,6 +40,7 @@ from surge.analysis.entry_analysis import (
     validate_entry_analysis,
 )
 from surge.analysis.execution import (
+    MAX_TRANSIENT_ATTEMPTS,
     ExecutionKey,
     FailureClass,
 )
@@ -175,7 +176,7 @@ class ProductionEntryAnalysis:
         if response is None:
             prompt = render_entry_prompt(bundle, self.canonical_text, self.addenda_texts)
             request = LLMRequest(prompt=prompt, bundle=bundle)
-            answer = self._tx2(execution.analysis_execution_id, request, bundle, now=now)
+            answer = self._tx2(execution, request, bundle, now=now, result=result)
             if answer is None:
                 result.retried = True
                 result.failure_class = FailureClass.PROVIDER_ERROR
@@ -235,23 +236,64 @@ class ProductionEntryAnalysis:
 
     # ----------------------------------------------------------------- TX2
 
-    def _tx2(self, execution_id: str, request, bundle, *, now) -> EntryAnalysisResponse | None:
-        """Call the model and store the answer. Returns None on a transient failure."""
+    def _tx2(self, execution, request, bundle, *, now, result) -> EntryAnalysisResponse | None:
+        """Call the model and store the answer. Returns None when it did not answer."""
 
+        execution_id = execution.analysis_execution_id
         try:
             response = self.provider.analyse_entry(request)
         except Exception as exc:
             # Transient by default at this boundary: a call that did not come
             # back tells us nothing about the security, and failing it would
             # strand the watch at IN_REANALYSIS with nothing to move it.
+            #
+            # But only while there is budget. A provider that is down all
+            # afternoon is transient on every individual attempt and permanent
+            # in effect, and retrying it forever rebuilds the stranded watch in
+            # slow motion. When the budget is gone the failure becomes terminal,
+            # which means moving the watch first - the database refuses to fail
+            # an execution whose watch is still IN_REANALYSIS, so this cannot be
+            # skipped by forgetting it.
+            terminal = execution.retry_budget_spent(now)
+            detail = f"{type(exc).__name__}: {exc}"
+            if terminal is None:
+                try:
+                    self.store.retry(execution_id, transient_error=detail)
+                    self.conn.commit()
+                except Exception:
+                    self.conn.rollback()
+                    raise
+                result.notes.append(
+                    f"transient failure, retry {execution.attempt_count + 1} of "
+                    f"{MAX_TRANSIENT_ATTEMPTS}: {detail}"
+                )
+                return None
+
             try:
-                self.store.retry(
-                    execution_id, transient_error=f"{type(exc).__name__}: {exc}"
+                entry_db.write_watch_transition(
+                    self.conn,
+                    watch_id=execution.key.watch_id,
+                    from_state=WatchState.IN_REANALYSIS,
+                    to_state=WatchState.REARMED,
+                    occurred_at=now,
+                    analysis_kind=AnalysisKind.REANALYSIS,
+                    note=f"{terminal.value}: {detail}"[:200],
+                )
+                self.store.fail(
+                    execution_id,
+                    failure_class=terminal,
+                    failure_detail=detail,
                 )
                 self.conn.commit()
             except Exception:
                 self.conn.rollback()
                 raise
+            result.failure_class = terminal
+            result.watch_state_after = WatchState.REARMED
+            result.notes.append(
+                "the trigger goes unanswered and the watch re-arms. A decision made from a "
+                "provider that never answered would be a decision about nothing"
+            )
             return None
 
         try:
@@ -444,7 +486,30 @@ class ProductionEntryAnalysis:
         )
 
 
-def resume_all(runner: ProductionEntryAnalysis, *, bundles, facts_for, now, thesis_for) -> list[RunResult]:
+@dataclass
+class Recovery:
+    """What one sweep did, including what it could not do.
+
+    ``unresumable`` is the part worth naming. Each of those is a watch sitting
+    at IN_REANALYSIS that this pass did not move, and nothing else moves one. An
+    earlier version skipped them with ``continue``, which made "nothing was
+    stuck" and "several things were stuck and I walked past them" produce the
+    same empty result.
+    """
+
+    resumed: list[RunResult] = field(default_factory=list)
+    unresumable: list[dict] = field(default_factory=list)
+
+    @property
+    def summary(self) -> dict:
+        return {
+            "resumed": len(self.resumed),
+            "unresumable": len(self.unresumable),
+            "stuck": [u["analysis_execution_id"] for u in self.unresumable],
+        }
+
+
+def resume_all(runner: ProductionEntryAnalysis, *, bundles, facts_for, now, thesis_for) -> Recovery:
     """Pick up every analysis that was started and never finished.
 
     Reads the executions rather than the watches. By the time the model is
@@ -452,12 +517,27 @@ def resume_all(runner: ProductionEntryAnalysis, *, bundles, facts_for, now, thes
     TRIGGER_HIT walks past exactly the ones that crashed.
     """
 
-    results = []
+    recovery = Recovery()
     for execution in runner.store.in_flight():
         bundle = bundles.get(execution.analysis_execution_id)
         if bundle is None:
+            # Reported, not skipped. Without the bundle this pass cannot resume
+            # the analysis, and the watch stays where the crash left it - which
+            # is a finding, not a non-event.
+            recovery.unresumable.append(
+                {
+                    "analysis_execution_id": execution.analysis_execution_id,
+                    "watch_id": execution.key.watch_id,
+                    "status": execution.status.value,
+                    "started_at": execution.started_at.isoformat(),
+                    "why": (
+                        "no intraday bundle was supplied for this execution, so the analysis "
+                        "cannot be resumed and the watch is still IN_REANALYSIS"
+                    ),
+                }
+            )
             continue
-        results.append(
+        recovery.resumed.append(
             runner.run_for_trigger(
                 watch_id=execution.key.watch_id,
                 trigger_transition_id=execution.key.trigger_transition_id,
@@ -468,13 +548,14 @@ def resume_all(runner: ProductionEntryAnalysis, *, bundles, facts_for, now, thes
                 analysis_kind=execution.key.analysis_kind,
             )
         )
-    return results
+    return recovery
 
 
 __all__ = [
     "RUNNER_VERSION",
     "ProductionEntryAnalysis",
     "ProductionRunError",
+    "Recovery",
     "RunResult",
     "resume_all",
 ]

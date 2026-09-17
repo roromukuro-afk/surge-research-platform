@@ -28,7 +28,7 @@ refused as a duplicate of its first.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
 
@@ -76,6 +76,17 @@ class FailureClass(StrEnum):
     STAND_IN_PROVIDER = "STAND_IN_PROVIDER"
     EXTERNAL_TOOL_USED = "EXTERNAL_TOOL_USED"
 
+    #: Terminal, and reached from a transient failure rather than declared. A
+    #: provider that is down for an afternoon is transient on every single
+    #: attempt and permanent in effect: retrying without a budget rebuilds the
+    #: stranded watch it was introduced to prevent, only slowly enough not to
+    #: notice.
+    RETRY_EXHAUSTED = "RETRY_EXHAUSTED"
+    #: Terminal because of *when*, not *what*. An entry decision is about a
+    #: price, and a price from forty minutes ago is a different security. Even a
+    #: successful answer this late would be answering a question nobody asked.
+    ANALYSIS_DEADLINE_PASSED = "ANALYSIS_DEADLINE_PASSED"
+
     @property
     def is_transient(self) -> bool:
         return self in TRANSIENT_FAILURES
@@ -91,6 +102,24 @@ TRANSIENT_FAILURES = frozenset(
         FailureClass.PROVIDER_RATE_LIMITED,
     }
 )
+
+
+#: How many times one execution may be retried before the transient failure is
+#: treated as the permanent condition it has turned out to be.
+MAX_TRANSIENT_ATTEMPTS = 5
+
+#: How stale the inputs may be and still produce a decision.
+#:
+#: Measured from ``decision_cutoff_at`` - the moment the information was frozen -
+#: rather than from when the row was inserted. That is the question being asked:
+#: an answer arriving forty minutes after the cutoff is an answer about a
+#: forty-minute-old price however promptly the row was written, and the insert
+#: clock is the server's rather than the decision's, so a replay would get a
+#: different verdict from the same facts.
+#:
+#: Not a timeout on the call - a limit on the *answer*. Better to leave the
+#: trigger unanswered and let the watch re-arm than to enter on a stale reading.
+ANALYSIS_DEADLINE = timedelta(minutes=30)
 
 
 class ExecutionError(EntryError):
@@ -148,6 +177,25 @@ class AnalysisExecution:
     @property
     def is_finished(self) -> bool:
         return not self.status.is_open
+
+    def retry_budget_spent(self, now: datetime) -> FailureClass | None:
+        """Whether retrying again would be pretending the problem is temporary.
+
+        Returns the terminal failure class to use, or None while there is still
+        budget. Two limits, because they catch different shapes of the same
+        thing: a provider erroring quickly many times, and enough time passing
+        that the answer would be about a different market.
+        """
+
+        if self.attempt_count >= MAX_TRANSIENT_ATTEMPTS:
+            return FailureClass.RETRY_EXHAUSTED
+        cutoff = self.decision_cutoff_at
+        if cutoff.tzinfo is None:
+            cutoff = cutoff.replace(tzinfo=UTC)
+        reference = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+        if reference - cutoff > ANALYSIS_DEADLINE:
+            return FailureClass.ANALYSIS_DEADLINE_PASSED
+        return None
 
     @property
     def has_a_stored_answer(self) -> bool:
@@ -429,7 +477,9 @@ def plan_recovery(store: ExecutionStore) -> RecoveryPlan:
 
 
 __all__ = [
+    "ANALYSIS_DEADLINE",
     "EXECUTION_VERSION",
+    "MAX_TRANSIENT_ATTEMPTS",
     "AnalysisExecution",
     "BeginResult",
     "ExecutionError",

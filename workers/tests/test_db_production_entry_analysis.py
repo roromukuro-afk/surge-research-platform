@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -30,6 +30,8 @@ from surge.analysis.entry_analysis import (  # noqa: E402
     IntradayBundle,
 )
 from surge.analysis.execution import (  # noqa: E402
+    ANALYSIS_DEADLINE,
+    MAX_TRANSIENT_ATTEMPTS,
     ExecutionKey,
     FailureClass,
 )
@@ -42,7 +44,10 @@ from surge.entry.models import (  # noqa: E402
     UniverseVerdict,
     WatchState,
 )
-from surge.jobs.production_entry_analysis import ProductionEntryAnalysis  # noqa: E402
+from surge.jobs.production_entry_analysis import (  # noqa: E402
+    ProductionEntryAnalysis,
+    resume_all,
+)
 from test_db_entry_lifecycle import _move, _watch  # noqa: E402
 
 DSN = os.environ.get("SURGE_TEST_DATABASE_URL")
@@ -287,6 +292,84 @@ def test_a_transient_provider_failure_is_retried_rather_than_failed(conn):
     status, watch_state = _status(conn, result.analysis_execution_id)
     assert status == "RETRY_PENDING"
     assert watch_state == "IN_REANALYSIS"
+
+
+def test_a_provider_that_never_answers_stops_being_transient(conn):
+    """The fix for the stranded watch, applied without a budget, rebuilds it in
+    slow motion: every individual attempt is transient, the condition is not,
+    and the watch sits at IN_REANALYSIS for as long as the provider is down.
+
+    When the budget runs out the failure becomes terminal, which means the watch
+    is moved first - the database refuses to fail an execution whose watch is
+    still IN_REANALYSIS, so the escalation cannot forget it."""
+
+    watch_id, security_id, trigger_id = _triggered(conn)
+    provider = _Provider(raises=TimeoutError("connection timed out"))
+    runner = _runner(conn, provider)
+
+    for _ in range(MAX_TRANSIENT_ATTEMPTS):
+        result = _run(runner, watch_id, security_id, trigger_id)
+        assert result.retried
+
+    final = _run(runner, watch_id, security_id, trigger_id)
+
+    assert final.failure_class is FailureClass.RETRY_EXHAUSTED
+    status, watch_state = _status(conn, final.analysis_execution_id)
+    assert status == "FAILED"
+    # Not IN_REANALYSIS. The trigger goes unanswered and the watch re-arms.
+    assert watch_state == "REARMED"
+    assert provider.calls == MAX_TRANSIENT_ATTEMPTS + 1
+    # And nothing was decided from a provider that never answered.
+    assert final.prediction_id is None
+    assert final.attempt_id is None
+
+
+def test_an_analysis_that_ran_past_its_deadline_is_not_retried_again(conn):
+    """One slow attempt spends the budget as surely as five fast ones, and it is
+    the cutoff that is measured from, not the insert: the answer would be about
+    a price the session has already left behind."""
+
+    watch_id, security_id, trigger_id = _triggered(conn)
+    runner = _runner(conn, _Provider(raises=TimeoutError("still hanging")))
+
+    result = _run(
+        runner,
+        watch_id,
+        security_id,
+        trigger_id,
+        now=CUTOFF + ANALYSIS_DEADLINE + timedelta(minutes=1),
+    )
+
+    assert result.failure_class is FailureClass.ANALYSIS_DEADLINE_PASSED
+    status, watch_state = _status(conn, result.analysis_execution_id)
+    assert status == "FAILED"
+    assert watch_state == "REARMED"
+
+
+def test_recovery_reports_what_it_could_not_resume(conn):
+    """A sweep that cannot resume an execution leaves a watch at IN_REANALYSIS,
+    and nothing else moves one. Skipping it silently made "nothing was stuck"
+    and "several things were stuck and I walked past them" look identical."""
+
+    watch_id, security_id, trigger_id = _triggered(conn)
+    runner = _runner(conn, _Provider(raises=TimeoutError("connection timed out")))
+    started = _run(runner, watch_id, security_id, trigger_id)
+    assert started.retried
+
+    recovery = resume_all(
+        runner,
+        bundles={},
+        facts_for=lambda _e: _facts(),
+        now=LATER,
+        thesis_for=lambda _e: "WATCH_BREAKOUT|R_A",
+    )
+
+    assert recovery.resumed == []
+    assert len(recovery.unresumable) == 1
+    stuck = recovery.unresumable[0]
+    assert stuck["watch_id"] == watch_id
+    assert "IN_REANALYSIS" in stuck["why"]
+    assert recovery.summary["stuck"] == [started.analysis_execution_id]
 
 
 # ------------------------------------------- 2. crash after TX2 commits

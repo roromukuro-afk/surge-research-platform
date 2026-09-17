@@ -12,7 +12,7 @@ Each test below kills the process at a different point and restarts.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -26,6 +26,9 @@ from surge.analysis.entry_analysis import (
     IntradayBundle,
 )
 from surge.analysis.execution import (
+    ANALYSIS_DEADLINE,
+    MAX_TRANSIENT_ATTEMPTS,
+    AnalysisExecution,
     ExecutionError,
     ExecutionKey,
     ExecutionStatus,
@@ -448,3 +451,57 @@ def test_the_attempt_status_still_decides_the_watch_state_with_a_store():
     assert decision.attempt.status is EntryAttemptStatus.ENTRY_ABORTED_PRICE_LIMIT
     assert decision.watch_state_after is WatchState.REARMED
     assert store.get(decision.analysis_execution_id).status is ExecutionStatus.COMPLETED
+
+
+# ----------------------------------------- the budget on "transient"
+
+
+def _open_execution(*, attempts: int = 0, started: datetime | None = None) -> AnalysisExecution:
+    return AnalysisExecution(
+        analysis_execution_id="e-1",
+        key=ExecutionKey(watch_id="w-1", trigger_transition_id=TRIGGER,
+                         analysis_kind=AnalysisKind.REANALYSIS),
+        security_id="JP:LOCAL:1234",
+        status=ExecutionStatus.RETRY_PENDING,
+        decision_cutoff_at=CUTOFF,
+        provider_id="groq_hosted",
+        provider_kind="HOSTED_LLM",
+        started_at=started or LATER,
+        attempt_count=attempts,
+    )
+
+
+def test_a_transient_failure_has_a_budget():
+    """Otherwise the fix for the stranded watch rebuilds it slowly. A provider
+    that is down all afternoon is transient on every single attempt and
+    permanent in effect, and the watch sits at IN_REANALYSIS throughout."""
+
+    assert _open_execution(attempts=0).retry_budget_spent(LATER) is None
+    assert _open_execution(attempts=MAX_TRANSIENT_ATTEMPTS - 1).retry_budget_spent(LATER) is None
+    assert (
+        _open_execution(attempts=MAX_TRANSIENT_ATTEMPTS).retry_budget_spent(LATER)
+        is FailureClass.RETRY_EXHAUSTED
+    )
+
+
+def test_an_analysis_that_took_too_long_is_terminal_however_few_attempts_it_made():
+    """One slow attempt spends the budget as surely as five fast ones, and the
+    clock that matters is the cutoff: an entry decision is about a price, and
+    half an hour after the inputs were frozen it is about a different
+    security."""
+
+    late = CUTOFF + ANALYSIS_DEADLINE + timedelta(seconds=1)
+
+    assert _open_execution(attempts=1).retry_budget_spent(late) is (
+        FailureClass.ANALYSIS_DEADLINE_PASSED
+    )
+    assert _open_execution(attempts=1).retry_budget_spent(
+        CUTOFF + ANALYSIS_DEADLINE - timedelta(seconds=1)
+    ) is None
+
+
+def test_the_escalated_classes_are_terminal():
+    """They have to be, or the escalation would retry again."""
+
+    assert not FailureClass.RETRY_EXHAUSTED.is_transient
+    assert not FailureClass.ANALYSIS_DEADLINE_PASSED.is_transient
