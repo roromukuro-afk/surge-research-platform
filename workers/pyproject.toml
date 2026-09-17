@@ -7,6 +7,9 @@ dependencies = ["openpyxl>=3.1"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.6"]
+# Only needed to talk to Cloudflare R2. Conditional writes (If-None-Match on
+# PutObject) need a botocore new enough to send the header.
+r2 = ["boto3>=1.35"]
 
 [build-system]
 requires = ["hatchling"]
