@@ -13,7 +13,9 @@
 - unit / integration / regression test を追加しながら進む。
 - **停止するのは6つの場合だけ**（[CLAUDE.md §3](../CLAUDE.md) が正本）: ユーザー本人の契約・支払い / credential・account 操作 / 法的・利用規約上の本人確認 / 不可逆な削除 / Canonical 仕様との正面衝突 / プロジェクト目的の変更。
 - **2026-09-17: Phase 4〜8 の本体実装を完了した。** Phase 8 は実 Provider が未確定のため `IMPLEMENTED_NOT_LIVE_VERIFIED`（実装・schema・guard は完成、実データでの検証は未了）。
-- **統合報告地点に到達した**: Universe → Market Data → Feature → Route A-H → Materials → Entity Linking → Stage 2 → Stage 3 → Setup / Watch / Reject → ENTRY 判断 → Prediction → Episode が end-to-end でつながった。残る外部依存は**場中のリアルタイム Provider**（D-06b）と `entry_price_method`（D-01a）で、どちらもユーザー本人の契約・credential が要るため実装では解けない。
+- **2026-09-17: Phase 1〜12 の Core Architecture が揃い、Live Activation Sprint へ移行した。**新しい Architecture Phase は作らない。目的は「システムを作る」から「実データで Production 運用を開始する」へ切り替わっている。
+- **Live の blocker は6件で、すべてコードでは解けない**: D-102（JP EOD 価格。照会文は [jpx-secondary-use-enquiry.md](research/jpx-secondary-use-enquiry.md) に作成済み）/ D-103（US 価格。**Alpaca Basic は不適格と判明**、D-173）/ D-06b（JP 場中価格。0 円候補あり、口座契約と約款確認が要る）/ D-32（実 Analysis Provider。**Groq 無料 tier が第一候補**、D-174）/ D-104（日次 runtime。Local Production Runner は実装済み、bind が残り）/ D-01a（`entry_price_method`）。**D-105 は blocker ではない**（LocalObjectStore で開始可能）。
+- **進捗は `python -m surge.jobs.readiness_cli` が market 別に返す**（LIVE_READY / PARTIAL_LIVE / BLOCKED）。
 
 ### 未解決の外部依存は開発を止める理由にしない
 
