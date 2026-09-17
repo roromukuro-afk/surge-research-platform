@@ -9,6 +9,7 @@ wrote it. That matters more than it looks - a test that fakes immutability with
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -20,16 +21,36 @@ from surge.storage.base import (
 )
 
 
+def _long_path_safe(path: Path) -> Path:
+    """Work around Windows' 260 character path limit.
+
+    Object keys are deliberately long: a Hive-style partition path plus a 64
+    character content digest is most of the budget before the store root is even
+    counted. R2 allows 1024 byte keys and does not care, but the local store
+    would fail with a bare FileNotFoundError - which reads like a missing file
+    rather than a path that was never openable. The extended-length prefix lifts
+    the limit to 32,767 characters.
+    """
+
+    if sys.platform != "win32":
+        return path
+    resolved = path.absolute()
+    text = str(resolved)
+    if text.startswith("\\\\?\\"):
+        return resolved
+    return Path("\\\\?\\" + text)
+
+
 class LocalObjectStore(ObjectStore):
     def __init__(self, root: Path | str, *, store_id: str = "local") -> None:
         self._root = Path(root)
         self.store_id = store_id
-        self._root.mkdir(parents=True, exist_ok=True)
+        _long_path_safe(self._root).mkdir(parents=True, exist_ok=True)
 
     def _path(self, key: str) -> Path:
         if key.startswith("/") or ".." in key.split("/"):
             raise ValueError(f"refusing a key that escapes the store root: {key!r}")
-        return self._root / key
+        return _long_path_safe(self._root / key)
 
     def put_immutable(self, key: str, data: bytes, content_type: str) -> StoredObject:
         path = self._path(key)
@@ -59,7 +80,7 @@ class LocalObjectStore(ObjectStore):
         return StoredObject(key, self.store_id, sha256_hex(data), len(data), "application/octet-stream", created=False)
 
     def list(self, prefix: str) -> Iterator[str]:
-        base = self._root
+        base = _long_path_safe(self._root)
         for path in sorted(base.rglob("*")):
             if not path.is_file():
                 continue

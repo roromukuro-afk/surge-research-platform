@@ -6,7 +6,9 @@ requires-python = ">=3.12"
 dependencies = ["openpyxl>=3.1"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+dev = ["pytest>=8.0", "ruff>=0.6", "pyarrow>=17"]
+# Canonical price series are stored as Parquet in object storage.
+parquet = ["pyarrow>=17"]
 # Only needed to talk to Cloudflare R2. Conditional writes (If-None-Match on
 # PutObject) need a botocore new enough to send the header.
 r2 = ["boto3>=1.35"]
