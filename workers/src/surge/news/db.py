@@ -277,3 +277,77 @@ def read_documents_as_of(conn, knowledge_cutoff: datetime, *, source_keys: Seque
         cur.execute(sql, params)
         columns = [description[0] for description in cur.description]
         return [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
+
+
+INSERT_TDNET_ITEM = """
+insert into news.tdnet_items (
+  document_id, yanoshin_id, pubdate,
+  raw_company_code, normalised_company_code, code_normalisation,
+  company_name, title, document_url, url_xbrl, markets_string, update_history,
+  security_id, listing_market_code, mapping_confidence, unmapped_reason,
+  source_endpoint, raw_response_sha256,
+  system_first_seen_at, ingested_at, available_to_model_at
+) values (
+  %(document_id)s, %(yanoshin_id)s, %(pubdate)s,
+  %(raw_company_code)s, %(normalised_company_code)s, %(code_normalisation)s::news.code_normalisation,
+  %(company_name)s, %(title)s, %(document_url)s, %(url_xbrl)s, %(markets_string)s, %(update_history)s,
+  %(security_id)s, %(listing_market_code)s::ref.market_code, %(mapping_confidence)s, %(unmapped_reason)s,
+  %(source_endpoint)s, %(raw_response_sha256)s,
+  %(system_first_seen_at)s, %(ingested_at)s, %(available_to_model_at)s
+)
+on conflict (yanoshin_id, raw_response_sha256) do nothing
+"""
+
+INSERT_TDNET_COVERAGE = """
+insert into news.tdnet_coverage (
+  run_id, as_of_date, items_retrieved, unique_items, new_items, duplicate_items,
+  unmapped_company_codes, document_url_present, xbrl_url_present,
+  verification_source_found, metadata_only_events, fetch_errors,
+  last_seen_id, collection_lag_seconds, endpoint, notes
+) values (
+  %(run_id)s, %(as_of_date)s, %(items_retrieved)s, %(unique_items)s, %(new_items)s, %(duplicate_items)s,
+  %(unmapped_company_codes)s, %(document_url_present)s, %(xbrl_url_present)s,
+  %(verification_source_found)s, %(metadata_only_events)s, %(fetch_errors)s,
+  %(last_seen_id)s, %(collection_lag_seconds)s, %(endpoint)s, %(notes)s
+)
+"""
+
+SELECT_KNOWN_TDNET_IDS = """
+select yanoshin_id, max(raw_response_sha256) as response_sha256
+from news.tdnet_items
+group by yanoshin_id
+"""
+
+
+def write_tdnet_items(conn, rows: Sequence[dict]) -> int:
+    """Write the index rows that accompany the documents.
+
+    The row carries no body and the table has no column for one. That is not an
+    oversight: the licence covers the index, and being able to reach a link is
+    not permission to archive what it points at.
+    """
+
+    written = 0
+    with conn.cursor() as cur:
+        for row in rows:
+            cur.execute(INSERT_TDNET_ITEM, row)
+            written += cur.rowcount or 0
+    return written
+
+
+def write_tdnet_coverage(conn, coverage: dict) -> None:
+    with conn.cursor() as cur:
+        cur.execute(INSERT_TDNET_COVERAGE, coverage)
+
+
+def read_known_tdnet_ids(conn) -> dict[int, str]:
+    """Item ids we already hold, with the response hash we hold them under.
+
+    Both halves matter. A known id with a different hash is a revision the
+    service made in place, not a duplicate, and dropping it on the id alone
+    would lose every correction.
+    """
+
+    with conn.cursor() as cur:
+        cur.execute(SELECT_KNOWN_TDNET_IDS)
+        return {int(row[0]): row[1] for row in cur.fetchall()}

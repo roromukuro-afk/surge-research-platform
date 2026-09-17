@@ -101,8 +101,16 @@ class Classification:
     classifier_version: str = CLASSIFIER_VERSION
 
     @property
-    def confidence(self) -> str:
-        """Always PROVISIONAL. A title is evidence about a document, not one."""
+    def classification_confidence(self) -> str:
+        """Always PROVISIONAL. A title is evidence about a document, not one.
+
+        Named in full because this evidence blob sits beside the *link*
+        confidence in ``material.entity_relations`` and ``event_sources``, and
+        the two answer different questions: this one is how sure we are of the
+        disclosure *type*, the other is how sure we are which security it is
+        about. A bare ``confidence`` key next to ``mapping_confidence`` reads as
+        a second opinion on the same thing, and it is not one.
+        """
 
         return "PROVISIONAL"
 
@@ -117,7 +125,7 @@ class Classification:
             "matched_pattern": self.matched_pattern,
             "is_correction": self.is_correction,
             "is_progress_update": self.is_progress_update,
-            "confidence": self.confidence,
+            "classification_confidence": self.classification_confidence,
         }
 
 

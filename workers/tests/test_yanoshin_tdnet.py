@@ -317,7 +317,7 @@ def test_an_unrecognised_title_is_typed_OTHER_and_still_carried():
 
 def test_every_classification_is_provisional_and_carries_its_evidence():
     result = classify("2026年８月期決算短信")
-    assert result.confidence == "PROVISIONAL"
+    assert result.classification_confidence == "PROVISIONAL"
     evidence = result.as_evidence()
     assert evidence["classifier_version"] == CLASSIFIER_VERSION
     assert evidence["matched_pattern"] == "決算短信"
