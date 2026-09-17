@@ -88,24 +88,33 @@ def _add_snapshot_row(
     security_confidence: str = "REGISTRY_ANCHORED",
     issuer_name: str | None = "Example Registrant Inc.",
     cik: str | None = "0000000001",
+    # The market was hardcoded to US, which made a JP fixture silently produce a
+    # US security - and any read that filters on market_code then correctly
+    # refused to find it. Parameterised with the old value as the default, so
+    # every existing caller is unchanged.
+    market_code: str = "US",
+    currency: str = "USD",
+    country: str = "US",
+    source_id: str = "nasdaq_trader_symbol_directory",
+    security_identity_source: str = "SEC_CIK",
 ) -> None:
     cur.execute(
         f"""
         insert into pipeline.master_snapshot ({SNAPSHOT_COLUMNS})
-        values (%s, 'nasdaq_trader_symbol_directory', %s, 'US', %s, %s, %s,
+        values (%s, %s, %s, %s, %s, %s, %s,
                 %s, %s, 'COMMON_STOCK', %s, null,
-                'USD', 'US', false, false, %s, %s,
+                %s, %s, false, false, %s, %s,
                 %s, %s, %s,
-                'SEC_CIK', %s, %s,
+                %s, %s, %s,
                 %s, %s, %s, %s, 'test-version',
                 %s, %s, 'identity-test')
         """,
         (
-            str(run_id), f"rec:{symbol}", exchange_id, symbol, symbol,
+            str(run_id), source_id, f"rec:{symbol}", market_code, exchange_id, symbol, symbol,
             name, name.lower(), segment,
-            status, cik,
+            currency, country, status, cik,
             issuer_source, issuer_key, issuer_confidence,
-            identity_key, security_confidence,
+            security_identity_source, identity_key, security_confidence,
             decision, reason, observed_at, observed_at,
             issuer_name, "sec_company_tickers" if issuer_name else None,
         ),

@@ -69,6 +69,11 @@ def _jp_listing_with_a_code_change(cur) -> dict:
             issuer_key=f"EDINET:E{uuid.uuid4().hex[:5].upper()}",
             issuer_source="EDINET_CODE",
             name="Example Japanese Issuer",
+            market_code="JP",
+            currency="JPY",
+            country="JP",
+            source_id="jpx_listed_companies",
+            security_identity_source="JPX_LOCAL_CODE",
         )
         _apply(cur, run)
 
