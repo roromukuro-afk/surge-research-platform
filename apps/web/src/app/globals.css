@@ -1,0 +1,248 @@
+/* A research tool, not a product page. Dense, legible, quiet. */
+
+:root {
+  --bg: #fbfaf8;
+  --surface: #ffffff;
+  --ink: #1b1a17;
+  --ink-soft: #5c5850;
+  --ink-faint: #8a857c;
+  --line: #e4e0d8;
+  --accent: #1f4f6b;
+  --warn: #8a5a12;
+  --stop: #8a2f2f;
+  --ok: #2f6b45;
+  --radius: 6px;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15161a;
+    --surface: #1c1e23;
+    --ink: #e9e6e0;
+    --ink-soft: #a9a49a;
+    --ink-faint: #7b766d;
+    --line: #2c2f36;
+    --accent: #7db6d6;
+    --warn: #d9a441;
+    --stop: #d97b7b;
+    --ok: #7bc49a;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+.shell {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 16px 64px;
+}
+
+header.masthead {
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 28px;
+  padding: 20px 0 14px;
+}
+
+.masthead h1 {
+  font-size: 17px;
+  font-weight: 620;
+  letter-spacing: -0.01em;
+  margin: 0 0 10px;
+}
+
+nav.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  font-size: 13.5px;
+}
+
+nav.tabs a {
+  color: var(--ink-soft);
+  padding-bottom: 2px;
+}
+nav.tabs a:hover {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+h2 {
+  font-size: 15.5px;
+  font-weight: 620;
+  margin: 32px 0 6px;
+}
+h2:first-of-type {
+  margin-top: 0;
+}
+
+p.lede {
+  color: var(--ink-soft);
+  margin: 0 0 18px;
+  max-width: 68ch;
+  font-size: 14px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 7px 11px;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+
+th {
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+td.num,
+th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--mono);
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+
+.card .label {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--ink-faint);
+}
+
+.card .value {
+  font-family: var(--mono);
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+.card .hint {
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin-top: 4px;
+}
+
+.notice {
+  border-left: 3px solid var(--warn);
+  background: var(--surface);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  padding: 11px 14px;
+  margin: 0 0 22px;
+  font-size: 13.5px;
+  color: var(--ink-soft);
+}
+.notice strong {
+  color: var(--ink);
+  font-weight: 620;
+}
+.notice.stop {
+  border-left-color: var(--stop);
+}
+
+.tag {
+  display: inline-block;
+  font-size: 11.5px;
+  font-family: var(--mono);
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.tag.ok {
+  color: var(--ok);
+  border-color: currentColor;
+}
+.tag.warn {
+  color: var(--warn);
+  border-color: currentColor;
+}
+.tag.stop {
+  color: var(--stop);
+  border-color: currentColor;
+}
+
+.empty {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  padding: 22px;
+  color: var(--ink-soft);
+  font-size: 13.5px;
+  background: var(--surface);
+}
+
+code,
+.mono {
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+footer.colophon {
+  margin-top: 48px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-size: 12.5px;
+  color: var(--ink-faint);
+}
+
+@media (max-width: 640px) {
+  body {
+    font-size: 14px;
+  }
+  table {
+    display: block;
+    overflow-x: auto;
+  }
+}
