@@ -28,6 +28,7 @@ from surge.outcome.models import (
     OutcomeError,
     OutcomeReport,
     PathResolution,
+    PendingReason,
     PrimaryOutcome,
     PrimaryVerdict,
     Session,
@@ -36,6 +37,11 @@ from surge.outcome.models import (
 from surge.outcome.path import resolve_session
 
 PRIMARY_HORIZON_SESSIONS = 20
+
+#: S0 through S20 inclusive. The horizon is complete only when all of them
+#: have been observed; HORIZON_EXPIRED means "neither line, by S20" and
+#: cannot be said before S20 has happened.
+SESSIONS_IN_HORIZON = PRIMARY_HORIZON_SESSIONS + 1
 
 _VERDICT_FOR = {
     PathResolution.TARGET_FIRST: PrimaryVerdict.TARGET_HIT,
@@ -98,21 +104,18 @@ def evaluate(
 
     suspected = suspect_unrecorded_action(path, actions)
     if suspected is not None:
-        # Refuse to finalise. A split scored as a failure is a wrong number that
-        # nobody would ever go back and question.
+        # Not finalised, and not given a verdict either. A split scored as a
+        # failure is a wrong number nobody would go back and question, and a
+        # CORPORATE_ACTION_SUSPECTED written as a *close reason* would close the
+        # episode on it. This stays pending until a person looks.
         return OutcomeReport(
             episode_id=episode_id,
             entry_reference_price=entry_reference_price,
             target_price=target_price,
             initial_failure_line=initial_failure_line,
             currency=currency,
-            primary=PrimaryOutcome(
-                verdict=PrimaryVerdict.CORPORATE_ACTION_SUSPECTED,
-                resolved_session_index=next(
-                    (s.index for s in path if s.trade_date == suspected.trade_date), None
-                ),
-                detail=str(suspected),
-            ),
+            primary=None,
+            pending_reason=PendingReason.CORPORATE_ACTION_SUSPECTED,
             counterfactual=CounterfactualOutcome(sessions_observed=len(path)),
             corporate_action_ids_applied=tuple(applied),
             notes=[*notes, "outcome not finalised: " + str(suspected)],
@@ -181,21 +184,27 @@ def evaluate(
             if decision.resolution is PathResolution.TARGET_FIRST:
                 later_hit_at = decision.at
 
-    if primary_resolution is None:
+    observed = len(path)
+    horizon_is_complete = observed >= SESSIONS_IN_HORIZON
+    pending_reason = None
+
+    if primary_resolution is None and not horizon_is_complete:
+        # Nothing has been reached and the window is not over. There is no
+        # verdict to give, and HORIZON_EXPIRED would be a finished-looking
+        # record of an unfinished episode.
+        primary = None
+        pending_reason = PendingReason.HORIZON_INCOMPLETE
+        notes.append(
+            f"{observed} of the {SESSIONS_IN_HORIZON} sessions (S0..S{PRIMARY_HORIZON_SESSIONS}) have "
+            "been observed and neither line has been reached. The outcome is pending, not expired"
+        )
+    elif primary_resolution is None:
         primary = PrimaryOutcome(
             verdict=PrimaryVerdict.HORIZON_EXPIRED,
             path_resolution=PathResolution.NEITHER_BY_HORIZON,
-            resolved_session_index=path[-1].index,
-            detail=(
-                f"neither line was reached by S{path[-1].index}'s close"
-                + ("" if len(path) > PRIMARY_HORIZON_SESSIONS else "; the horizon is not yet complete")
-            ),
+            resolved_session_index=PRIMARY_HORIZON_SESSIONS,
+            detail=f"neither line was reached by S{PRIMARY_HORIZON_SESSIONS}'s close",
         )
-        if len(path) <= PRIMARY_HORIZON_SESSIONS:
-            notes.append(
-                f"only {len(path)} session(s) observed of the 21 the horizon needs (S0..S20); this "
-                "is a provisional read, not an expired horizon"
-            )
     elif primary_resolution == "INVALIDATED":
         primary = PrimaryOutcome(
             verdict=PrimaryVerdict.THESIS_INVALIDATED,
@@ -207,6 +216,7 @@ def evaluate(
             ),
         )
     else:
+        # Reached. Final as soon as it happens - S20 is not waited for.
         primary = PrimaryOutcome(
             verdict=_VERDICT_FOR[primary_resolution.resolution],
             path_resolution=primary_resolution.resolution,
@@ -216,19 +226,32 @@ def evaluate(
             detail=primary_resolution.detail,
         )
 
+    # Three-valued. False only where the whole window was observed and the price
+    # was never seen to reach the target; None while that is still unknown.
+    if later_hit_index is not None:
+        later_target_hit = True
+    elif horizon_is_complete:
+        later_target_hit = False
+    else:
+        later_target_hit = None
+
     counterfactual = CounterfactualOutcome(
         path_resolution=(
             counterfactual_resolution.resolution if counterfactual_resolution else None
         ),
-        later_target_hit=later_hit_index is not None,
+        later_target_hit=later_target_hit,
         later_target_hit_at=later_hit_at,
         later_target_hit_session_index=later_hit_index,
         mfe=mfe,
         mae=mae,
-        sessions_observed=len(path),
+        sessions_observed=observed,
     )
 
-    if primary.verdict is PrimaryVerdict.THESIS_INVALIDATED and counterfactual.later_target_hit:
+    if (
+        primary is not None
+        and primary.verdict is PrimaryVerdict.THESIS_INVALIDATED
+        and counterfactual.later_target_hit
+    ):
         notes.append(
             "the price reached the target after the thesis was invalidated. That is recorded as "
             "counterfactual_later_target_hit and does not make the primary outcome a success "
@@ -242,6 +265,7 @@ def evaluate(
         initial_failure_line=initial_failure_line,
         currency=currency,
         primary=primary,
+        pending_reason=pending_reason,
         counterfactual=counterfactual,
         corporate_action_ids_applied=tuple(applied),
         engine_version=OUTCOME_ENGINE_VERSION,
@@ -291,4 +315,4 @@ def _touched_target(session: Session, target: Decimal, *, from_time) -> bool:
     return session.high is not None and session.high >= target
 
 
-__all__ = ["PRIMARY_HORIZON_SESSIONS", "evaluate"]
+__all__ = ["PRIMARY_HORIZON_SESSIONS", "SESSIONS_IN_HORIZON", "evaluate"]

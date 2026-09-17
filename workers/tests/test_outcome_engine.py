@@ -22,6 +22,7 @@ from surge.outcome.models import (
     IntradayBar,
     OutcomeError,
     PathResolution,
+    PendingReason,
     PrimaryVerdict,
     Session,
     SplitAction,
@@ -256,9 +257,13 @@ def test_neither_line_by_s20_expires_the_horizon():
     sessions = [_entry_session()] + [_session(i) for i in range(1, 21)]
     report = _run(sessions)
 
+    assert report.is_final
     assert report.primary.verdict is PrimaryVerdict.HORIZON_EXPIRED
     assert report.primary.path_resolution is PathResolution.NEITHER_BY_HORIZON
     assert report.counterfactual.sessions_observed == 21
+    # The whole window was observed, so "did not reach the target" is a finding
+    # rather than an absence of one.
+    assert report.counterfactual.later_target_hit is False
 
 
 def test_s21_is_not_waited_for():
@@ -270,14 +275,62 @@ def test_s21_is_not_waited_for():
 
     assert report.primary.verdict is PrimaryVerdict.HORIZON_EXPIRED
     assert report.counterfactual.sessions_observed == 21
-    assert not report.counterfactual.later_target_hit
+    assert report.counterfactual.later_target_hit is False
 
 
-def test_a_short_series_says_it_is_provisional_rather_than_expired():
+def test_a_short_series_is_pending_not_expired():
+    """HORIZON_EXPIRED means "neither line, by S20" and cannot be said before S20.
+
+    A placeholder verdict here would be a finished-looking record of an
+    unfinished episode - and an episode closes once, so the placeholder would
+    have closed it.
+    """
+
     report = _run([_entry_session(), _session(1), _session(2)])
 
-    assert report.primary.verdict is PrimaryVerdict.HORIZON_EXPIRED
-    assert any("provisional read" in note for note in report.notes)
+    assert not report.is_final
+    assert report.primary is None
+    assert report.pending_reason is PendingReason.HORIZON_INCOMPLETE
+
+
+def test_the_horizon_expires_only_once_all_twenty_one_sessions_are_observed():
+    for observed in (1, 20):
+        report = _run([_entry_session(), *[_session(i) for i in range(1, observed)]])
+        assert not report.is_final, f"{observed} session(s) should still be pending"
+
+    complete = _run([_entry_session(), *[_session(i) for i in range(1, 21)]])
+    assert complete.is_final
+    assert complete.primary.verdict is PrimaryVerdict.HORIZON_EXPIRED
+    assert complete.primary.resolved_session_index == 20
+
+
+@pytest.mark.parametrize(
+    ("session_index", "kwargs", "verdict"),
+    [
+        (3, {"h": 1250}, PrimaryVerdict.TARGET_HIT),
+        (4, {"low": 900}, PrimaryVerdict.INITIAL_FAILURE_HIT),
+    ],
+)
+def test_a_reached_line_is_final_without_waiting_for_s20(session_index, kwargs, verdict):
+    sessions = [_entry_session()] + [
+        _session(i, **(kwargs if i == session_index else {}))
+        for i in range(1, session_index + 1)
+    ]
+    report = _run(sessions)
+
+    assert report.is_final
+    assert report.primary.verdict is verdict
+    assert report.counterfactual.sessions_observed == session_index + 1
+
+
+def test_a_pending_outcome_cannot_be_stored():
+    from surge.outcome.db import outcome_params
+    from surge.outcome.models import OutcomeNotFinal
+
+    report = _run([_entry_session(), _session(1)])
+
+    with pytest.raises(OutcomeNotFinal, match="closes"):
+        outcome_params(report, closed_at=ENTRY_AT)
 
 
 # --------------------------------------------------- S0, and only after entry
@@ -306,8 +359,8 @@ def test_the_entry_session_ignores_what_happened_before_the_entry():
     entry = _session(0, o=1240, h=1300, low=990, c=1000, intraday=(before, after))
     report = _run([entry, _session(1)])
 
-    assert report.primary.verdict is not PrimaryVerdict.TARGET_HIT
-    assert not report.counterfactual.later_target_hit
+    assert report.primary is None  # pending, and certainly not a target hit
+    assert report.counterfactual.later_target_hit is None
 
 
 def test_the_entry_session_resolves_from_post_entry_trades():
@@ -363,6 +416,17 @@ def test_the_counterfactual_records_a_touch_even_when_the_order_is_unresolvable(
     assert report.counterfactual.later_target_hit
 
 
+def test_an_incomplete_window_leaves_later_target_hit_unknown():
+    """Three values, not two. False means the whole window was observed and the
+    target was not reached; None means we have not finished looking, and
+    collapsing it to False would turn that into a finding."""
+
+    pending = _run([_entry_session(), _session(1, low=900)])
+
+    assert pending.primary.verdict is PrimaryVerdict.INITIAL_FAILURE_HIT
+    assert pending.counterfactual.later_target_hit is None
+
+
 def test_mfe_and_mae_are_fractions_of_the_entry_price():
     sessions = [_entry_session(), _session(1, h=1100, low=950)]
     report = _run(sessions)
@@ -387,7 +451,8 @@ def test_a_split_alone_is_not_a_failure():
     ]
     report = _run(sessions, actions=[split])
 
-    assert report.primary.verdict is not PrimaryVerdict.INITIAL_FAILURE_HIT
+    assert report.primary is None  # nothing was reached; the window is not over
+    assert report.pending_reason is PendingReason.HORIZON_INCOMPLETE
     assert report.corporate_action_ids_applied == ("ca-1",)
 
 
@@ -416,12 +481,15 @@ def test_a_reverse_split_is_restated_the_same_way():
     ]
     report = _run(sessions, actions=[reverse])
 
-    assert report.primary.verdict is PrimaryVerdict.HORIZON_EXPIRED
+    assert report.primary is None
+    assert report.pending_reason is PendingReason.HORIZON_INCOMPLETE
 
 
 def test_a_split_shaped_gap_with_no_recorded_action_is_not_finalised():
-    """The outcome is left unresolved and looked at by a person. A split scored
-    as a failure is a wrong number nobody would go back and question."""
+    """Left pending for a person to look at. A split scored as a failure is a
+    wrong number nobody would go back and question - and writing
+    CORPORATE_ACTION_SUSPECTED as a *close reason* would close the episode on it.
+    """
 
     sessions = [
         _entry_session(),
@@ -430,8 +498,10 @@ def test_a_split_shaped_gap_with_no_recorded_action_is_not_finalised():
     ]
     report = _run(sessions)
 
-    assert report.primary.verdict is PrimaryVerdict.CORPORATE_ACTION_SUSPECTED
-    assert "no corporate action is recorded" in report.primary.detail
+    assert not report.is_final
+    assert report.primary is None
+    assert report.pending_reason is PendingReason.CORPORATE_ACTION_SUSPECTED
+    assert any("no corporate action is recorded" in note for note in report.notes)
 
 
 def test_a_dividend_sized_gap_is_not_mistaken_for_a_split():
@@ -441,7 +511,7 @@ def test_a_dividend_sized_gap_is_not_mistaken_for_a_split():
     sessions = [_entry_session(), _session(1, c=1000), _session(2, o=980, h=990, low=975, c=985)]
     report = _run(sessions)
 
-    assert report.primary.verdict is not PrimaryVerdict.CORPORATE_ACTION_SUSPECTED
+    assert report.pending_reason is not PendingReason.CORPORATE_ACTION_SUSPECTED
 
 
 def test_a_zero_ratio_action_is_refused_rather_than_worked_around():

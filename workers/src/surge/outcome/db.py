@@ -8,7 +8,7 @@ function makes a closed episode without an outcome unrepresentable.
 
 from __future__ import annotations
 
-from surge.outcome.models import OutcomeReport
+from surge.outcome.models import OutcomeNotFinal, OutcomeReport
 
 CLOSE_WITH_OUTCOME = """
 select prod.close_episode_with_outcome(
@@ -37,6 +37,13 @@ select prod.close_episode_with_outcome(
 
 
 def outcome_params(report: OutcomeReport, *, closed_at, label_version: str | None = None) -> dict:
+    if not report.is_final:
+        raise OutcomeNotFinal(
+            f"episode {report.episode_id} has no final outcome "
+            f"({report.pending_reason.value if report.pending_reason else 'undecided'}). Storing one "
+            "would close the episode on a verdict that has not been reached - and an episode closes "
+            "once"
+        )
     primary = report.primary
     counterfactual = report.counterfactual
     return {

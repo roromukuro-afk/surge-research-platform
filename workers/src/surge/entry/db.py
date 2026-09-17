@@ -4,6 +4,12 @@ Statements and parameter dicts; the caller owns the transaction. One entry
 decision commits once, so a prediction and the episode it belongs to are either
 both visible or neither is.
 
+There is deliberately no ``close_episode`` here. An episode closes through
+``surge.outcome.db.close_with_outcome``, which calls the one database function
+that closes it and records how it ended in the same breath - and the runtime no
+longer has UPDATE on ``prod.episodes`` at all, so a second path would simply
+fail.
+
 The guards live in the database rather than here, and this module is written on
 the assumption that they will fire. It does not pre-check the 3,000 yen limit or
 the target arithmetic before inserting, because a Python check that agrees with
@@ -16,7 +22,6 @@ from __future__ import annotations
 from surge.entry.models import (
     EntryAttempt,
     Episode,
-    EpisodeCloseReason,
     Prediction,
     TransitionKind,
     WatchState,
@@ -140,14 +145,6 @@ insert into prod.risk_line_updates (
   %(reason)s, %(effective_at)s
 )
 returning update_id
-"""
-
-CLOSE_EPISODE = """
-update prod.episodes
-   set status = 'CLOSED', closed_at = %(closed_at)s,
-       close_reason = %(close_reason)s::prod.episode_close_reason
- where episode_id = %(episode_id)s and status = 'OPEN'
-returning episode_id
 """
 
 SELECT_OPEN_EPISODE = """
@@ -353,12 +350,3 @@ def write_watch_transition(
             },
         )
         return int(cur.fetchone()[0])
-
-
-def close_episode(conn, *, episode_id: str, reason: EpisodeCloseReason, at) -> bool:
-    with conn.cursor() as cur:
-        cur.execute(
-            CLOSE_EPISODE,
-            {"episode_id": episode_id, "close_reason": reason.value, "closed_at": at},
-        )
-        return cur.fetchone() is not None

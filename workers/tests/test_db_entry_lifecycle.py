@@ -484,15 +484,117 @@ def test_a_risk_line_update_cannot_be_rewritten(conn):
             )
 
 
-def _close(cur, episode_id, reason="TARGET_HIT", at=None):
+def _close(cur, episode_id, reason="TARGET_HIT", at=None, **outcome):
+    """The only way an episode closes. A direct UPDATE is refused."""
+
+    params = {
+        "episode_id": episode_id,
+        "reason": reason,
+        "closed_at": at or ENTRY_AT + timedelta(days=5),
+        "sessions": 21 if reason == "HORIZON_EXPIRED" else 5,
+        "resolved": 20 if reason == "HORIZON_EXPIRED" else 3,
+        "later": False if reason == "HORIZON_EXPIRED" else None,
+    }
+    params.update(outcome)
     cur.execute(
         """
-        update prod.episodes
-           set status = 'CLOSED', closed_at = %s, close_reason = %s::prod.episode_close_reason
-         where episode_id = %s
+        select prod.close_episode_with_outcome(
+          %(episode_id)s::uuid, %(reason)s::prod.episode_close_reason, %(closed_at)s,
+          null, null, %(resolved)s, null, null, null, %(later)s, null, null, null, null,
+          %(sessions)s, '{}', 'JPY', 'outcome-engine-1.0.0', null, null
+        )
         """,
-        (at or ENTRY_AT + timedelta(days=5), reason, episode_id),
+        params,
     )
+
+
+def test_closing_directly_is_refused(conn):
+    """The gap this migration closes: the worker could take an episode
+    OPEN -> CLOSED and simply never write the outcome."""
+
+    with conn.cursor() as cur:
+        _, episode_id, _, _ = _entered(cur)
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="close_episode_with_outcome"):
+            cur.execute(
+                """
+                update prod.episodes
+                   set status = 'CLOSED', closed_at = %s, close_reason = 'TARGET_HIT'
+                 where episode_id = %s
+                """,
+                (ENTRY_AT, episode_id),
+            )
+
+
+def test_an_outcome_cannot_be_inserted_directly(conn):
+    with conn.cursor() as cur:
+        _, episode_id, _, _ = _entered(cur)
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="not inserted directly"):
+            cur.execute(
+                """
+                insert into prod.episode_outcomes (episode_id, primary_episode_outcome)
+                values (%s, 'TARGET_HIT')
+                """,
+                (episode_id,),
+            )
+
+
+def test_an_outcome_cannot_be_updated(conn):
+    with conn.cursor() as cur:
+        _, episode_id, _, _ = _entered(cur)
+        _close(cur, episode_id)
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="append-only"):
+            cur.execute(
+                "update prod.episode_outcomes set counterfactual_mfe = 9 where episode_id = %s",
+                (episode_id,),
+            )
+
+
+def test_a_horizon_expiry_before_s20_is_refused_by_the_database(conn):
+    """HORIZON_EXPIRED is a statement about S20. A writer that has seen eight
+    sessions has not seen S20."""
+
+    with conn.cursor() as cur:
+        _, episode_id, _, _ = _entered(cur)
+
+        with pytest.raises(psycopg2.errors.CheckViolation, match="expiry_needs_the_whole_horizon"):
+            _close(cur, episode_id, reason="HORIZON_EXPIRED", sessions=8, resolved=8, later=False)
+
+
+def test_a_horizon_expiry_cannot_claim_the_target_was_reached(conn):
+    with conn.cursor() as cur:
+        _, episode_id, _, _ = _entered(cur)
+
+        with pytest.raises(psycopg2.errors.CheckViolation, match="expiry_means_target_not_reached"):
+            _close(cur, episode_id, reason="HORIZON_EXPIRED", later=True)
+
+
+def test_a_horizon_expiry_with_the_whole_window_is_accepted(conn):
+    with conn.cursor() as cur:
+        _, episode_id, _, _ = _entered(cur)
+        _close(cur, episode_id, reason="HORIZON_EXPIRED")
+
+        cur.execute(
+            "select close_reason::text from prod.episodes where episode_id = %s", (episode_id,)
+        )
+        assert cur.fetchone()[0] == "HORIZON_EXPIRED"
+
+
+def test_an_unknown_later_target_hit_stays_null(conn):
+    """Three-valued. Defaulting NULL to false would turn "we have not finished
+    looking" into "it did not happen"."""
+
+    with conn.cursor() as cur:
+        _, episode_id, _, _ = _entered(cur)
+        _close(cur, episode_id, reason="INITIAL_FAILURE_HIT", later=None)
+
+        cur.execute(
+            "select counterfactual_later_target_hit from prod.episode_outcomes where episode_id = %s",
+            (episode_id,),
+        )
+        assert cur.fetchone()[0] is None
 
 
 def test_an_episode_can_be_closed_once(conn):

@@ -73,8 +73,29 @@ class PrimaryVerdict(StrEnum):
     CORPORATE_ACTION_SUSPECTED = "CORPORATE_ACTION_SUSPECTED"
 
 
+class PendingReason(StrEnum):
+    """Why an episode has no outcome yet.
+
+    Pending is not a verdict and never becomes one by waiting to be read. The
+    two reasons are different: one resolves by observing more sessions, the
+    other by a person looking at a corporate action.
+    """
+
+    #: Fewer than the 21 sessions S0..S20 have been observed and nothing has
+    #: been reached. HORIZON_EXPIRED means "neither, by S20" and cannot be said
+    #: before S20.
+    HORIZON_INCOMPLETE = "HORIZON_INCOMPLETE"
+    #: A price discontinuity consistent with a split, on a date with no recorded
+    #: action. The spec says do not finalise, so nothing is finalised.
+    CORPORATE_ACTION_SUSPECTED = "CORPORATE_ACTION_SUSPECTED"
+
+
 class OutcomeError(RuntimeError):
     """A condition under which no outcome may be recorded."""
+
+
+class OutcomeNotFinal(OutcomeError):
+    """An attempt to store or act on an outcome that has not been decided."""
 
 
 @dataclass(frozen=True)
@@ -180,7 +201,12 @@ class CounterfactualOutcome:
     """Research only. Never the answer to "was this prediction right"."""
 
     path_resolution: PathResolution | None = None
-    later_target_hit: bool = False
+    #: Three-valued on purpose. True: the price was seen to reach the target.
+    #: False: the full 21 sessions were observed and it did not. None: we do not
+    #: know, because the window is incomplete or the path was unresolvable.
+    #: Collapsing None into False would turn "we have not looked yet" into "it
+    #: did not happen", which is the more flattering of the two and the wrong one.
+    later_target_hit: bool | None = None
     later_target_hit_at: datetime | None = None
     later_target_hit_session_index: int | None = None
     #: Maximum favourable / adverse excursion as a fraction of the entry price,
@@ -197,11 +223,21 @@ class OutcomeReport:
     target_price: Decimal
     initial_failure_line: Decimal
     currency: str
-    primary: PrimaryOutcome
+    #: None while the episode is still pending. There is no placeholder verdict:
+    #: writing HORIZON_EXPIRED at S8 because nothing had happened yet would be a
+    #: finished-looking record of an unfinished episode.
+    primary: PrimaryOutcome | None
     counterfactual: CounterfactualOutcome
+    pending_reason: PendingReason | None = None
     corporate_action_ids_applied: tuple[str, ...] = ()
     engine_version: str = OUTCOME_ENGINE_VERSION
     notes: list[str] = field(default_factory=list)
+
+    @property
+    def is_final(self) -> bool:
+        """Whether this outcome may be stored and an episode closed on it."""
+
+        return self.primary is not None and self.pending_reason is None
 
     @property
     def closes_the_episode(self) -> bool:
@@ -209,15 +245,25 @@ class OutcomeReport:
 
         An unresolved path does end it - the episode is finished with - but it is
         neither a success nor a failure, and the counts are kept separately so
-        that "we could not tell" never quietly becomes one or the other.
+        that "we could not tell" never quietly becomes one or the other. A
+        *pending* episode is not finished with and does not close.
         """
 
-        return True
+        return self.is_final
 
     @property
     def summary(self) -> dict:
+        if self.primary is None:
+            return {
+                "primary": None,
+                "is_final": False,
+                "pending_reason": self.pending_reason.value if self.pending_reason else None,
+                "later_target_hit": self.counterfactual.later_target_hit,
+                "sessions_observed": self.counterfactual.sessions_observed,
+            }
         return {
             "primary": self.primary.verdict.value,
+            "is_final": True,
             "primary_path": self.primary.path_resolution.value
             if self.primary.path_resolution
             else None,
