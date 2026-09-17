@@ -90,6 +90,14 @@
 | D-89 | availability_basis | `OBSERVED_NOW` / `PROVIDER_PUBLISHED_TIMESTAMP` / `DOCUMENTED_SCHEDULE` / `HISTORICAL_REPLAY_ASSUMPTION`。取り込みは**常に `OBSERVED_NOW`**（今日取った10年前の bar を、10年前に観測したことにしない）。`source_published_at` は provider の主張として別に保存し、別の availability model を使う Replay は basis を明示して宣言する | 2026-09-17 / 監査 Phase 2.1 (10) | `20260917100100` |
 | D-90 | project schema の一覧を1箇所にする | PUBLIC EXECUTE 剥奪の対象スキーマを3箇所に書いていたため、`market` 追加時に全関数が public 実行可能なまま残った（CI が検出）。`pipeline.project_schemas()` を正本とし、event trigger・sweep・テストがこれを読む | 2026-09-17 / Phase 2.1 実装中に発見 | `20260917100300` |
 | D-91 | J-Quants `ProdCat` | 2026-05-26 に JPX が追加した商品区分（011 内国株券 / 012 優先出資証券 / 013 REIT / 014 ETF / 021-024 外国）。Phase 1 は種別を銘柄名から推定していたが、これはレジストリが種別を宣言している。**ただし普通株と優先株式・種類株式は両方 011 なので銘柄名判定を置き換えない**。突き合わせて差分を監査する | 2026-09-17 / Phase 2.1 仕様確定時に発見 | [phase-2-1-provider-api-specs.md](research/phase-2-1-provider-api-specs.md) §1-3 |
+| D-94 | Zero-Cost Core を構造で担保する | `market.providers.cost_class` と `market.provider_role_bindings` で表現。paid provider は削除せず `OPTIONAL_PAID` + `enabled=false` + `priority=9` で保持し、`market.recurring_cost` が 0 を返すことをテストで検査する。役割が埋まっていないことは `market.unfilled_roles` で可視化し、沈黙させない | 2026-09-17 / 方針変更 Zero-Cost Core | `20260917110300` |
+| D-95 | Provider 評価結果をデータとして残す | 却下した候補と**その決め手になった条項**を `market.provider_evaluations` に記録する。「高かった」と「規約が保存を禁じている」では次の一手が違うため、理由まで残す。検証で結論が逆転した2件は `reversed_by_verification` で明示 | 2026-09-17 / 同上 | `20260917120000` / [zero-cost-provider-evaluation.md](research/zero-cost-provider-evaluation.md) |
+| D-96 | 比較可能系列は自前で作る | Vendor の adjusted 系列は分割のたびに遡って再計算されるため as-of 時点の事実ではない。raw 価格と**as-of 時点で既知の**コーポレートアクションだけから `SPLIT_ADJUSTED_TO_AS_OF` を構築する。読めない分割が1件でもあれば、その銘柄の feature は**一切生成しない** | 2026-09-17 / Phase 2 実装 | `workers/src/surge/market/series.py` |
+| D-97 | Vendor が調整済みの volume の扱い | provider が自分の取得時点へ調整した volume は、as-of 以降に分割があると as-of 基準へ戻せない（未来情報が要る）。その場合 volume を**落として落としたと記録する**。推測で埋めない | 2026-09-17 / 同上 | 同上 |
+| D-98 | Stage 1 は数値を正本にする | `screening.features_daily` に約60の数値 feature を保存し、Route は**発火した測定値を `route_evidence` に残す**。pattern label だけにしない。Route は OR 型で `discovery_routes[]` に全て残す | 2026-09-17 / Phase 3 実装 | `20260917110200` |
+| D-99 | Route F の turnover 閾値は市場別 | turnover は当該証券の通貨建ての金額なので、単一閾値では米国銘柄が日本銘柄の100分の1に見える。`max_turnover_avg_20d_jpy` と `max_turnover_avg_20d_usd` を分ける。turnover を供給しない provider では Route F は**発火しない**（coverage gap として記録） | 2026-09-17 / 同上 | 同上 |
+| D-100 | 空の1日は失敗として扱う | 休場日と障害は同じ「0行」に見える。取得ジョブは空を `EMPTY_RESULT` の失敗として返し、取引カレンダーを知る呼び出し側が判断する。検証済みカレンダーが無いうちに休場日表を推測で作らない | 2026-09-17 / Phase 2 実装 | `workers/src/surge/market/ingest.py` |
+| D-101 | 3000円フィルタの staleness 境界 | `price-filter-1.0.0`: 閾値3000円、価格は as-of から5暦日以内、FX は 345,600秒（4日）以内。超過は `STALE_PRICE` / `STALE_FX` として**独立の結果**にする。境界は「止まったフィードを捕まえる」ためのもので、静かな銘柄を排除するためではない。変更は新 rule_version | 2026-09-17 / Phase 2 実装 | `20260917110100` |
 
 ---
 
@@ -136,6 +144,10 @@
 | **D-78** | **技術** | **EOD 公表時刻が公式に明示されない Provider（EODHD の US EOD、EODHD FX）について、`available_at` をどう決めるか** | Phase 2 の取得実装前 | 自分の取得時刻（`received_at`）を `available_at` とし、Provider の公表時刻を推定値として混ぜない。1-7 の「`source_published_at` を利用可能時刻の代わりにしない」と同じ原則 |
 | **D-92** | **規約/技術** | **EODHD `/api/id-mapping` のレスポンス形**。散文ページは `{meta, data[{symbol,isin,figi,lei,cusip,cik}], links}`、公式 OpenAPI は裸の配列 `[{Code,Exchange,Name,ISIN,FIGI,LEI,CUSIP,CIK}]` と**両立しない**。実レスポンスで決着させるまで使わない | 使用する前（Phase 2.2 以降） | どちらでもない側に実装すると全列が黙って null になる。CUSIP を返す点でも CGS の間接エンドユーザー条項に触れるため、取り込み時に cusip/isin を破棄する運用が要る |
 | **D-93** | **技術** | **J-Quants `ProdCat` と Phase 1 の銘柄名判定の突き合わせ結果をどう扱うか**（不一致銘柄を UNRESOLVED にするか、ProdCat を優先するか） | Phase 2.2 の JP universe 再構築前 | Claude Code は判断しない。ProdCat は普通株と優先株式を区別しないため、単純な置き換えはできない |
+| **D-102** | **規約（blocker）** | **JPX 統計ファイルの「二次利用」の解釈。** 公表された統計ファイルとその値を、本人だけが閲覧する私的DBに保持し自分の投資判断にのみ使うことが二次利用に当たるか。**JP の当日EOD価格を0円で得る唯一の経路**で、可否がここで決まる | JP 価格取得の着手前 | 東京証券取引所 株式部データサービス室へ書面照会。robots.txt は全許可、規約は二次利用を未定義のまま禁止しており、公式文書だけでは決着しない |
+| **D-103** | **規約/技術** | **Alpaca Basic を US EOD に使えるか。** (a) 規約の「intended for United States residents only」と非米国口座の販売が自社文書内で矛盾している、(b) 無料枠が full SIP を返すか IEX のみかがドキュメント内で矛盾している | US 価格取得の着手前 | (b) は無料APIキーで `feed=sip` を1回叩けば確定する。(a) は Alpaca への書面確認が要る。どちらも口座保有者本人しかできない |
+| **D-104** | **規約** | **GitHub Actions を日次取得の実行環境にしない判断の確認。** Actions 追加規約は GitHub-hosted runner の用途を当該リポジトリのソフトウェアの production/testing/deployment/publication に限定し、違反時の措置はリポジトリ無効化・アカウント停止 | 日次運用の開始前 | Claude Code の判断: **使わない**。代替はローカル実行 / Oracle Always Free (A1 2 OCPU・回収リスクあり) / GitHub への書面確認。CI（テスト）としての利用は規約どおりの用途で問題ない |
+| **D-105** | **費用/技術** | **Cloudflare R2 のカード登録。** バケット作成前に subscription checkout が必須で、超過は自動停止せず課金される。支払い失敗時はバケット利用不可、30日でデータ削除の可能性 | R2 バケット作成前 | 無料枠内に留めるのは**運用ポリシー**であって Cloudflare は止めてくれない。lifecycle と保持期間で 10 GB-月を守る設計が前提 |
 | **D-06b** | 費用/技術 | **日本株の場中 ENTRY 判断・Watch 監視用リアルタイム Provider** | **Phase 8 までの blocker（Phase 1 の blocker ではない）** | 公式情報のみで候補を調査 |
 | D-08a | 投資ロジック | Stage 2 で取得する分足の期間 | Phase 6 前 | v5.1 を確認してから |
 | D-11 | 費用/技術 | LLM プロバイダ・モデル・月額上限 | Phase 5〜7 前 | — |
