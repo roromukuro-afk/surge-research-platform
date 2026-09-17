@@ -6,7 +6,20 @@ The registry and the machine-readable verdicts live in `news.sources` and `news.
 
 ---
 
-## The headline is a loss: TDnet cannot be collected
+## Superseded in part, 2026-09-17
+
+The conclusion below — that Japanese timely disclosure is simply unavailable — was **withdrawn the same day**. Everything it says about TDnet remains true: the host disallows crawling, the pages prohibit reproduction, and the paid API is priced out of reach. The error was the step after that. **The document being unreachable does not make the fact of the disclosure unreachable**, and a third-party service publishes an index of exactly that.
+
+See [yanoshin-tdnet-api.md](yanoshin-tdnet-api.md) and D-122 / D-125. The split that resolves it:
+
+| | Where it comes from | May we keep it? |
+|---|---|---|
+| Who disclosed what, when, under which code | Yanoshin TDnet WebAPI | **Yes** |
+| The disclosure document itself | TDnet | **No** — unchanged |
+
+So Japan is no longer blind to timely disclosure; it is blind to the *contents* of a timely disclosure until a storable source (the issuer's own IR, EDINET) confirms it. That is a much smaller gap, and it is the one the sections below should now be read against.
+
+## The original finding: TDnet itself cannot be collected
 
 TDnet — 適時開示情報閲覧サービス, the timely-disclosure service — is the single most market-moving Japanese source there is, and it is closed to us on two independent grounds.
 
@@ -27,11 +40,13 @@ Writing the rows and PDFs into a private database is 複製 in the sense of the 
 
 **The paid route is priced for institutions.** TDnet API: 基本料金 月額70,000円 plus an information tier from 月額100,000円. TDnetDBS: 月額33,400円 per ID. Both sit outside the zero-cost core by two orders of magnitude.
 
-### Why EDINET is not a substitute
+### Why EDINET is not a substitute for the disclosure itself
 
 EDINET carries **statutory periodic filings** — 有価証券報告書, 四半期報告書, 臨時報告書. TDnet carries **the announcement that moves the price on the day**: earnings revisions, guidance changes, M&A, capital moves. They overlap only at the edges.
 
-So the Japanese material side is structurally weaker than the US side, and that is a coverage gap rather than a bug. The US has SEC EDGAR, whose 8-K is the near-equivalent of a timely disclosure and whose licence is the most permissive of the whole set. Japan has no free equivalent.
+So the Japanese material side is weaker than the US side, where EDGAR's 8-K is the near-equivalent of a timely disclosure and the licence is the most permissive of the whole set.
+
+**How much weaker changed on the same day.** With the Yanoshin index, Japan gets the *signal* — an issuer disclosed something of a known type at a known minute — within minutes, and the *contents* only once a storable source confirms them. The remaining gap is contents, not existence.
 
 ---
 
