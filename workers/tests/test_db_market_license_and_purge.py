@@ -495,8 +495,13 @@ def test_the_ingestion_worker_cannot_purge():
         worker.close()
 
 
-def test_no_market_function_is_executable_by_public(conn):
+def test_the_market_schema_is_covered_by_the_public_execute_guard(conn):
+    """Adding a schema is how this guard gets bypassed, so assert the list itself."""
+
     with conn.cursor() as cur:
+        cur.execute("select 'market' = any (pipeline.project_schemas())")
+        assert cur.fetchone()[0] is True
+
         cur.execute(
             """
             select p.proname

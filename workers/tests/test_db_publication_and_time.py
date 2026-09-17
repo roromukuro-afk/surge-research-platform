@@ -253,19 +253,41 @@ def test_as_of_does_not_return_a_change_before_it_takes_effect(conn):
 
 # ----------------------------------------------------- privilege boundaries
 def test_no_function_in_the_project_schemas_is_executable_by_public(conn):
-    """The invariant, whatever mechanism happens to enforce it."""
+    """The invariant, whatever mechanism happens to enforce it.
+
+    The schema list comes from pipeline.project_schemas() rather than from a
+    literal here: when this test named the schemas itself, adding the market
+    schema left every function in it public and the test still passed.
+    """
 
     with conn.cursor() as cur:
         cur.execute(
             """
             select n.nspname || '.' || p.proname
             from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-            where n.nspname in ('ref', 'pipeline', 'universe', 'prod', 'research')
+            where n.nspname = any (pipeline.project_schemas())
               and has_function_privilege('public', p.oid, 'EXECUTE')
             order by 1
             """
         )
         assert cur.fetchall() == []
+
+
+def test_every_schema_this_project_owns_is_on_the_guarded_list(conn):
+    """A schema missing from the list is a schema with no privilege guard."""
+
+    with conn.cursor() as cur:
+        cur.execute("select pipeline.project_schemas()")
+        guarded = set(cur.fetchone()[0])
+
+        cur.execute(
+            """
+            select nspname from pg_namespace
+            where nspname in ('ref', 'pipeline', 'universe', 'prod', 'research', 'market')
+            """
+        )
+        owned = {row[0] for row in cur.fetchall()}
+        assert owned <= guarded, f"unguarded project schemas: {sorted(owned - guarded)}"
 
 
 def test_a_new_function_is_not_executable_by_public(conn):
