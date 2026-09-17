@@ -10,3 +10,12 @@
 # value. The file has never held a real value, and the plan defaults have since
 # been moved into comments so the pattern cannot recur.
 f742b3c92c23aadda163a13d26657c1b8a2d3c46:.env.example:generic-api-key:40
+
+# 51e3df5 .env.example:62 - the same cross-line match, on a new key. gitleaks
+# read the EMPTY "SURGE_BLS_API_KEY=" and, skipping the blank line after it,
+# took "SURGE_CENSUS_API_KEY" from two lines down as its value. The file has
+# never held a real value. The working tree no longer has the pattern - every
+# empty assignment there is now followed immediately by a comment - but gitleaks
+# scans history, and that commit is already pushed, so the finding can only be
+# retired by fingerprint.
+51e3df5afe08e889e83328be315b07abd65d3c06:.env.example:generic-api-key:62
