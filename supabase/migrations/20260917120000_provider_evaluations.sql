@@ -177,7 +177,7 @@ create or replace view market.zero_cost_status as
          count(*) filter (where verdict = 'QUALIFIES') as qualifies,
          count(*) filter (where verdict = 'QUALIFIES_WITH_CAVEAT') as qualifies_with_caveat,
          count(*) filter (where verdict = 'UNRESOLVED') as unresolved,
-         count(*) filter (where verdict like 'REJECTED%') as rejected,
+         count(*) filter (where verdict::text like 'REJECTED%') as rejected,
          count(*) as evaluated
   from market.provider_evaluations
   where role is not null
