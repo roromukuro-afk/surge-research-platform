@@ -353,3 +353,124 @@ export type OutcomeCountRow = {
   worst_excursion: string | null;
   best_excursion: string | null;
 };
+
+/** Mirrors `ui.teacher_data_summary`. */
+export type TeacherSummaryRow = {
+  observation_kind: string;
+  observations: string;
+  reached_target: string;
+  labelled: string;
+  approved: string;
+};
+
+/**
+ * Mirrors `ui.miss_breakdown`. Three findings, kept apart: only
+ * ACTIONABLE_FALSE_NEGATIVE is the prediction model's.
+ */
+export type MissBreakdownRow = {
+  miss_kind: string;
+  whose_failure: string | null;
+  episodes: string;
+  mean_confidence: string | null;
+  approved: string;
+};
+
+/** Mirrors `ui.route_performance`. */
+export type RoutePerformanceRow = {
+  route: string;
+  route_kind: string;
+  episodes: string;
+  reached_target: string;
+  hit_failure: string;
+  /** Counted, not dropped. Folding these in would flatter every route. */
+  unresolved: string;
+  mean_mfe: string | null;
+  mean_mae: string | null;
+};
+
+/** Mirrors `ui.material_driver_performance`. */
+export type MaterialDriverRow = {
+  driver: string;
+  episodes: string;
+  reached_target: string;
+  hit_failure: string;
+  unresolved: string;
+};
+
+/** Mirrors `ui.concept_performance`. */
+export type ConceptPerformanceRow = {
+  concept: string;
+  episodes: string;
+  reached_target: string;
+  hit_failure: string;
+  mean_mfe: string | null;
+};
+
+/** Mirrors `ui.llm_judgement_audit`. */
+export type LlmAuditRow = {
+  as_of_date: string;
+  provider_id: string;
+  provider_kind: string | null;
+  model_id: string | null;
+  state: string;
+  validation_status: string;
+  answers: string;
+  from_a_stand_in: string;
+};
+
+/** Mirrors `ui.model_version_comparison`. */
+export type ModelVersionRow = {
+  model_version: string;
+  description: string;
+  trained_at: string | null;
+  trained_on_live_verified_labels: boolean;
+  dataset_name: string | null;
+  labels_admitted: number | null;
+  fold_count: number | null;
+  metric_name: string | null;
+  mean_score: string | null;
+  folds_without_a_score: string;
+  calibration_bins: string;
+};
+
+/** Mirrors `ui.walk_forward_results`. */
+export type WalkForwardRow = {
+  run_id: string;
+  model_version: string;
+  metric_name: string;
+  purge_days: number;
+  fold_index: number;
+  train_start: string;
+  train_end: string;
+  test_start: string;
+  test_end: string;
+  labels_in_train: number;
+  labels_in_test: number;
+  /** Null where a fold had too few test labels to mean anything. */
+  score: string | null;
+};
+
+/** Mirrors `ui.calibration_diagnostics`. */
+export type CalibrationRow = {
+  run_id: string;
+  model_version: string;
+  bin_lower: string;
+  bin_upper: string;
+  predicted_mean: string | null;
+  observed_rate: string | null;
+  gap: string | null;
+  sample_count: number;
+};
+
+/** Mirrors `ui.promotion_audit`. Refusals included, and they are the point. */
+export type PromotionAuditRow = {
+  attempt_id: string;
+  attempted_at: string;
+  challenger_version: string;
+  champion_version: string | null;
+  promoted: boolean;
+  refusal_reasons: string[];
+  gate_version: string;
+  human_approved_by: string | null;
+  mean_score: string | null;
+};
