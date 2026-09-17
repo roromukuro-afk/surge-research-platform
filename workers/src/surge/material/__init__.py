@@ -1,0 +1,73 @@
+"""Phase 5: material events, entity linking, relevance and Material Routes."""
+
+from surge.material.merge import (
+    MERGE_VERSION,
+    DocumentFacts,
+    event_key,
+    merge_candidates,
+    merge_documents,
+    normalise_title,
+)
+from surge.material.models import (
+    DIRECT_RELATIONS,
+    MACRO_RELATIONS,
+    EntityRelation,
+    EventSecurityFeatures,
+    EventSource,
+    LinkConfidence,
+    MarketRelevance,
+    MaterialError,
+    MaterialEvent,
+    RelationType,
+    SourceRole,
+    strongest,
+)
+from surge.material.relevance import (
+    RELEVANCE_RULESET_VERSION,
+    RelevanceDecision,
+    RelevanceSignals,
+    build_signals,
+    decide,
+)
+from surge.material.routes import (
+    MATERIAL_ROUTE_VERSION,
+    ROUTE_ACCEPTS,
+    THRESHOLDS,
+    MaterialCandidate,
+    build_candidate,
+    evaluate_routes,
+    route_summary,
+)
+
+__all__ = [
+    "DIRECT_RELATIONS",
+    "MACRO_RELATIONS",
+    "MATERIAL_ROUTE_VERSION",
+    "MERGE_VERSION",
+    "RELEVANCE_RULESET_VERSION",
+    "ROUTE_ACCEPTS",
+    "THRESHOLDS",
+    "DocumentFacts",
+    "EntityRelation",
+    "EventSecurityFeatures",
+    "EventSource",
+    "LinkConfidence",
+    "MarketRelevance",
+    "MaterialCandidate",
+    "MaterialError",
+    "MaterialEvent",
+    "RelationType",
+    "RelevanceDecision",
+    "RelevanceSignals",
+    "SourceRole",
+    "build_candidate",
+    "build_signals",
+    "decide",
+    "evaluate_routes",
+    "event_key",
+    "merge_candidates",
+    "merge_documents",
+    "normalise_title",
+    "route_summary",
+    "strongest",
+]
