@@ -119,6 +119,12 @@ DATASETS: dict[str, Dataset] = {
             "USDJPY.FOREX daily bars. Secondary FX source, used to cross-check the ECB cross.",
         ),
         Dataset(
+            "ALPACA_US_BARS_SIP", "alpaca_historical_sip", "Basic (no cost)", "application/json", "json",
+            "US session bars from the consolidated tape (feed=sip), readable without a subscription "
+            "only for windows ending at least 15 minutes ago. Whether these may be kept in a private "
+            "research database is NOT_SPECIFIED by the terms, which is not the same as permitted.",
+        ),
+        Dataset(
             "ECB_EXR_DAILY", "ecb", "public", "text/csv", "csv",
             "The euro reference rates for USD and JPY, from which USD/JPY is derived.",
         ),

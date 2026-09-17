@@ -28,6 +28,35 @@ class PriceBasis(StrEnum):
     PROVIDER_UNSPECIFIED = "PROVIDER_UNSPECIFIED"
 
 
+class VenueBasis(StrEnum):
+    """Which venues a bar's numbers were assembled from.
+
+    This is not a provenance nicety. Outcome resolution decides whether +20% was
+    reached by reading the session high, and a high computed from one exchange is
+    not the session high. Alpaca's own documentation gives the scale: on one day
+    in 2023, AAPL printed 12,630 trades on IEX against 535,134 across the
+    consolidated tape. A single-venue high would miss target hits systematically
+    and in the flattering direction - the misses would look like securities that
+    never rose.
+
+    So the basis travels with the bar, and the outcome path refuses anything that
+    is not whole-market rather than trusting the caller to remember.
+    """
+
+    CONSOLIDATED_SIP = "CONSOLIDATED_SIP"
+    SINGLE_VENUE_IEX = "SINGLE_VENUE_IEX"
+    SINGLE_VENUE_OTHER = "SINGLE_VENUE_OTHER"
+    PROVIDER_UNSPECIFIED = "PROVIDER_UNSPECIFIED"
+
+    @property
+    def is_whole_market(self) -> bool:
+        return self is VenueBasis.CONSOLIDATED_SIP
+
+
+class VenueBasisError(RuntimeError):
+    """Raised rather than resolving an outcome against part of a market."""
+
+
 class CorporateActionType(StrEnum):
     SPLIT = "SPLIT"
     REVERSE_SPLIT = "REVERSE_SPLIT"
@@ -70,7 +99,13 @@ class CanonicalBar:
     close: Decimal | None = None
     volume: Decimal | None = None
     turnover: Decimal | None = None
+    #: How many trades made up the bar, where the provider reports it. A bar
+    #: with a plausible high and four trades behind it is a different object
+    #: from the same high with four thousand.
+    trade_count: int | None = None
+    vwap: Decimal | None = None
 
+    venue_basis: VenueBasis = VenueBasis.PROVIDER_UNSPECIFIED
     open_basis: PriceBasis = PriceBasis.PROVIDER_UNSPECIFIED
     high_basis: PriceBasis = PriceBasis.PROVIDER_UNSPECIFIED
     low_basis: PriceBasis = PriceBasis.PROVIDER_UNSPECIFIED
@@ -107,6 +142,43 @@ class CanonicalBar:
             basis is PriceBasis.RAW
             for basis in (self.open_basis, self.high_basis, self.low_basis, self.close_basis)
         )
+
+    @property
+    def may_resolve_an_outcome(self) -> bool:
+        """Whether this bar's high and low are the session's.
+
+        Two conditions, and both are about the same thing: the numbers have to
+        be what actually traded, everywhere. Raw because a split-adjusted high
+        is yesterday's share; consolidated because a single venue's high is not
+        the market's.
+        """
+
+        return self.is_ohlc_raw() and self.venue_basis.is_whole_market
+
+
+def assert_may_resolve_an_outcome(bar: CanonicalBar) -> None:
+    """Refuse to hand a partial-market bar to the outcome engine.
+
+    Stated as a guard rather than a convention because the failure is silent:
+    a missed target hit looks exactly like a security that did not rise, and
+    nothing downstream would ever flag it.
+    """
+
+    if bar.venue_basis.is_whole_market and bar.is_ohlc_raw():
+        return
+    reasons = []
+    if not bar.venue_basis.is_whole_market:
+        reasons.append(
+            f"venue basis is {bar.venue_basis.value}, so the high and low are one venue's rather "
+            "than the session's"
+        )
+    if not bar.is_ohlc_raw():
+        reasons.append("the OHLC columns are not all RAW, so they are not what traded")
+    raise VenueBasisError(
+        f"{bar.provider_id}/{bar.native_symbol} {bar.trade_date}: "
+        + "; ".join(reasons)
+        + ". Resolving a +20% path against this would lose target hits silently"
+    )
 
 
 @dataclass(frozen=True)
