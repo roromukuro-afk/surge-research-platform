@@ -222,51 +222,51 @@ begin
   -- IS DISTINCT FROM throughout: a NULL on one side and a value on the other is
   -- a mismatch, and two NULLs are not.
   if a.security_id is distinct from new.security_id then
-    mismatched := mismatched || 'security_id';
+    mismatched := array_append(mismatched, 'security_id');
   end if;
   if a.thesis_key is distinct from new.thesis_key then
-    mismatched := mismatched || 'thesis_key';
+    mismatched := array_append(mismatched, 'thesis_key');
   end if;
   if a.analysis_kind is distinct from new.analysis_kind then
-    mismatched := mismatched || 'analysis_kind';
+    mismatched := array_append(mismatched, 'analysis_kind');
   end if;
   if a.decision_price is distinct from new.decision_price then
-    mismatched := mismatched || 'decision_price';
+    mismatched := array_append(mismatched, 'decision_price');
   end if;
   if a.decision_price_observed_at is distinct from new.decision_price_observed_at then
-    mismatched := mismatched || 'decision_price_observed_at';
+    mismatched := array_append(mismatched, 'decision_price_observed_at');
   end if;
   if a.decision_price_jpy is distinct from new.decision_price_jpy then
-    mismatched := mismatched || 'decision_price_jpy';
+    mismatched := array_append(mismatched, 'decision_price_jpy');
   end if;
   if a.entry_reference_price is distinct from new.entry_reference_price then
-    mismatched := mismatched || 'entry_reference_price';
+    mismatched := array_append(mismatched, 'entry_reference_price');
   end if;
   if a.entry_price_observed_at is distinct from new.entry_price_observed_at then
-    mismatched := mismatched || 'entry_price_observed_at';
+    mismatched := array_append(mismatched, 'entry_price_observed_at');
   end if;
   if a.entry_price_jpy is distinct from new.entry_price_jpy then
-    mismatched := mismatched || 'entry_price_jpy';
+    mismatched := array_append(mismatched, 'entry_price_jpy');
   end if;
   if a.entry_price_method is distinct from new.entry_price_method then
-    mismatched := mismatched || 'entry_price_method';
+    mismatched := array_append(mismatched, 'entry_price_method');
   end if;
   if a.universe_decision is distinct from new.universe_decision then
-    mismatched := mismatched || 'universe_decision';
+    mismatched := array_append(mismatched, 'universe_decision');
   end if;
   -- The prediction's data cutoff is the attempt's decision cutoff. A later one
   -- would mean the claim was formed from data the decision did not have.
   if a.decision_cutoff_at is distinct from new.data_cutoff then
-    mismatched := mismatched || 'data_cutoff/decision_cutoff_at';
+    mismatched := array_append(mismatched, 'data_cutoff/decision_cutoff_at');
   end if;
   if a.provider_id is distinct from new.provider_id then
-    mismatched := mismatched || 'provider_id';
+    mismatched := array_append(mismatched, 'provider_id');
   end if;
   if a.verification is distinct from new.verification then
-    mismatched := mismatched || 'verification';
+    mismatched := array_append(mismatched, 'verification');
   end if;
   if a.run_id is distinct from new.run_id then
-    mismatched := mismatched || 'run_id';
+    mismatched := array_append(mismatched, 'run_id');
   end if;
 
   if array_length(mismatched, 1) is not null then
