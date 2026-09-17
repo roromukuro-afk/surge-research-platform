@@ -334,6 +334,48 @@ def test_a_provider_that_never_answers_stops_being_transient(conn):
     assert final.attempt_id is None
 
 
+def test_a_model_that_reached_outside_the_bundle_is_not_called_again(conn):
+    """The failure is terminal on the first occurrence, not after five. Retrying
+    means another call, another chance to reach outside the bundle and another
+    charge - for an answer that is disqualified either way (D-219)."""
+
+    from surge.analysis.groq_provider import ExternalToolUsed
+
+    watch_id, security_id, trigger_id = _triggered(conn)
+    provider = _Provider(raises=ExternalToolUsed("web_search ran during the analysis"))
+    runner = _runner(conn, provider)
+
+    result = _run(runner, watch_id, security_id, trigger_id)
+
+    assert result.failure_class is FailureClass.EXTERNAL_TOOL_USED
+    assert not result.retried
+    assert provider.calls == 1
+    status, watch_state = _status(conn, result.analysis_execution_id)
+    assert status == "FAILED"
+    assert watch_state == "REARMED"
+    # And nothing the model said was used for anything.
+    assert result.attempt_id is None
+    assert result.prediction_id is None
+
+
+def test_an_exhausted_free_quota_is_terminal_on_the_first_try(conn):
+    """Sending the same request four more times does not create quota."""
+
+    from surge.analysis.groq_provider import FreeQuotaExceeded
+
+    watch_id, security_id, trigger_id = _triggered(conn)
+    provider = _Provider(raises=FreeQuotaExceeded("ANALYSIS_FREE_QUOTA_BLOCKED: 8000 TPM"))
+    runner = _runner(conn, provider)
+
+    result = _run(runner, watch_id, security_id, trigger_id)
+
+    assert result.failure_class is FailureClass.QUOTA_BLOCKED
+    assert provider.calls == 1
+    status, watch_state = _status(conn, result.analysis_execution_id)
+    assert status == "FAILED"
+    assert watch_state == "REARMED"
+
+
 def test_an_analysis_that_ran_past_its_deadline_is_not_retried_again(conn):
     """One slow attempt spends the budget as surely as five fast ones, and it is
     the cutoff that is measured from, not the insert: the answer would be about

@@ -34,6 +34,8 @@ from surge.analysis.execution import (
     ExecutionStatus,
     FailureClass,
     InMemoryExecutionStore,
+    ProviderFailure,
+    classify_provider_failure,
     plan_recovery,
 )
 from surge.analysis.llm import ProviderKind
@@ -505,3 +507,53 @@ def test_the_escalated_classes_are_terminal():
 
     assert not FailureClass.RETRY_EXHAUSTED.is_transient
     assert not FailureClass.ANALYSIS_DEADLINE_PASSED.is_transient
+
+
+# ------------------------------- which failures are worth trying again
+
+
+def test_the_network_is_transient_and_everything_else_is_not():
+    """The default used to be the other way round, which meant a model that
+    reached outside the bundle was called again - and might reach outside it
+    again - for an answer that was disqualified either way."""
+
+    assert classify_provider_failure(TimeoutError("hung")) is FailureClass.PROVIDER_TIMEOUT
+    assert classify_provider_failure(ConnectionError("refused")) is FailureClass.PROVIDER_ERROR
+    assert classify_provider_failure(OSError("no route")) is FailureClass.PROVIDER_ERROR
+    assert classify_provider_failure(ValueError("nonsense")) is FailureClass.CONTRACT_VIOLATION
+    assert not classify_provider_failure(ValueError("nonsense")).is_transient
+
+
+def test_every_groq_failure_says_what_kind_it_is():
+    """Read from the exception rather than its name, so that renaming one
+    cannot quietly turn a terminal failure into a retried one."""
+
+    from surge.analysis import groq_provider as g
+
+    expected = {
+        g.CredentialsMissing: FailureClass.PROVIDER_NOT_CONFIGURED,
+        g.FreeQuotaExceeded: FailureClass.QUOTA_BLOCKED,
+        g.QuotaUnknown: FailureClass.QUOTA_BLOCKED,
+        g.InputPolicyViolation: FailureClass.PRIVACY_POLICY_BLOCKED,
+        g.StructuredOutputError: FailureClass.CONTRACT_VIOLATION,
+        g.ExternalToolUsed: FailureClass.EXTERNAL_TOOL_USED,
+    }
+    for exception_type, failure_class in expected.items():
+        assert issubclass(exception_type, ProviderFailure)
+        assert classify_provider_failure(exception_type("x")) is failure_class
+        # None of them is worth a second call.
+        assert not failure_class.is_transient
+
+
+def test_a_model_that_used_a_tool_is_never_called_again():
+    """The one that matters most: retrying means another call, another chance to
+    reach outside the bundle, and another charge - for an answer that cannot be
+    used at all."""
+
+    from surge.analysis.groq_provider import ExternalToolUsed
+
+    assert (
+        classify_provider_failure(ExternalToolUsed("web_search ran"))
+        is FailureClass.EXTERNAL_TOOL_USED
+    )
+    assert not FailureClass.EXTERNAL_TOOL_USED.is_transient

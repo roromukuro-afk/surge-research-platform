@@ -76,6 +76,10 @@ class FailureClass(StrEnum):
     STAND_IN_PROVIDER = "STAND_IN_PROVIDER"
     EXTERNAL_TOOL_USED = "EXTERNAL_TOOL_USED"
 
+    #: Terminal. The adapter is written and has never had a credential, which is
+    #: a configuration fact rather than a fact about the security.
+    PROVIDER_NOT_CONFIGURED = "PROVIDER_NOT_CONFIGURED"
+
     #: Terminal, and reached from a transient failure rather than declared. A
     #: provider that is down for an afternoon is transient on every single
     #: attempt and permanent in effect: retrying without a budget rebuilds the
@@ -120,6 +124,55 @@ MAX_TRANSIENT_ATTEMPTS = 5
 #: Not a timeout on the call - a limit on the *answer*. Better to leave the
 #: trigger unanswered and let the watch re-arm than to enter on a stale reading.
 ANALYSIS_DEADLINE = timedelta(minutes=30)
+
+
+class ProviderFailure(RuntimeError):
+    """A provider failure that says for itself whether trying again could help.
+
+    Written here rather than in any one adapter because the runner must not know
+    which provider it is talking to, and read by :func:`classify_provider_failure`
+    rather than by comparing exception names - a rename would otherwise turn a
+    terminal failure into a retried one without anything failing.
+    """
+
+    #: Overridden per subclass. The base is the conservative reading: something
+    #: went wrong at the provider and nothing says it was the network.
+    failure_class: FailureClass = FailureClass.PROVIDER_ERROR
+
+
+#: Exceptions that are the network rather than the answer. Retrying these is the
+#: whole reason RETRY_PENDING exists.
+_TRANSIENT_EXCEPTIONS: tuple[type[BaseException], ...] = (TimeoutError, ConnectionError)
+
+
+def classify_provider_failure(exc: BaseException) -> FailureClass:
+    """What kind of failure the provider just had.
+
+    The default is **terminal**, which inverts what this code did first. An
+    earlier version treated every exception from the provider as transient, so a
+    model that reached outside the bundle, an exhausted free quota and a missing
+    credential were all retried - the external-tool case actively wrongly, since
+    retrying means calling the provider again and possibly leaking again.
+
+    Defaulting to terminal is safe now in a way it was not before: a terminal
+    failure moves the watch to REARMED rather than leaving it in IN_REANALYSIS,
+    so a misjudged blip costs one unanswered trigger rather than a security.
+    Misjudging the other way costs five calls and half an hour, and in the
+    external-tool case it costs the thing the ban exists to prevent.
+    """
+
+    if isinstance(exc, ProviderFailure):
+        return exc.failure_class
+    if isinstance(exc, _TRANSIENT_EXCEPTIONS):
+        return (
+            FailureClass.PROVIDER_TIMEOUT
+            if isinstance(exc, TimeoutError)
+            else FailureClass.PROVIDER_ERROR
+        )
+    if isinstance(exc, OSError):
+        # Socket-level trouble reaching the host.
+        return FailureClass.PROVIDER_ERROR
+    return FailureClass.CONTRACT_VIOLATION
 
 
 class ExecutionError(EntryError):
@@ -489,6 +542,8 @@ __all__ = [
     "TRANSIENT_FAILURES",
     "FailureClass",
     "InMemoryExecutionStore",
+    "ProviderFailure",
+    "classify_provider_failure",
     "RecoveryPlan",
     "plan_recovery",
 ]

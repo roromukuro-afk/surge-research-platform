@@ -49,6 +49,7 @@ from typing import Any
 
 from surge.analysis.bundle import canonical_json
 from surge.analysis.entry_analysis import EntryAnalysisResponse, EntryAnalysisState
+from surge.analysis.execution import FailureClass, ProviderFailure
 from surge.analysis.llm import LLMRequest, LLMResponse, ProviderKind, Stage3State, ZoneBasisKind
 from surge.http_fetch import fetch
 
@@ -155,16 +156,24 @@ PUBLISHED_FREE_LIMITS = {
 PUBLISHED_FREE_LIMITS_GPT_OSS = PUBLISHED_FREE_LIMITS["openai/gpt-oss-*"]
 
 
-class GroqError(RuntimeError):
-    pass
+class GroqError(ProviderFailure):
+    """Every one of these carries the failure class the runner should record.
+
+    Without it the runner would have to recognise these by name, and the only
+    thing that decides whether an analysis is retried would be a string.
+    """
 
 
 class CredentialsMissing(GroqError):
     """No API key. The adapter exists and has never spoken to Groq."""
 
+    failure_class = FailureClass.PROVIDER_NOT_CONFIGURED
+
 
 class FreeQuotaExceeded(GroqError):
     """The request does not fit. The prompt is not the thing that gives way."""
+
+    failure_class = FailureClass.QUOTA_BLOCKED
 
 
 class QuotaUnknown(GroqError):
@@ -174,17 +183,30 @@ class QuotaUnknown(GroqError):
     one is answered by measuring, the other by not using the free tier.
     """
 
+    failure_class = FailureClass.QUOTA_BLOCKED
+
 
 class InputPolicyViolation(GroqError):
     """Refusing to send the canonical method to a provider that may train on it."""
+
+    failure_class = FailureClass.PRIVACY_POLICY_BLOCKED
 
 
 class StructuredOutputError(GroqError):
     """The model returned something the contract cannot read."""
 
+    failure_class = FailureClass.CONTRACT_VIOLATION
+
 
 class ExternalToolUsed(GroqError):
-    """The model reached outside the bundle. Its answer cannot be used at all."""
+    """The model reached outside the bundle. Its answer cannot be used at all.
+
+    Emphatically not retryable. Trying again means calling the provider again,
+    which may reach outside the bundle again, and paying for it - for an answer
+    that is disqualified either way.
+    """
+
+    failure_class = FailureClass.EXTERNAL_TOOL_USED
 
 
 #: Reported when a response says a built-in tool ran. Not a quality problem - a

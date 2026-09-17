@@ -43,6 +43,7 @@ from surge.analysis.execution import (
     MAX_TRANSIENT_ATTEMPTS,
     ExecutionKey,
     FailureClass,
+    classify_provider_failure,
 )
 from surge.analysis.llm import LLMRequest
 from surge.entry import db as entry_db
@@ -105,21 +106,6 @@ class RunResult:
             "failure_class": self.failure_class.value if self.failure_class else None,
             "notes": list(self.notes),
         }
-
-
-def _transient_class(exc: BaseException) -> FailureClass:
-    """Which transient failure this was, for the record rather than the flow.
-
-    All three are retried identically, so this changes nothing about what
-    happens - but "PROVIDER_ERROR" on every timeout makes the one column that
-    could tell an outage from a rate limit say the same thing either way.
-    """
-
-    if isinstance(exc, TimeoutError):
-        return FailureClass.PROVIDER_TIMEOUT
-    if "rate limit" in str(exc).lower() or type(exc).__name__ == "RateLimited":
-        return FailureClass.PROVIDER_RATE_LIMITED
-    return FailureClass.PROVIDER_ERROR
 
 
 @dataclass
@@ -268,8 +254,15 @@ class ProductionEntryAnalysis:
             # which means moving the watch first - the database refuses to fail
             # an execution whose watch is still IN_REANALYSIS, so this cannot be
             # skipped by forgetting it.
-            terminal = execution.retry_budget_spent(now)
+            # What kind of failure this was comes from the exception itself, not
+            # from where it was caught. Catching everything here and calling it
+            # transient is what made a model that reached outside the bundle,
+            # an exhausted quota and a missing credential all worth retrying.
+            failure = classify_provider_failure(exc)
             detail = f"{type(exc).__name__}: {exc}"
+            terminal = None if failure.is_transient else failure
+            if terminal is None:
+                terminal = execution.retry_budget_spent(now)
             if terminal is None:
                 try:
                     self.store.retry(execution_id, transient_error=detail)
@@ -278,7 +271,7 @@ class ProductionEntryAnalysis:
                     self.conn.rollback()
                     raise
                 result.retried = True
-                result.failure_class = _transient_class(exc)
+                result.failure_class = failure
                 result.notes.append(
                     f"a transient provider failure ({detail}); the execution stays open and the "
                     f"watch stays IN_REANALYSIS, because it is. Retry "
