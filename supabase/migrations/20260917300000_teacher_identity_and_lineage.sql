@@ -202,12 +202,6 @@ end $$;
 comment on constraint admission_default_excludes_exogenous on labels.admission_policies is
   'PRICE_SUCCESS_EXOGENOUS means the price rose and the thesis does not explain why. It stays as a label because that distinction is worth recording, and it stays out of the default training target because a model trained on it learns to claim credit for luck. A special-purpose policy may admit it deliberately.';
 
-update labels.admission_policies
-   set status = 'SUPERSEDED',
-       superseded_by = 'admission-1.1.0',
-       rationale = 'Admitted PRICE_SUCCESS_EXOGENOUS, which records a rise the thesis does not explain. Kept for the record; not the default.'
- where policy_version = 'admission-1.0.0';
-
 insert into labels.admission_policies (
   policy_version, description, min_confidence, required_review_status, admitted_labels,
   status, rationale
@@ -230,6 +224,12 @@ insert into labels.admission_policies (
   'research and to a SPECIAL_PURPOSE policy that says why it wants it.'
 )
 on conflict (policy_version) do nothing;
+
+update labels.admission_policies
+   set status = 'SUPERSEDED',
+       superseded_by = 'admission-1.1.0',
+       rationale = 'Admitted PRICE_SUCCESS_EXOGENOUS, which records a rise the thesis does not explain. Kept for the record; not the default.'
+ where policy_version = 'admission-1.0.0';
 
 -- ---------------------------------------------------------------------------
 -- 4. Promotion thresholds are provisional, and versioned
