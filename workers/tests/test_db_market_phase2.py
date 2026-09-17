@@ -21,7 +21,7 @@ psycopg2 = pytest.importorskip("psycopg2")
 from surge.features.engine import compute_features  # noqa: E402
 from surge.licensing import AvailabilityBasis  # noqa: E402
 from surge.market.db import PostgresMarketWriter  # noqa: E402
-from surge.market.eligibility import DEFAULT_RULE, EligibilityDecision, evaluate  # noqa: E402
+from surge.market.eligibility import DEFAULT_RULE, evaluate  # noqa: E402
 from surge.market.models import (  # noqa: E402
     CanonicalAction,
     CanonicalBar,
@@ -154,8 +154,7 @@ def test_a_role_resolves_to_its_provider_and_an_unfilled_one_to_nothing(conn):
 def test_the_stored_filter_rule_matches_the_one_the_jobs_default_to(conn):
     """Two sources of truth that disagree would make a backtest unreproducible."""
 
-    with conn.cursor() as cur:
-        rule = PostgresMarketWriter(conn).load_filter_rule(DEFAULT_RULE.rule_version)
+    rule = PostgresMarketWriter(conn).load_filter_rule(DEFAULT_RULE.rule_version)
 
     assert rule.threshold_jpy == DEFAULT_RULE.threshold_jpy
     assert rule.max_price_age_days == DEFAULT_RULE.max_price_age_days
