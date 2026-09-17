@@ -76,6 +76,19 @@ def _policy(cur, source_key: str, *, full_text="ALLOWED", metadata="ALLOWED", ve
     )
 
 
+def _raw_document(cur, source_key: str, object_key: str, *, policy_version="v1") -> str:
+    cur.execute(
+        """
+        insert into news.raw_documents (
+          object_key, store_id, source_key, policy_version, sha256,
+          bytes, content_type, observed_at, available_at
+        ) values (%s, 'test-store', %s, %s, repeat('a', 64), 100, 'application/xml', %s, %s)
+        """,
+        (object_key, source_key, policy_version, SEEN, INGESTED),
+    )
+    return object_key
+
+
 def _document(cur, source_key: str, **overrides):
     values = {
         "source_document_id": f"doc-{uuid.uuid4().hex[:8]}",
@@ -339,6 +352,7 @@ def test_purge_dry_run_counts_without_deleting(conn):
     with conn.cursor() as cur:
         source_key = _source(cur)
         _policy(cur, source_key)
+        _raw_document(cur, source_key, "raw/test/news/abc.xml")
         _document(cur, source_key, raw_object_key="raw/test/news/abc.xml")
 
         cur.execute(
@@ -350,13 +364,13 @@ def test_purge_dry_run_counts_without_deleting(conn):
         )
         request_id = cur.fetchone()[0]
         cur.execute(
-            "insert into market.purge_targets (purge_request_id, object_key, store_id) values (%s, %s, 'test')",
+            "insert into news.purge_targets (purge_request_id, object_key, store_id) values (%s, %s, 'test')",
             (request_id, "raw/test/news/abc.xml"),
         )
 
         cur.execute("select news.purge_documents(%s)", (request_id,))
         result = cur.fetchone()[0]
-        assert result == {"dry_run": True, "news_documents": 1}
+        assert result == {"dry_run": True, "news_documents": 1, "news_objects": 1}
 
         cur.execute("select count(*) from news.documents where source_key = %s", (source_key,))
         assert cur.fetchone()[0] == 1
@@ -366,6 +380,8 @@ def test_purge_deletes_only_what_the_request_covers(conn):
     with conn.cursor() as cur:
         source_key = _source(cur)
         _policy(cur, source_key)
+        _raw_document(cur, source_key, "raw/test/news/covered.xml")
+        _raw_document(cur, source_key, "raw/test/news/spared.xml")
         _document(cur, source_key, source_document_id="covered", raw_object_key="raw/test/news/covered.xml")
         _document(cur, source_key, source_document_id="spared", raw_object_key="raw/test/news/spared.xml")
 
@@ -378,12 +394,12 @@ def test_purge_deletes_only_what_the_request_covers(conn):
         )
         request_id = cur.fetchone()[0]
         cur.execute(
-            "insert into market.purge_targets (purge_request_id, object_key, store_id) values (%s, %s, 'test')",
+            "insert into news.purge_targets (purge_request_id, object_key, store_id) values (%s, %s, 'test')",
             (request_id, "raw/test/news/covered.xml"),
         )
 
         cur.execute("select news.purge_documents(%s)", (request_id,))
-        assert cur.fetchone()[0] == {"dry_run": False, "news_documents": 1}
+        assert cur.fetchone()[0] == {"dry_run": False, "news_documents": 1, "news_objects": 1}
 
         cur.execute("select source_document_id from news.documents where source_key = %s", (source_key,))
         assert [row[0] for row in cur.fetchall()] == ["spared"]
@@ -395,6 +411,8 @@ def test_the_purge_flag_does_not_survive_the_function(conn):
     with conn.cursor() as cur:
         source_key = _source(cur)
         _policy(cur, source_key)
+        _raw_document(cur, source_key, "raw/test/news/covered.xml")
+        _raw_document(cur, source_key, "raw/test/news/after.xml")
         _document(cur, source_key, source_document_id="covered", raw_object_key="raw/test/news/covered.xml")
         document_id = _document(cur, source_key, source_document_id="after", raw_object_key="raw/test/news/after.xml")
 
@@ -407,7 +425,7 @@ def test_the_purge_flag_does_not_survive_the_function(conn):
         )
         request_id = cur.fetchone()[0]
         cur.execute(
-            "insert into market.purge_targets (purge_request_id, object_key, store_id) values (%s, %s, 'test')",
+            "insert into news.purge_targets (purge_request_id, object_key, store_id) values (%s, %s, 'test')",
             (request_id, "raw/test/news/covered.xml"),
         )
         cur.execute("select news.purge_documents(%s)", (request_id,))
@@ -444,3 +462,79 @@ def test_the_runtime_worker_holds_no_delete_on_news(conn):
             """
         )
         assert cur.fetchone()[0] == 0
+
+
+# ------------------------------------------------------------------- raw manifest
+
+
+def test_a_document_cannot_cite_an_object_with_no_manifest_entry(conn):
+    with conn.cursor() as cur:
+        source_key = _source(cur)
+        _policy(cur, source_key)
+        with pytest.raises(psycopg2.errors.ForeignKeyViolation):
+            _document(cur, source_key, raw_object_key="raw/test/news/never-stored.xml")
+
+
+def test_an_object_cannot_exist_without_a_licence_version(conn):
+    with conn.cursor() as cur:
+        source_key = _source(cur)
+        _policy(cur, source_key)
+        with pytest.raises(psycopg2.errors.ForeignKeyViolation):
+            _raw_document(cur, source_key, "raw/test/news/no-policy.xml", policy_version="v-does-not-exist")
+
+
+def test_the_manifest_is_immutable_apart_from_the_purge_columns(conn):
+    with conn.cursor() as cur:
+        source_key = _source(cur)
+        _policy(cur, source_key)
+        _raw_document(cur, source_key, "raw/test/news/fixed.xml")
+        with pytest.raises(psycopg2.errors.RaiseException, match="immutable apart from the purge columns"):
+            cur.execute("update news.raw_documents set bytes = 999 where object_key = 'raw/test/news/fixed.xml'")
+
+
+def test_the_manifest_row_outlives_the_object_it_describes(conn):
+    """A purge removes the data and keeps the record that we held it.
+
+    Deleting the manifest too would destroy the evidence that the obligation was
+    ever discharged, which is the opposite of what a purge is for.
+    """
+
+    with conn.cursor() as cur:
+        source_key = _source(cur)
+        _policy(cur, source_key)
+        _raw_document(cur, source_key, "raw/test/news/purged.xml")
+        _document(cur, source_key, raw_object_key="raw/test/news/purged.xml")
+
+        cur.execute(
+            """
+            insert into market.purge_requests (provider_id, reason, requested_by, dry_run)
+            values ('test_news', 'licence test', 'test', false)
+            returning purge_request_id
+            """
+        )
+        request_id = cur.fetchone()[0]
+        cur.execute(
+            "insert into news.purge_targets (purge_request_id, object_key, store_id) values (%s, %s, 'test')",
+            (request_id, "raw/test/news/purged.xml"),
+        )
+        cur.execute("select news.purge_documents(%s)", (request_id,))
+
+        cur.execute(
+            "select purged_at is not null, purge_request_id from news.raw_documents "
+            "where object_key = 'raw/test/news/purged.xml'"
+        )
+        purged, recorded_request = cur.fetchone()
+        assert purged is True
+        assert recorded_request == request_id
+
+        cur.execute("select status from news.purge_targets where purge_request_id = %s", (request_id,))
+        assert cur.fetchone()[0] == "DELETED"
+
+
+def test_the_manifest_cannot_be_deleted(conn):
+    with conn.cursor() as cur:
+        source_key = _source(cur)
+        _policy(cur, source_key)
+        _raw_document(cur, source_key, "raw/test/news/kept.xml")
+        with pytest.raises(psycopg2.errors.RaiseException, match="must outlive the object"):
+            cur.execute("delete from news.raw_documents where object_key = 'raw/test/news/kept.xml'")
