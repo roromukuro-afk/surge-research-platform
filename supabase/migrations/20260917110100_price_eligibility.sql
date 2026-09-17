@@ -149,7 +149,7 @@ as $$
 $$;
 
 comment on function market.price_eligibility_as_of(ref.market_code, date, timestamptz) is
-  'The eligibility decisions in force for a trading date, as of a knowledge cutoff. Reads through the publication, so a run rebuilt later cannot flow backwards into an earlier reading.';
+  'The eligibility decisions in force for a trading date, as of a knowledge cutoff. Reads through the publication, so a run rebuilt later cannot flow backwards into an earlier reading. Note the default cutoff is now(), which is the TRANSACTION start time: a caller that publishes and reads in one transaction must pass clock_timestamp() or it will see nothing.';
 
 create or replace view market.prediction_universe as
   select e.*

@@ -320,7 +320,11 @@ def test_eligibility_is_read_through_the_publication_not_by_newest_run(conn):
     with conn.cursor() as cur:
         run, day = _write_eligibility(cur, conn)
 
-        cur.execute("select count(*) from market.price_eligibility_as_of('JP', %s, now())", (day,))
+        # clock_timestamp(), not now(): now() is the transaction's start time, so
+        # inside one transaction it predates the publication that just happened.
+        cur.execute(
+            "select count(*) from market.price_eligibility_as_of('JP', %s, clock_timestamp())", (day,)
+        )
         assert cur.fetchone()[0] == 3
 
         # a knowledge cutoff before the publication sees nothing
@@ -335,7 +339,9 @@ def test_eligibility_is_read_through_the_publication_not_by_newest_run(conn):
 def test_an_unpublished_eligibility_run_is_not_authoritative(conn):
     with conn.cursor() as cur:
         run, day = _write_eligibility(cur, conn, publish=False)
-        cur.execute("select count(*) from market.price_eligibility_as_of('JP', %s, now())", (day,))
+        cur.execute(
+            "select count(*) from market.price_eligibility_as_of('JP', %s, clock_timestamp())", (day,)
+        )
         assert cur.fetchone()[0] == 0, "a finished run is not the answer until it is published"
     conn.rollback()
 
