@@ -14,9 +14,10 @@ one is a constraint.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import StrEnum
 
 from surge.labels.models import (
     MISS_LABELS,
@@ -24,10 +25,30 @@ from surge.labels.models import (
     InterpretiveJudgement,
     InterpretiveLabel,
     LabelError,
+    ObservationContext,
     ReviewStatus,
 )
 
 MINIMUM_TARGET_CLASSES = 3
+
+
+class DatasetPurpose(StrEnum):
+    """What a built dataset is for, because the two have different obligations.
+
+    ``PRODUCTION_TRAINING`` is the default on purpose. A dataset that does not
+    say what it is for is treated as one a model will be trained on, and so it
+    must carry the input side of every example it admits. The alternative
+    default - assume research, require nothing - would let an unlineaged set
+    become a training set simply by nobody having said otherwise.
+    """
+
+    PRODUCTION_TRAINING = "PRODUCTION_TRAINING"
+    RESEARCH_ONLY = "RESEARCH_ONLY"
+
+    @property
+    def requires_lineage(self) -> bool:
+        return self is DatasetPurpose.PRODUCTION_TRAINING
+
 
 #: Kept as a label, excluded from a predictive target. It means the price rose
 #: and the entry thesis does not account for it, so training on it teaches a
@@ -105,6 +126,7 @@ class DatasetManifest:
     name: str
     policy_version: str
     knowledge_cutoff: datetime
+    purpose: DatasetPurpose = DatasetPurpose.PRODUCTION_TRAINING
     admitted: list[InterpretiveJudgement] = field(default_factory=list)
     rejected: list[Rejection] = field(default_factory=list)
     git_sha: str | None = None
@@ -129,6 +151,7 @@ class DatasetManifest:
         return {
             "name": self.name,
             "policy_version": self.policy_version,
+            "purpose": self.purpose.value,
             "admitted": len(self.admitted),
             "rejected": len(self.rejected),
             "classes": self.class_counts,
@@ -144,8 +167,18 @@ def build(
     knowledge_cutoff: datetime,
     target_field: str = "label",
     git_sha: str | None = None,
+    contexts: Mapping[str, ObservationContext] | None = None,
+    purpose: DatasetPurpose = DatasetPurpose.PRODUCTION_TRAINING,
 ) -> DatasetManifest:
-    """Apply a policy and record both sides of it."""
+    """Apply a policy and record both sides of it.
+
+    ``contexts`` is the input side of each example, keyed by
+    :attr:`ObjectiveLabel.lineage_key`. A production training set admits nothing
+    without one: teacher data is input snapshot, decision and outcome, and two
+    thirds of that is not teacher data. The label itself is still kept - the
+    outcome happened, and dropping it would bias the record of what happened -
+    it simply does not enter the dataset.
+    """
 
     if target_field in FORBIDDEN_TARGETS:
         raise LabelError(
@@ -157,19 +190,35 @@ def build(
     manifest = DatasetManifest(
         name=name,
         policy_version=policy.policy_version,
+        purpose=purpose,
         knowledge_cutoff=knowledge_cutoff,
         git_sha=git_sha,
     )
+    if purpose.requires_lineage and contexts is None:
+        raise LabelError(
+            f"dataset {name!r} is a {purpose.value} set and was given no observation contexts. "
+            "Teacher data is input snapshot + decision + outcome; a set built from the last two "
+            "teaches a model from decisions whose inputs were never written down. Pass the "
+            "contexts, or build it as RESEARCH_ONLY and say so"
+        )
 
     for index, judgement in enumerate(judgements):
         label_id = judgement.input_sha256[:16] + f":{index}"
         reason = _rejection_reason(judgement, policy, knowledge_cutoff)
+        if reason is None and purpose.requires_lineage:
+            reason = _lineage_reason(judgement, contexts or {})
         if reason is None:
             manifest.admitted.append(judgement)
         else:
             manifest.rejected.append(
                 Rejection(label_id=label_id, label=judgement.label, reason=reason)
             )
+
+    if not purpose.requires_lineage:
+        manifest.notes.append(
+            "built as RESEARCH_ONLY: input lineage was not required, so this set must not be used "
+            "to train a production model"
+        )
 
     classes = set(manifest.class_counts)
     if manifest.admitted and len(classes) < MINIMUM_TARGET_CLASSES:
@@ -180,6 +229,29 @@ def build(
         )
 
     return manifest
+
+
+def _lineage_reason(
+    judgement: InterpretiveJudgement, contexts: Mapping[str, ObservationContext]
+) -> str | None:
+    """Why this example's inputs are not recorded well enough to train on."""
+
+    objective = judgement.objective
+    context = contexts.get(objective.lineage_key)
+    if context is None:
+        return "no observation context: the inputs this decision was made from were never recorded"
+
+    if context.information_cutoff_at > judgement.information_cutoff_at:
+        # The snapshot saw more than the judgement claims to have seen.
+        return (
+            "the observation context's information cutoff is after the judgement's, so the "
+            "snapshot includes things the decision could not have known"
+        )
+
+    gaps = context.lineage_gaps(objective.observation_kind)
+    if gaps:
+        return "incomplete input lineage: " + "; ".join(gaps)
+    return None
 
 
 def _rejection_reason(
@@ -208,6 +280,7 @@ __all__ = [
     "NOT_IN_A_PREDICTIVE_TARGET",
     "AdmissionPolicy",
     "DatasetManifest",
+    "DatasetPurpose",
     "Rejection",
     "build",
 ]

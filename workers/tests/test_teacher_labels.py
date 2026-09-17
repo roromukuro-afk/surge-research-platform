@@ -16,7 +16,12 @@ from decimal import Decimal
 
 import pytest
 
-from surge.labels.admission import FORBIDDEN_TARGETS, AdmissionPolicy, build
+from surge.labels.admission import (
+    FORBIDDEN_TARGETS,
+    AdmissionPolicy,
+    DatasetPurpose,
+    build,
+)
 from surge.labels.misses import (
     EvidenceDocument,
     assert_no_leakage,
@@ -29,6 +34,7 @@ from surge.labels.models import (
     InterpretiveLabel,
     LabelError,
     ObjectiveLabel,
+    ObservationContext,
     ObservationKind,
     ReviewStatus,
 )
@@ -367,6 +373,32 @@ THREE_CLASSES = frozenset(
 )
 
 
+def _context(**overrides) -> ObservationContext:
+    """A complete input snapshot for the PREDICTED fixture above."""
+
+    base = {
+        "objective_id": "obj-1",
+        "information_cutoff_at": CUTOFF,
+        "production_run_id": "run-prod",
+        "universe_run_id": "run-universe",
+        "market_data_run_id": "run-market",
+        "feature_version": "features-1.0.0",
+        "feature_snapshot_ref": "snapshots/features/ep-1",
+        "stage3_output_id": "out-1",
+        "input_bundle_sha256": "a" * 64,
+        "episode_id": "ep-1",
+        "entry_attempt_id": "att-1",
+        "coverage_snapshot": {"materials": 1.0, "prices": 1.0},
+        "verification_status": "LIVE_VERIFIED",
+    }
+    base.update(overrides)
+    return ObservationContext(**base)
+
+
+def _contexts(judgements, **overrides) -> dict:
+    return {j.objective.lineage_key: _context(**overrides) for j in judgements}
+
+
 def test_a_policy_with_fewer_than_three_classes_is_refused():
     """Two classes here is almost always 'did it rise 20%' under another name."""
 
@@ -441,7 +473,13 @@ def test_the_manifest_records_what_it_dropped_and_why():
         _judgement(InterpretiveLabel.PREDICTIVE_SUCCESS, resolved=False),
     ]
 
-    manifest = build(judgements, policy=policy, name="d", knowledge_cutoff=CUTOFF)
+    manifest = build(
+        judgements,
+        policy=policy,
+        name="d",
+        knowledge_cutoff=CUTOFF,
+        contexts=_contexts(judgements),
+    )
 
     assert len(manifest.admitted) == 1
     assert len(manifest.rejected) == 4
@@ -461,7 +499,13 @@ def test_a_judgement_that_saw_more_than_the_dataset_claims_is_rejected():
         InterpretiveLabel.PREDICTIVE_SUCCESS, cutoff=CUTOFF + timedelta(days=1)
     )
 
-    manifest = build([judgement], policy=policy, knowledge_cutoff=CUTOFF, name="d")
+    manifest = build(
+        [judgement],
+        policy=policy,
+        knowledge_cutoff=CUTOFF,
+        name="d",
+        contexts=_contexts([judgement]),
+    )
 
     assert not manifest.admitted
     assert "information cutoff is after" in manifest.rejected[0].reason
@@ -476,7 +520,13 @@ def test_a_dataset_that_collapsed_to_two_classes_says_so():
         _judgement(InterpretiveLabel.FALSE_POSITIVE),
     ]
 
-    manifest = build(judgements, policy=policy, name="d", knowledge_cutoff=CUTOFF)
+    manifest = build(
+        judgements,
+        policy=policy,
+        name="d",
+        knowledge_cutoff=CUTOFF,
+        contexts=_contexts(judgements),
+    )
 
     assert len(manifest.admitted) == 2
     assert any("not usable as a training target" in note for note in manifest.notes)
@@ -593,3 +643,147 @@ def test_a_special_purpose_policy_may_admit_it_by_saying_why():
 
     assert policy.is_special_purpose
     assert InterpretiveLabel.PRICE_SUCCESS_EXOGENOUS in policy.admitted_labels
+
+
+# --------------------------------------------------- teacher input lineage
+
+
+def test_a_training_set_cannot_be_built_without_the_input_side():
+    """Teacher data is input snapshot + decision + outcome. A set built from the
+    last two teaches a model from decisions whose inputs were never recorded."""
+
+    policy = AdmissionPolicy(
+        policy_version="ok-1.0.0", description="fine", admitted_labels=THREE_CLASSES
+    )
+
+    with pytest.raises(LabelError, match="input snapshot"):
+        build([], policy=policy, name="d", knowledge_cutoff=CUTOFF)
+
+
+def test_a_label_with_no_context_is_kept_and_not_admitted():
+    """The outcome happened. Dropping the label would bias the record of what
+    happened; admitting it would train a model on an input nobody wrote down."""
+
+    policy = AdmissionPolicy(
+        policy_version="ok-1.0.0", description="fine", admitted_labels=THREE_CLASSES
+    )
+    judgement = _judgement(InterpretiveLabel.PREDICTIVE_SUCCESS)
+
+    manifest = build([judgement], policy=policy, name="d", knowledge_cutoff=CUTOFF, contexts={})
+
+    assert not manifest.admitted
+    assert "no observation context" in manifest.rejected[0].reason
+
+
+@pytest.mark.parametrize(
+    ("gap", "expected"),
+    [
+        ({"coverage_snapshot": None}, "coverage_snapshot"),
+        ({"feature_version": None, "feature_snapshot_ref": None}, "no feature_version"),
+        ({"feature_snapshot_ref": None}, "no snapshot or reference"),
+        ({"production_run_id": None}, "no production_run_id"),
+        ({"universe_run_id": None}, "no universe_run_id"),
+        ({"market_data_run_id": None}, "no market_data_run_id"),
+        ({"episode_id": None}, "PREDICTED with no episode_id"),
+        ({"entry_attempt_id": None}, "PREDICTED with no entry_attempt_id"),
+        ({"stage3_output_id": None, "input_bundle_sha256": None}, "no decision reference"),
+    ],
+)
+def test_each_missing_piece_of_lineage_blocks_admission(gap, expected):
+    policy = AdmissionPolicy(
+        policy_version="ok-1.0.0", description="fine", admitted_labels=THREE_CLASSES
+    )
+    judgement = _judgement(InterpretiveLabel.PREDICTIVE_SUCCESS)
+
+    manifest = build(
+        [judgement],
+        policy=policy,
+        name="d",
+        knowledge_cutoff=CUTOFF,
+        contexts=_contexts([judgement], **gap),
+    )
+
+    assert not manifest.admitted
+    assert expected in manifest.rejected[0].reason
+
+
+def test_an_absent_feature_version_may_be_explained_rather_than_guessed():
+    """No features and nobody-wrote-down-which-features are different examples,
+    and only one of them is usable."""
+
+    policy = AdmissionPolicy(
+        policy_version="ok-1.0.0", description="fine", admitted_labels=THREE_CLASSES
+    )
+    judgement = _judgement(InterpretiveLabel.PREDICTIVE_SUCCESS)
+
+    manifest = build(
+        [judgement],
+        policy=policy,
+        name="d",
+        knowledge_cutoff=CUTOFF,
+        contexts=_contexts(
+            [judgement],
+            feature_version=None,
+            feature_snapshot_ref=None,
+            no_feature_reason="recorded before the feature engine ran for this market",
+        ),
+    )
+
+    assert len(manifest.admitted) == 1
+
+
+def test_an_eligible_only_observation_is_not_asked_for_an_episode():
+    """Demanding one would reject the entire population of securities nobody
+    surfaced - which is the part of the teacher set that teaches about misses."""
+
+    context = _context(
+        episode_id=None, entry_attempt_id=None, stage3_output_id=None, input_bundle_sha256=None
+    )
+
+    assert context.lineage_gaps(ObservationKind.ELIGIBLE_ONLY) == ()
+    assert context.lineage_gaps(ObservationKind.PREDICTED)
+
+
+def test_a_setup_observation_needs_its_setup():
+    complete = _context(setup_id="setup-1")
+    without = _context(setup_id=None)
+
+    assert complete.lineage_gaps(ObservationKind.SETUP_NOT_ENTERED) == ()
+    assert "no setup_id" in " ".join(without.lineage_gaps(ObservationKind.SETUP_NOT_ENTERED))
+
+
+def test_a_context_that_saw_more_than_its_judgement_is_refused():
+    policy = AdmissionPolicy(
+        policy_version="ok-1.0.0", description="fine", admitted_labels=THREE_CLASSES
+    )
+    judgement = _judgement(InterpretiveLabel.PREDICTIVE_SUCCESS)
+
+    manifest = build(
+        [judgement],
+        policy=policy,
+        name="d",
+        knowledge_cutoff=CUTOFF,
+        contexts=_contexts([judgement], information_cutoff_at=CUTOFF + timedelta(hours=1)),
+    )
+
+    assert not manifest.admitted
+    assert "could not have known" in manifest.rejected[0].reason
+
+
+def test_a_research_set_may_skip_lineage_and_has_to_say_so():
+    policy = AdmissionPolicy(
+        policy_version="ok-1.0.0", description="fine", admitted_labels=THREE_CLASSES
+    )
+    judgement = _judgement(InterpretiveLabel.PREDICTIVE_SUCCESS)
+
+    manifest = build(
+        [judgement],
+        policy=policy,
+        name="d",
+        knowledge_cutoff=CUTOFF,
+        purpose=DatasetPurpose.RESEARCH_ONLY,
+    )
+
+    assert len(manifest.admitted) == 1
+    assert manifest.summary["purpose"] == "RESEARCH_ONLY"
+    assert any("must not be used to train a production model" in n for n in manifest.notes)

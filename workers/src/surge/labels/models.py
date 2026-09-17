@@ -137,6 +137,18 @@ class ObjectiveLabel:
         return ("ELIGIBLE_ONLY", self.security_id, self.as_of_date, self.label_version)
 
     @property
+    def lineage_key(self) -> str:
+        """How a context is matched to this observation.
+
+        The readable key when there is one, otherwise the identity tuple. Both
+        are stable across a rebuild of the same day, which is what a match has to
+        be: a context joined by row order would attach the wrong input snapshot
+        to the wrong example and nothing would ever say so.
+        """
+
+        return self.observation_key or "|".join(str(part) for part in self.identity)
+
+    @property
     def is_resolved(self) -> bool:
         return self.path_resolution not in (
             None,
@@ -178,6 +190,11 @@ class ObservationContext:
     #: What the collectors had by the cutoff. An example formed on 40% coverage
     #: and one formed on 100% are different examples.
     coverage_snapshot: dict | None = None
+    #: Why there is no feature version, when there legitimately is not - an
+    #: observation recorded before the feature engine ran, say. Stated rather
+    #: than inferred from the null, because "no features" and "nobody wrote down
+    #: which features" are different examples and only one is usable.
+    no_feature_reason: str | None = None
     verification_status: str = "IMPLEMENTED_NOT_LIVE_VERIFIED"
 
     @property
@@ -189,6 +206,64 @@ class ObservationContext:
         """
 
         return bool(self.input_bundle_sha256 and self.production_run_id and self.feature_version)
+
+    def lineage_gaps(self, observation_kind: ObservationKind) -> tuple[str, ...]:
+        """What is missing before this example may be trained on.
+
+        Not the same question as :attr:`is_reproducible`. A label with gaps here
+        is still stored - the outcome happened and dropping it would bias the
+        record - and it is not admitted to a training dataset, because a model
+        cannot be taught from a decision whose inputs were never written down.
+
+        The requirements differ by kind because the kinds are different objects.
+        A PREDICTED example has an episode and an attempt behind it; an
+        ELIGIBLE_ONLY example has neither and never should, so demanding them
+        would reject the entire population of securities nobody surfaced - which
+        is exactly the part of the teacher set that teaches a model about misses.
+        """
+
+        gaps: list[str] = []
+
+        if not self.verification_status:
+            gaps.append("no verification_status")
+        if self.coverage_snapshot is None:
+            gaps.append(
+                "no coverage_snapshot: an example formed on partial collection is not the same "
+                "example as one formed on complete collection"
+            )
+        if not self.feature_version and not self.no_feature_reason:
+            gaps.append(
+                "no feature_version and no stated reason for its absence"
+            )
+        if self.feature_version and not (self.feature_snapshot or self.feature_snapshot_ref):
+            gaps.append(
+                f"feature_version {self.feature_version} names a version but no snapshot or "
+                "reference, so the values themselves cannot be recovered"
+            )
+        for name in ("production_run_id", "universe_run_id", "market_data_run_id"):
+            if not getattr(self, name):
+                gaps.append(f"no {name}")
+
+        if observation_kind is ObservationKind.PREDICTED:
+            if not self.episode_id:
+                gaps.append("PREDICTED with no episode_id")
+            if not self.entry_attempt_id:
+                gaps.append("PREDICTED with no entry_attempt_id")
+            if not (self.stage3_output_id or self.input_bundle_sha256):
+                gaps.append(
+                    "PREDICTED with no decision reference: neither a stage 3 output nor an input "
+                    "bundle hash, so what the decision was made from is unrecorded"
+                )
+        elif observation_kind is ObservationKind.SETUP_NOT_ENTERED:
+            if not self.setup_id:
+                gaps.append("SETUP_NOT_ENTERED with no setup_id")
+        # ELIGIBLE_ONLY needs the universe, feature and coverage lineage above
+        # and nothing more. It has no decision behind it by definition.
+
+        return tuple(gaps)
+
+    def is_complete_for(self, observation_kind: ObservationKind) -> bool:
+        return not self.lineage_gaps(observation_kind)
 
 
 @dataclass(frozen=True)

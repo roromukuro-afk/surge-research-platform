@@ -365,3 +365,178 @@ def test_the_opening_policy_admits_no_pipeline_or_shock_labels(conn):
         assert "PIPELINE_MISSED_ACTIONABLE_SIGNAL" not in admitted
         assert "OUT_OF_SCOPE_SHOCK" not in admitted
         assert "OUT_OF_SCOPE_LATE" not in admitted
+
+
+# ------------------------------------------- lineage as a condition of admission
+
+
+def _dataset(cur, purpose="PRODUCTION_TRAINING", name=None):
+    cur.execute(
+        """
+        insert into labels.datasets (name, policy_version, knowledge_cutoff, purpose)
+        values (%s, 'admission-1.1.0', %s, %s::labels.dataset_purpose)
+        returning dataset_id
+        """,
+        (name or f"lineage-probe-{uuid.uuid4()}", CUTOFF, purpose),
+    )
+    return cur.fetchone()[0]
+
+
+def _context(cur, objective_id, **overrides):
+    """An input snapshot for one observation.
+
+    The episode, setup and attempt are read from the observation rather than
+    passed in: `labels.check_observation_context` refuses a context that points
+    at a different one, which is the right rule and means a test that hard-coded
+    nulls here would fail at the wrong step and prove nothing about admission.
+    """
+
+    cur.execute("select run_id from pipeline.runs limit 1")
+    row = cur.fetchone()
+    run_id = row[0] if row else None
+    cur.execute(
+        "select episode_id, setup_id, entry_attempt_id from labels.objective_labels "
+        "where objective_id = %s",
+        (objective_id,),
+    )
+    episode_id, setup_id, entry_attempt_id = cur.fetchone()
+    params = {
+        "objective_id": objective_id,
+        "information_cutoff_at": CUTOFF,
+        "production_run_id": run_id,
+        "universe_run_id": run_id,
+        "market_data_run_id": run_id,
+        "feature_version": "features-1.0.0",
+        "feature_snapshot_ref": "probe/ref",
+        "coverage_snapshot": '{"materials": 1.0}',
+        "episode_id": episode_id,
+        "setup_id": setup_id,
+        "entry_attempt_id": entry_attempt_id,
+        "input_bundle_sha256": DIGEST,
+    }
+    params.update(overrides)
+    cur.execute(
+        """
+        insert into labels.observation_contexts (
+          objective_id, information_cutoff_at, production_run_id, universe_run_id,
+          market_data_run_id, feature_version, feature_snapshot_ref, coverage_snapshot,
+          episode_id, setup_id, entry_attempt_id, input_bundle_sha256
+        ) values (
+          %(objective_id)s, %(information_cutoff_at)s, %(production_run_id)s,
+          %(universe_run_id)s, %(market_data_run_id)s, %(feature_version)s,
+          %(feature_snapshot_ref)s, %(coverage_snapshot)s::jsonb,
+          %(episode_id)s, %(setup_id)s, %(entry_attempt_id)s, %(input_bundle_sha256)s
+        )
+        """,
+        params,
+    )
+
+
+def _admit(cur, dataset_id, label_id, admitted=True):
+    cur.execute(
+        "insert into labels.dataset_members (dataset_id, label_id, admitted) values (%s, %s, %s)",
+        (dataset_id, label_id, admitted),
+    )
+
+
+def test_a_training_set_refuses_a_label_whose_inputs_were_never_recorded(conn):
+    """Teacher data is input snapshot + decision + outcome. Two of the three is
+    not teacher data, and the database is the last place that can say so."""
+
+    with conn.cursor() as cur:
+        objective_id, security_id = _objective(cur)
+        label_id = _label(cur, objective_id, security_id, "PREDICTIVE_SUCCESS")
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="no observation context"):
+            _admit(cur, _dataset(cur), label_id)
+
+
+def test_a_rejected_member_needs_no_lineage(conn):
+    """The reason a label was left out may well be that its lineage is missing;
+    refusing to record that would erase the finding."""
+
+    with conn.cursor() as cur:
+        objective_id, security_id = _objective(cur)
+        label_id = _label(cur, objective_id, security_id, "PREDICTIVE_SUCCESS")
+
+        _admit(cur, _dataset(cur), label_id, admitted=False)
+
+
+def test_a_research_set_may_admit_a_label_with_no_lineage(conn):
+    with conn.cursor() as cur:
+        objective_id, security_id = _objective(cur)
+        label_id = _label(cur, objective_id, security_id, "PREDICTIVE_SUCCESS")
+
+        _admit(cur, _dataset(cur, purpose="RESEARCH_ONLY"), label_id)
+
+
+def test_a_predicted_example_needs_the_attempt_it_came_from(conn):
+    """A context complete enough for an ELIGIBLE_ONLY observation is not complete
+    for a PREDICTED one: the latter has a decision behind it, and which attempt
+    that was is part of what the example is.
+
+    The episode is not tested here because it cannot be missing: the objective
+    row's own CHECK requires one for PREDICTED and the context trigger requires
+    the context to name the same one. The lineage function still asks, because
+    defence that only holds while two other rules hold is not defence."""
+
+    with conn.cursor() as cur:
+        objective_id, security_id = _objective(cur)
+        label_id = _label(cur, objective_id, security_id, "PREDICTIVE_SUCCESS")
+        _context(cur, objective_id)
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="no entry_attempt_id"):
+            _admit(cur, _dataset(cur), label_id)
+
+
+def test_an_incomplete_context_names_what_is_missing(conn):
+    with conn.cursor() as cur:
+        objective_id, security_id = _objective(
+            cur,
+            observation_kind="ELIGIBLE_ONLY",
+            episode_id=None,
+            primary_episode_outcome=None,
+        )
+        label_id = _label(cur, objective_id, security_id, "ACTIONABLE_FALSE_NEGATIVE")
+        _context(cur, objective_id, coverage_snapshot=None, feature_snapshot_ref=None)
+
+        with pytest.raises(psycopg2.errors.RaiseException) as raised:
+            _admit(cur, _dataset(cur), label_id)
+
+        message = str(raised.value)
+        assert "no coverage_snapshot" in message
+        assert "no snapshot or reference" in message
+
+
+def test_a_complete_context_is_admitted(conn):
+    with conn.cursor() as cur:
+        objective_id, security_id = _objective(
+            cur,
+            observation_kind="ELIGIBLE_ONLY",
+            episode_id=None,
+            primary_episode_outcome=None,
+        )
+        label_id = _label(cur, objective_id, security_id, "ACTIONABLE_FALSE_NEGATIVE")
+        _context(cur, objective_id)
+
+        _admit(cur, _dataset(cur), label_id)
+
+        cur.execute("select count(*) from labels.dataset_members where label_id = %s", (label_id,))
+        assert cur.fetchone()[0] == 1
+
+
+def test_an_empty_coverage_snapshot_is_not_a_coverage_snapshot(conn):
+    """`{}` records that somebody wrote a field, not what the collectors had."""
+
+    with conn.cursor() as cur:
+        objective_id, security_id = _objective(
+            cur,
+            observation_kind="ELIGIBLE_ONLY",
+            episode_id=None,
+            primary_episode_outcome=None,
+        )
+        label_id = _label(cur, objective_id, security_id, "ACTIONABLE_FALSE_NEGATIVE")
+        _context(cur, objective_id, coverage_snapshot="{}")
+
+        with pytest.raises(psycopg2.errors.RaiseException, match="no coverage_snapshot"):
+            _admit(cur, _dataset(cur), label_id)
