@@ -1,7 +1,31 @@
 # 開発フェーズ
 
-状態: **v0.2（Phase 0.2 監査是正後）** — 2026-09-15
-各 Phase（または監査ラウンド）の完了時に停止 → 報告 → ChatGPT 監査 → ユーザー承認 → 次へ。
+状態: **v0.3（連続実装モード）** — 2026-09-17
+
+## 進め方（2026-09-17 改定）
+
+**旧方針は廃止した。** 「各 Phase（または監査ラウンド）の完了時に停止 → 報告 → ChatGPT 監査 → ユーザー承認 → 次へ」は、Phase 3 Stage 1 の承認をもって終了。
+
+現在の方針:
+
+- Claude Code は**主任開発エージェントとして連続実装する**。Phase 完了ごとに止まらない。
+- 可逆的・安全側・versioned に決められる事項は自分で決め、[unresolved-decisions.md](unresolved-decisions.md) に記録する。
+- unit / integration / regression test を追加しながら進む。
+- **停止するのは6つの場合だけ**（[CLAUDE.md §3](../CLAUDE.md) が正本）: ユーザー本人の契約・支払い / credential・account 操作 / 法的・利用規約上の本人確認 / 不可逆な削除 / Canonical 仕様との正面衝突 / プロジェクト目的の変更。
+- **次の統合報告地点は Phase 7 完了時**（Universe → Market Data → Feature → Route A-H → Materials → Entity Linking → Stage 2 → Stage 3 → Setup / Watch / Reject が end-to-end でつながった段階）。**Phase 8（リアルタイム ENTRY）に到達したらもう一度停止する** — 本物の外部依存（Live Provider）が出るため。
+
+### 未解決の外部依存は開発を止める理由にしない
+
+実 Provider が未確定・credential 未取得の領域は **`IMPLEMENTED_NOT_LIVE_VERIFIED`** として扱う。interface・schema・pipeline は完成させ、入力は合成 fixture / deterministic mock で満たし、「実データで検証していない」ことを報告と DB の両方に明示する。
+
+現在 `IMPLEMENTED_NOT_LIVE_VERIFIED` の領域:
+
+| 領域 | 待っているもの |
+|---|---|
+| JP EOD 価格取得 | D-102（JPX への書面照会） |
+| US EOD 価格取得 | D-103（Alpaca の居住地条項と SIP/IEX 確認） |
+| Object Storage 実体 | D-105（R2 のカード登録） |
+| LLM 実モデル接続 | 有料 LLM API を Production 必須にしない方針のため、deterministic mock で pipeline を完成させる |
 
 | Phase | 名称 | 主な成果物 | 完了条件（案） | 実装する回帰 fixture | 前提 |
 |---|---|---|---|---|---|
@@ -14,17 +38,33 @@
 | **1.1a** ✅ | Foundation Hardening（2026-09-16 完了） | runtime 権限の縮小（設定表は SELECT のみ・default privileges も読み取り専用）、as-of の historical ticker、発行体名をレジストリ由来に（`ref.issuer_names`）、名称一致による発行体統合の廃止、identity confidence 3段階＋`identity_version`、coverage の error/warning 分離、`listing_status_history` 廃止、rebuild 手順の再現性 | worker が allowlist/設定表へ書けないこと・as-of が当時の Ticker を返すこと・issuer 名がレジストリ名であることを DB 実機とテストで示す | Fixture 1.1a-1〜8（[security-identity.md](specs/security-identity.md) §7） | **Phase 2 開始前の最終是正。完了まで Phase 2 へ進まない。** |
 | **1.1b** ✅ | Phase 2 Preflight Final Gate（2026-09-16 完了） | loader の SECURITY DEFINER 化と `extensions` USAGE 剥奪、function の PUBLIC EXECUTE 恒久禁止、JP 特殊株式7件の是正、run publication model（validate / publish / authoritative_run_at / current_eligibility）、Production provenance（git_sha・config_hash・JOB_VERSION）、決定的 idempotency key、as-of の effective_from、SIC content hash、storage 認証モデルの是正 | worker が HTTP を直接出せない・未公開 run が authoritative にならない・知識時刻と有効時刻が分離していることを DB 実機とテストで示す | Fixture 1.1b-1〜8（[security-identity.md](specs/security-identity.md) §8） | **Phase 2 開始前の最終ゲート。完了まで Phase 2 へ進まない。** |
 | **1.1c** ✅ | Publication Immutability & Temporal Provenance（2026-09-16 完了） | published run の凍結（trigger）、publish の直列化と再 validate、`data_cutoff` = 全 source の最大 available_at、snapshot 行の可視時刻を dependency max へ、identifier / issuer name provenance を実供給 source へ、publication 検証の強化、Nasdaq content hash の単一 SHA-256 化 | published run へのあらゆる書き込みが拒否され、未 publish run は書けること・provenance が実供給 source を指すことを DB 実機とテストで示す | Fixture 1.1c-1〜9（[security-identity.md](specs/security-identity.md) §8） | **Phase 2 開始前の最終データ完全性パッチ。** |
-| 2 | Market Data + 3000円 Hard Filter | 全銘柄日足（Parquet）、FX（`fx_observed_at`）、Universe 判定履歴、カバレッジ監視、Universe 画面 | 取得率と Eligible 件数が毎営業日記録され、境界値・FX 同期・訂正データのテストが通る。**価格・FX の取得対象は `INCLUDED` ∪ `UNRESOLVED`**（`UNRESOLVED` を取得対象から落とさない。**Prediction 対象は Eligibility 解決済みの `INCLUDED` のみ**。どの run の判定を読むかは `universe.authoritative_run_at` が決める）。**Raw Market Data は `security_id` を唯一の復元キーにせず、`provider_id` / native symbol / exchange / `observed_at` / source record id / `identity_version` を必ず保存する**（D-52） | RF-09（Universe 部分）, RF-11, RF-16 | D-02a, D-03b, D-07a（EOD 用）, **D-40（US の security-level 安定識別子の取得可否を Provider 選定時に確認）** |
-| 3 | Stage 1 Technical Screening | Feature Engine（§15）、v5.1 Route A〜H のコード化、as-of 読み取り層 | Route ごとの該当理由が再現でき、Feature のゴールデンテストとリーク検査が通る | RF-01 / RF-01-M / RF-01-C（Feature・価格障害の部分） | v5.1 精読結果の監査 |
-| 4 | News / Disclosure Collection | ソース規約調査表、コレクタ（常駐型 Runner）、raw 保存、材料の4つの時刻（`source_published_at` / `system_first_seen_at` / `ingested_at` / `available_to_model_at`）、Materials 画面 | 規約確認済みソースから継続収集でき、取得ログとカバレッジが見える | RF-17（時刻記録の部分） | D-05a, D-12 |
-| 5 | Noise Filter + Entity Linking + Material Event | `market_relevance`、同一出来事の統合、Discovery/Verification、`relation_type`・因果経路、Material 候補、価格カットオフと材料の扱い | 評価用サンプルでの精度を報告。Technical と独立に候補を生成 | RF-04, RF-05 / RF-05-C（Setup 分離・材料部分）, RF-17 | D-11 |
-| 6 | Chart Knowledge Base + Stage 2 | 知識ベース、候補の分足取得、チャート画像、Stage 2 判定 | 各概念に正例・失敗例・反例があり、Stage 2 の結果が根拠付きで保存される | — | D-08a |
-| 7 | LLM Stage 3 EOD Analysis | 入力バンドル、プロンプト組み立て（v5.1 原文と addenda を別セクション・別ハッシュ）、出力検証器（Reachable Zone の根拠の役割、価格障害の記録の検査を含む）、`TECHNICAL_SETUP_EOD` / `POST_CLOSE_CATALYST_SETUP` / `WATCH_*` / `REJECT` | 候補に対する判定と根拠が再現可能な形で保存される | RF-01 / RF-01-M / RF-01-C（出力検証器の部分）, RF-05（分析部分）, RF-08, RF-14b（入力バンドル） | D-11, D-32 |
-| 8 | ENTRY 判断 / Watch / Prediction / Episode | 場中 Runner、リアルタイム Provider、`entry_decision`・`watch_monitor`、append-only の Prediction、Episode、State Transition、Predictions / Watch 画面 | Watch 到達だけで ENTRY にならない・Threshold が entry 価格基準・Episode の重複計上がないことをテストで示す | RF-03, RF-06, RF-07, RF-09（ENTRY 部分）, RF-19, RF-20, RF-21（記録部分） | **D-06b（Phase 8 までの blocker）**, D-01a, D-01b, D-17a, D-17b, D-20, D-21, D-31 |
+| 2 ✅ | Market Data + 3000円 Hard Filter（2026-09-17 完了） | `market` スキーマ（license policy / raw object manifest / purge / daily_bars の列別 basis / corporate actions / FX / FIGI）、`ObjectStore`（content-addressed・write-once）、Provider adapter 4種、`price-filter-1.0.0`、coverage、Parquet 分割 | schema・purge・eligibility・provenance が DB 実機とテストで示される。**実価格データの取得は D-102 / D-103 待ちで `IMPLEMENTED_NOT_LIVE_VERIFIED`** | RF-09（Universe 部分）, RF-11, RF-16 | **完了。** 取得対象は `INCLUDED` ∪ `UNRESOLVED`、Prediction 対象は Eligibility 解決済みの `INCLUDED` のみ。Raw Market Data は `provider_id` / native symbol / exchange / `observed_at` / source record id / `identity_version` を必ず保存（D-52） |
+| 3 ✅ | Stage 1 Technical Screening（2026-09-17 完了） | `screening.features_daily`（数値 feature 74列）、Wilder 平滑の指標19種、Route A〜H を **OR 型 Candidate Generation** として実装、`discovery_routes[]`、`route_evidence`、as-of 比較可能系列（`SPLIT_ADJUSTED_TO_AS_OF`） | Route ごとの該当理由が測定値として再現でき、リーク検査が通る。**合成 fixture で検証済み、実価格データ未投入** | RF-01 / RF-01-M / RF-01-C（Feature・価格障害の部分） | **完了。** 数値を正本にし pattern label にしない（D-98）。Route F の turnover 閾値は市場別（D-99） |
+| 4 | News / Disclosure Collection | ソース規約調査表、コレクタ（常駐型 Runner）、raw 保存、材料の4つの時刻（`source_published_at` / `system_first_seen_at` / `ingested_at` / `available_to_model_at`）、Materials 画面のデータ契約 | 規約確認済みソースから継続収集でき、取得ログとカバレッジが見える。**Zero-cost core を維持**（有料ニュースを Production 必須にしない） | RF-17（時刻記録の部分） | **JP**: TDnet 等の公式開示 / EDINET / 官公庁 / JPX / 日銀 / 財務省 / 経産省。**US**: SEC EDGAR / Federal Reserve / Treasury / White House・各庁 / 法的に取得可能な company IR feed。**Macro**: government / regulator / 公的機関。**backfill した記事を当時知っていた情報として扱わない。** D-05a, D-12 |
+| 5 | Noise Filter + Entity Linking + Material Event | `market_relevance`、`material_event` / `material_source` / `entity_relation` の**分離**、Discovery Source と Verification Source の分離、`relation_type` 13種、因果経路、7つの独立 feature（novelty / surprise / directness / magnitude / persistence / market reaction / priced-in） | 評価用サンプルでの精度を報告。**Technical Route と Material Route を独立に走らせ、最後に union して Stage 2 へ送る**（Technical-only 候補も Material-only 候補も落とさない） | RF-04, RF-05 / RF-05-C（Setup 分離・材料部分）, RF-17 | **IR > News の固定順位は禁止。** `WEAK_ASSOCIATION` 単独で強材料扱いしない。マクロ材料は因果経路必須。D-11 |
+| 6 | Chart Knowledge Base + Stage 2 | 知識ベース（**pattern 名の辞書にしない**。各 concept に Definition / Mechanism / Positive Context / Negative Context / Counterexample / Numerical Features / Success Examples / Failure Examples）、候補の分足取得、チャート画像、Stage 2 判定 | 各概念に正例・失敗例・**反例**があり、Stage 2 の結果が根拠付きで保存される。**数値 feature を正本にする** | — | Stage 2 で保存: detailed technical / volume・turnover / support・resistance / VWAP / volatility / seller exhaustion / failed breakout / healthy pullback / supply overhang。D-08a |
+| 7 | LLM Stage 3 EOD Analysis | 入力バンドル（Canonical v5.1 hash + post-v5.1 addenda + market data + features + routes + materials + entity links + price obstacles + coverage を**version 付きで保存**）、プロンプト組み立て、出力検証器、`LLMProvider` interface + deterministic mock | 候補に対する判定と根拠が再現可能な形で保存される。**この段階では正式 ENTRY Prediction を作らない** | RF-01 / RF-01-M / RF-01-C（出力検証器の部分）, RF-05（分析部分）, RF-08, RF-14b（入力バンドル） | 出力 state: `TECHNICAL_SETUP_EOD` / `POST_CLOSE_CATALYST_SETUP` / `WATCH_BREAKOUT` / `WATCH_PULLBACK` / `WATCH_OTHER` / `REJECT`。**20% Threshold と Reachable Zone を分離。旧高値は upside 根拠にせず obstacle として扱う。****v5.1 Canonical は変更しない。有料 LLM API を必須にしない。** D-11, D-32 |
+| 8 | ENTRY 判断 / Watch / Prediction / Episode | 場中 Runner、リアルタイム Provider、`entry_decision`・`watch_monitor`、append-only の Prediction、Episode、State Transition、Predictions / Watch 画面 | Watch 到達だけで ENTRY にならない・Threshold が entry 価格基準・Episode の重複計上がないことをテストで示す | RF-03, RF-06, RF-07, RF-09（ENTRY 部分）, RF-19, RF-20, RF-21（記録部分） | **D-06b（Phase 8 までの blocker）**, D-01a, D-01b, D-17a, D-17b, D-20, D-21, D-31  **ここで停止して統合報告する（Live Provider という本物の外部依存が出るため）。** |
 | 9 | Outcome Tracking + Excel Export | Episode と全 Eligible 銘柄の Outcome、パス解決、Results 画面、Excel | 分割・上場廃止・休場・分足欠損を含むケースで正しく計算される | RF-06（集計部分）, RF-10, RF-18, RF-20（Outcome 部分）, RF-21（Outcome 部分）, RF-22, RF-24 | D-15, D-24 |
 | 10 | Teacher Dataset | Objective / Interpretive ラベル、採用ポリシー、見逃しの Research 判定、状態遷移の教師データ | ラベル基準が監査済みで、突発急騰が ACTIONABLE_FALSE_NEGATIVE にならないことをテストで示す | RF-02, RF-13, RF-23, RF-24（ラベル部分） | D-13a, D-13b, D-33 |
 | 11 | ML / Weight Learning | 4層の学習、walk-forward、条件付き Weight、Feature interaction | Champion / Challenger 比較がリークなしで生成される | RF-15（Replay 部分） | 教師データ量の十分性の判断 |
 | 12 | Model Lab / Continuous Improvement | Model Lab 画面、Route/Driver/Feature 別成績、LLM 評価精度、version 比較、昇格フロー | Challenger の昇格が監査ログ付きで行える | — | — |
+
+## UI（Phase 4〜7 と並走）
+
+**バックエンドだけで終わらせない。** 各 Phase の成果物には、対応する読み出し契約（API / view）を含める。
+
+| 画面 | 主なデータ契約 | 依存 Phase |
+|---|---|---|
+| Dashboard | 当日の候補件数・Route 別内訳・pipeline の健全性・未充足ロール | 3, 4, 5 |
+| Universe | `universe.eligibility_as_of` / 除外理由 / `TYPE_UNKNOWN` 件数 | 1, 2 |
+| Materials | `material_event` とその `material_source`、4つの時刻、`relation_type` | 4, 5 |
+| Stock Detail | 価格系列・feature 行・発火 Route・紐づく材料・価格障害（過去高値は obstacle として） | 2, 3, 5, 6 |
+| Watch / Setup | Stage 3 の出力 state と根拠 | 7 |
+| Coverage | provider 失敗・品質警告・identity collision の**分離**表示 | 1, 2, 4 |
+| Pipeline diagnostics | run / publication / error log / idempotency / `IMPLEMENTED_NOT_LIVE_VERIFIED` の領域 | 全て |
+
+Next.js UI 本体（`apps/web`）も既存 Phase 設計に沿って進めてよい。重い全市場処理・場中監視・学習を Web に載せない（[CLAUDE.md §2](../CLAUDE.md)）。
 
 ## 各 Phase 共通の Definition of Done
 
@@ -32,3 +72,4 @@
 - `run_id` / cutoff 類 / version / provider_bindings / error log が保存される
 - その Phase で実装すべき回帰 fixture が通る（未到達のものは pending のまま残す）
 - 未実装・妥協・データ制約が報告に書かれている
+- 実データで検証していない部分は `IMPLEMENTED_NOT_LIVE_VERIFIED` と明示する（「動いた」と書かない）

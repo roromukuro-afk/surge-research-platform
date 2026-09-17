@@ -140,7 +140,35 @@ Claude Code はこのプロジェクトの**主任開発エージェント**で�
 
 ## 3. 進め方
 
-- **一気に最後まで作らない。** Phase（または監査ラウンド）ごとに停止して報告し、ChatGPT 監査後に次へ進む。
+**2026-09-17 方針変更: Phase ごとの停止監査を廃止し、連続実装に移行した。**（それ以前の「Phase ごとに停止 → 報告 → ChatGPT 監査 → 承認 → 次へ」は無効）
+
+- Claude Code は**主任開発エージェントとして連続実装する**。小さな不明点で停止しない。
+- **可逆的・安全側・versioned に決められる事項は自分で決める。** 決めたら記録する。
+  - 「可逆的」= 新しい version / 新しい migration で戻せる。
+  - 「安全側」= 誤っていたときに黙って誤った値を作るのではなく、明示的に落ちる・`UNKNOWN` を返す・記録に残す。
+  - 「versioned」= `rule_version` / `feature_version` / `identity_version` 等を伴い、過去の判断を書き換えない。
+- unit / integration / regression test を追加しながら進む。
+- ChatGPT へ戻るのは**大きな統合マイルストーンのみ**。
+
+### 停止してユーザーに確認するのは、この6つだけ
+
+1. ユーザー本人の**契約・支払い**が必要
+2. **credential / account 操作**が必要
+3. **法的・利用規約上、本人確認**が必要
+4. **不可逆な削除**
+5. **Canonical 仕様と真正面から衝突**
+6. **プロジェクト目的そのものを変える**判断
+
+これ以外は止まらない。未解決の外部依存（例: D-102 JPX / D-103 Alpaca）は**開発を止める理由にしない**。
+
+### `IMPLEMENTED_NOT_LIVE_VERIFIED`
+
+実 Provider が未確定・credential 未取得の領域は、実装を止めるのではなく **`IMPLEMENTED_NOT_LIVE_VERIFIED`** として扱う。
+
+- interface と schema と pipeline は完成させる。
+- 入力は合成 fixture / deterministic mock で満たす。
+- 「実データで検証していない」ことを**報告と DB の両方に明示**する。実データで動いたことにしない。
+
 - 投資ロジックに関わる曖昧な判断は Decision Needed に回す。
 - 決定・未決事項は [docs/unresolved-decisions.md](docs/unresolved-decisions.md) に記録する（行は削除しない）。
 
