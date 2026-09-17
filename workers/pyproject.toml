@@ -6,7 +6,12 @@ requires-python = ">=3.12"
 dependencies = ["openpyxl>=3.1"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.6", "pyarrow>=17"]
+dev = ["pytest>=8.0", "ruff>=0.6", "pyarrow>=17", "tiktoken>=0.9"]
+# Exact token counts for the GPT-OSS models, whose tokeniser (o200k_harmony)
+# OpenAI publishes. Optional on purpose: without it the feasibility report
+# falls back to its estimate and says so, rather than reporting an estimate
+# as though it were a measurement.
+tokens = ["tiktoken>=0.9"]
 # Canonical price series are stored as Parquet in object storage.
 parquet = ["pyarrow>=17"]
 # Only needed to talk to Cloudflare R2. Conditional writes (If-None-Match on

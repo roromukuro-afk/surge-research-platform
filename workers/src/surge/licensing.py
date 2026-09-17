@@ -244,6 +244,66 @@ class PersistenceDecision:
     def may_persist(self) -> bool:
         return self.permission is Permission.ALLOWED
 
+    def assert_is_for(self, *, provider_id: str, dataset_key: str) -> None:
+        """Refuse a permission that was written about something else.
+
+        ``permission = ALLOWED`` on its own is a licence-shaped object, not a
+        licence for *this* data. Without this check, an ECB decision - genuinely
+        ALLOWED, genuinely correct - would let an Alpaca fetch be written to
+        disk, and the audit trail would show a permission that really existed
+        for a dataset it was never about.
+
+        Identity only. The policy version needs a fetch to compare against, so
+        it belongs to :meth:`assert_governs_fetch`.
+        """
+
+        problems = []
+        if self.provider_id != provider_id:
+            problems.append(
+                f"the decision is about provider {self.provider_id!r} and this data came from "
+                f"{provider_id!r}"
+            )
+        if self.dataset_key != dataset_key:
+            problems.append(
+                f"the decision is about dataset {self.dataset_key!r} and this data is "
+                f"{dataset_key!r}"
+            )
+        if problems:
+            raise LicenseViolation(
+                "this persistence decision does not apply to this data: " + "; ".join(problems)
+            )
+
+    def assert_governs_fetch(
+        self, *, provider_id: str, dataset_key: str, policy_version: str | None
+    ) -> None:
+        """Everything :meth:`assert_is_for` checks, plus the reading of the terms.
+
+        A decision made under one reading does not authorise a write governed by
+        a different one. A missing version on either side is a mismatch rather
+        than a wildcard: "we did not record which terms applied" is not evidence
+        that they were the same terms.
+        """
+
+        self.assert_is_for(provider_id=provider_id, dataset_key=dataset_key)
+
+        if self.policy_version is None:
+            raise LicenseViolation(
+                f"this persistence decision for {self.provider_id}/{self.dataset_key} names no "
+                "policy_version, so it cannot be matched to the reading of the terms that governs "
+                "this fetch. Build it with PersistenceDecision.from_license_policy()"
+            )
+        if policy_version is None:
+            raise LicenseViolation(
+                f"the fetch names no license_policy_version to match against the decision's "
+                f"{self.policy_version!r}. A durable write has to record which terms allowed it"
+            )
+        if self.policy_version != policy_version:
+            raise LicenseViolation(
+                f"the decision was made under policy {self.policy_version!r} and this fetch was "
+                f"governed by {policy_version!r}. One reading of the terms does not authorise a "
+                "write under another"
+            )
+
     def assert_may_persist(self, *, target: str) -> None:
         if self.may_persist:
             return
@@ -254,6 +314,23 @@ class PersistenceDecision:
             f"persistence is {self.permission.value}{detail}. Only ALLOWED permits a durable "
             f"write; NOT_SPECIFIED and UNKNOWN are not permission, they are the absence of it."
             f"{source}"
+        )
+
+    @classmethod
+    def from_license_policy(cls, policy: LicensePolicy, *, note: str | None = None):
+        """The standard way in. Everything is taken from the stored policy.
+
+        Building one by hand is what makes a mismatched decision possible in the
+        first place, so the constructor that cannot mismatch is the one to use.
+        """
+
+        return cls(
+            provider_id=policy.provider_id,
+            dataset_key=policy.dataset_key,
+            permission=policy.private_persistence_allowed,
+            policy_version=policy.policy_version,
+            terms_url=policy.terms_url,
+            note=note,
         )
 
     @classmethod

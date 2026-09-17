@@ -11,9 +11,12 @@ The sequence, and why each step is where it is:
 
 1. the watch reached its trigger. That is an observation, and nothing follows
    from it (CLAUDE.md 1-5).
-2. the watch moves to ``IN_REANALYSIS`` **before** the model is called. If the
-   process dies mid-analysis, the stored state says an analysis was under way
-   rather than that a trigger was never acted on.
+2. the watch moves to ``IN_REANALYSIS`` **before** the model is called, and the
+   execution is recorded in the same breath. Given an :class:`ExecutionStore`
+   backed by the database, that is one transaction and a crash leaves a row
+   saying an analysis was under way. Given no store, the move is in memory only
+   and survives nothing - so the job says which it is rather than claiming
+   durability it does not have.
 3. the model answers under the intraday contract, which is the only contract
    with ENTRY in it.
 4. the answer is validated against facts this system measured. A failed
@@ -44,6 +47,11 @@ from surge.analysis.entry_analysis import (
     render_entry_prompt,
     to_entry_request,
     validate_entry_analysis,
+)
+from surge.analysis.execution import (
+    ExecutionKey,
+    ExecutionStore,
+    FailureClass,
 )
 from surge.analysis.llm import LLMRequest
 from surge.entry.decision import decide
@@ -100,6 +108,13 @@ class IntradayDecision:
     attempt: EntryAttempt | None = None
     prediction: Prediction | None = None
     skipped_reason: str | None = None
+    analysis_execution_id: str | None = None
+    #: True when this pass resumed a crashed one rather than starting fresh.
+    resumed: bool = False
+    #: Set when a completed execution already existed for this trigger. Nothing
+    #: is re-run and nothing is re-decided.
+    already_decided: bool = False
+    failure_class: FailureClass | None = None
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -120,6 +135,10 @@ class IntradayDecision:
             "validation_errors": list(self.validation.errors) if self.validation else [],
             "system_refusals": list(self.validation.system_refusals) if self.validation else [],
             "skipped_reason": self.skipped_reason,
+            "analysis_execution_id": self.analysis_execution_id,
+            "resumed": self.resumed,
+            "already_decided": self.already_decided,
+            "failure_class": self.failure_class.value if self.failure_class else None,
             "attempt_status": self.attempt.status.value if self.attempt else None,
             "created_a_prediction": self.created_a_prediction,
             "watch_state_after": self.watch_state_after.value,
@@ -136,6 +155,10 @@ class EntryAnalysisJob:
     canonical_text: str
     addenda_texts: tuple[str, ...] = ()
     version: str = JOB_VERSION
+    #: Where executions are recorded. Without one the watch move is in memory
+    #: and a crash loses it; the job says so in its notes rather than letting a
+    #: docstring imply otherwise.
+    executions: ExecutionStore | None = None
 
     def run_for_watch(
         self,
@@ -145,6 +168,7 @@ class EntryAnalysisJob:
         facts: EntryGuardFacts,
         thesis_key: str,
         now: datetime,
+        trigger_transition_id: int | None = None,
         entry_price: ObservedPrice | None = None,
         entry_price_method: str | None = None,
         setup_ids: tuple[str, ...] = (),
@@ -153,7 +177,13 @@ class EntryAnalysisJob:
         analysis_kind: AnalysisKind = AnalysisKind.REANALYSIS,
         verification: VerificationStatus = VerificationStatus.IMPLEMENTED_NOT_LIVE_VERIFIED,
     ) -> IntradayDecision:
-        if watch.state not in (WatchState.TRIGGER_HIT,):
+        # The watch-state precondition is checked below rather than here, and
+        # the order matters. Moving the watch is the *first* thing a run does,
+        # so after a crash it is no longer at TRIGGER_HIT - and refusing every
+        # recovery with a complaint about a state the crash itself caused would
+        # defeat the record entirely. With a store, the record is consulted
+        # first; without one there is nothing to consult and the check stands.
+        if self.executions is None and watch.state is not WatchState.TRIGGER_HIT:
             raise EntryContractError(
                 f"watch {watch.watch_id} is {watch.state.value}; a reanalysis runs from "
                 "TRIGGER_HIT. Reaching the trigger is the observation, this is the decision, and "
@@ -166,6 +196,8 @@ class EntryAnalysisJob:
         # so the model is not asked, and the watch stays where it is. The trigger
         # has been hit; a later pass with the inputs present can still act on it.
         if not facts.coverage_meets_requirements:
+            # No execution row either: the analysis did not start, and a row
+            # saying it did would misrepresent what happened.
             return IntradayDecision(
                 security_id=bundle.security_id,
                 watch_id=watch.watch_id,
@@ -180,17 +212,115 @@ class EntryAnalysisJob:
                 ],
             )
 
-        # Moved before the call, not after it. A crash inside the model call
-        # should leave a watch that says "an analysis was running", not one that
-        # says "the trigger was never acted on".
-        watch.begin_reanalysis(at=now, note=f"{self.version} via {getattr(self.provider, 'provider_id', '?')}")
-
+        notes: list[str] = []
         prompt = render_entry_prompt(bundle, self.canonical_text, self.addenda_texts)
         request = LLMRequest(prompt=prompt, bundle=bundle)
-        response = self.provider.analyse_entry(request)
+        provider_id = getattr(self.provider, "provider_id", "?")
+        execution_id: str | None = None
+        resumed = False
+        stored_answer = None
+
+        # The record and the watch move go together, before the model is called.
+        # With a database-backed store that is one transaction; a crash after it
+        # leaves a row that says an analysis was under way, which is the whole
+        # point of doing it in this order.
+        if self.executions is not None:
+            if trigger_transition_id is None:
+                raise EntryContractError(
+                    "an execution store needs the trigger transition this analysis is answering. "
+                    "Keying on the watch alone would refuse the second analysis of a watch that "
+                    "legitimately re-armed and triggered again"
+                )
+            key = ExecutionKey(
+                watch_id=watch.watch_id,
+                trigger_transition_id=trigger_transition_id,
+                analysis_kind=analysis_kind,
+            )
+            begun = self.executions.begin(
+                key,
+                security_id=bundle.security_id,
+                decision_cutoff_at=facts.decision_cutoff_at,
+                provider_id=provider_id,
+                provider_kind=getattr(
+                    getattr(self.provider, "provider_kind", None), "value", "UNKNOWN"
+                ),
+                model_id=getattr(self.provider, "model_id", None),
+                run_id=run_id,
+                now=now,
+            )
+            execution_id = begun.execution.analysis_execution_id
+
+            if begun.already_decided:
+                # Case three: the decision committed and then the process died.
+                # A second prediction from one trigger would make repeating
+                # yourself look like being right twice.
+                return IntradayDecision(
+                    security_id=bundle.security_id,
+                    watch_id=watch.watch_id,
+                    bundle_sha256=bundle.bundle_sha256,
+                    watch_state_after=watch.state,
+                    analysis_execution_id=execution_id,
+                    already_decided=True,
+                    skipped_reason=(
+                        f"this trigger was already analysed and the analysis is "
+                        f"{begun.execution.status.value}"
+                    ),
+                    notes=[
+                        "nothing was re-run and nothing was re-decided. The idempotency key is "
+                        "the watch, the trigger transition and the analysis kind"
+                    ],
+                )
+
+            if begun.created:
+                # A new analysis, so the trigger really does have to be the
+                # thing being answered. The watch machine says the same, and
+                # this says it in the job's own words.
+                if watch.state is not WatchState.TRIGGER_HIT:
+                    raise EntryContractError(
+                        f"watch {watch.watch_id} is {watch.state.value}; a new reanalysis runs "
+                        "from TRIGGER_HIT. Reaching the trigger is the observation, this is the "
+                        "decision, and the two must not be collapsed (CLAUDE.md 1-5)"
+                    )
+                watch.begin_reanalysis(at=now, note=f"{self.version} via {provider_id}")
+            else:
+                resumed = True
+                stored_answer = begun.execution.stored_answer
+                notes.append(
+                    "resumed an analysis that was started and never finished"
+                    + (
+                        "; the model had already answered, so that answer is used rather than "
+                        "asking again - a second call could return something different, and then "
+                        "which one was the analysis for this trigger would have no answer"
+                        if stored_answer is not None
+                        else "; the model had not answered yet"
+                    )
+                )
+        else:
+            watch.begin_reanalysis(at=now, note=f"{self.version} via {provider_id}")
+            notes.append(
+                "no execution store was supplied, so this watch move is in memory only and a "
+                "crash would lose it"
+            )
+
+        if stored_answer is not None:
+            response = stored_answer
+        else:
+            try:
+                response = self.provider.analyse_entry(request)
+            except Exception as exc:
+                if self.executions is not None and execution_id is not None:
+                    self.executions.fail(
+                        execution_id,
+                        failure_class=FailureClass.PROVIDER_ERROR,
+                        failure_detail=f"{type(exc).__name__}: {exc}",
+                        now=now,
+                    )
+                raise
+            if self.executions is not None and execution_id is not None:
+                self.executions.record_answer(execution_id, response)
+
         validation = validate_entry_analysis(response, facts, bundle=bundle)
 
-        notes: list[str] = []
         decision = IntradayDecision(
             security_id=bundle.security_id,
             watch_id=watch.watch_id,
@@ -199,6 +329,8 @@ class EntryAnalysisJob:
             analysis=response,
             validation=validation,
             prompt_sha256=request.prompt_sha256,
+            analysis_execution_id=execution_id,
+            resumed=resumed,
             notes=notes,
         )
 
@@ -211,6 +343,15 @@ class EntryAnalysisJob:
                 "attempt. It never became a decision, so recording it as one would put a verdict "
                 "in the ledger that nothing made"
             )
+            decision.failure_class = FailureClass.CONTRACT_VIOLATION
+            if self.executions is not None and execution_id is not None:
+                self.executions.fail(
+                    execution_id,
+                    failure_class=FailureClass.CONTRACT_VIOLATION,
+                    failure_detail="; ".join(validation.errors),
+                    now=now,
+                    validation=validation,
+                )
             return decision
 
         if validation.system_refusals:
@@ -227,6 +368,15 @@ class EntryAnalysisJob:
                 "recorded: its verdicts are evidence the pipeline works and no evidence about this "
                 "security"
             )
+            decision.failure_class = FailureClass.STAND_IN_PROVIDER
+            if self.executions is not None and execution_id is not None:
+                self.executions.fail(
+                    execution_id,
+                    failure_class=FailureClass.STAND_IN_PROVIDER,
+                    failure_detail="a deterministic stand-in cannot produce a formal prediction",
+                    now=now,
+                    validation=validation,
+                )
             return decision
 
         # --- a real verdict, handed to the Phase 8 decision ------------------
@@ -260,6 +410,15 @@ class EntryAnalysisJob:
         else:
             watch.rearm(at=now, note=outcome.attempt.reject_reason or outcome.attempt.status.value)
         decision.watch_state_after = watch.state
+
+        if self.executions is not None and execution_id is not None:
+            self.executions.complete(
+                execution_id,
+                validation=validation,
+                entry_attempt_id=getattr(outcome.attempt, "attempt_id", None),
+                prediction_id=getattr(outcome.prediction, "prediction_id", None),
+                now=now,
+            )
         return decision
 
 

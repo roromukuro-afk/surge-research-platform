@@ -71,6 +71,53 @@ DOCUMENTED_STRICT_MODELS = frozenset({"openai/gpt-oss-120b", "openai/gpt-oss-20b
 #: whatever the account is actually allowed.
 ANALYSIS_FREE_QUOTA_BLOCKED = "ANALYSIS_FREE_QUOTA_BLOCKED"
 
+class OutputMode(StrEnum):
+    """What a model can be asked to return, as its vendor documents it today.
+
+    Four states rather than a boolean, because "not strict" covers two very
+    different situations: a model that will honour a schema on a best-effort
+    basis, and one that will only promise valid JSON with no schema at all. The
+    second still works here - the schema is re-checked on this side - but it
+    needs a retry loop, and knowing which one is in use is what decides whether
+    that loop exists.
+    """
+
+    STRICT_JSON_SCHEMA = "STRICT_JSON_SCHEMA"
+    BEST_EFFORT_JSON_SCHEMA = "BEST_EFFORT_JSON_SCHEMA"
+    JSON_OBJECT = "JSON_OBJECT"
+    PLAIN_TEXT = "PLAIN_TEXT"
+
+    @property
+    def sends_a_schema(self) -> bool:
+        return self in (OutputMode.STRICT_JSON_SCHEMA, OutputMode.BEST_EFFORT_JSON_SCHEMA)
+
+    @property
+    def needs_client_side_retry(self) -> bool:
+        """Whether a malformed answer is expected often enough to plan for."""
+
+        return self is OutputMode.JSON_OBJECT
+
+
+#: Recorded when a family is absent from the vendor's structured-outputs list.
+#: Deliberately not "unverified": the documentation is a positive list, and a
+#: family missing from it is a documented absence rather than an open question.
+#: What remains open is whether json_object plus a client-side schema check is
+#: good enough, and that is a different thing to find out.
+JSON_SCHEMA_UNSUPPORTED_BY_CURRENT_DOCS = "JSON_SCHEMA_UNSUPPORTED_BY_CURRENT_DOCS"
+
+#: How many completion tokens a request reserves. Groq's free tier meters one
+#: combined tokens-per-minute figure, so the reserve counts against the same
+#: allowance as the prompt and a preflight that ignored it would approve
+#: requests the API then refuses.
+DEFAULT_COMPLETION_RESERVE = 2048
+
+#: How many times a json_object answer may be re-requested before the analysis
+#: is failed. Bounded, and small: a model that cannot produce the shape twice is
+#: not going to produce it on the ninth attempt, and every attempt spends the
+#: same quota the prompt does.
+MAX_JSON_OBJECT_ATTEMPTS = 3
+
+
 #: Groq's published free-plan limits, read from
 #: https://console.groq.com/docs/rate-limits on 2026-09-17. Recorded per model
 #: family rather than as one number for the provider, because they differ by an
@@ -86,17 +133,21 @@ PUBLISHED_FREE_LIMITS = {
         "requests_per_day": 1_000,
         "tokens_per_minute": 8_000,
         "tokens_per_day": 200_000,
-        "strict_structured_outputs": True,
+        "output_mode": OutputMode.STRICT_JSON_SCHEMA,
+        "tokenizer": "o200k_harmony",
+        "note": None,
     },
     "groq/compound*": {
         "requests_per_minute": 30,
         "requests_per_day": 250,
         "tokens_per_minute": 70_000,
         "tokens_per_day": None,
-        # Not listed among the models Groq documents for strict mode. Recorded
-        # as unknown rather than assumed either way - it is the difference
-        # between a usable fallback and a dead end, and it has to be measured.
-        "strict_structured_outputs": None,
+        # Absent from Groq's structured-outputs list, which is a positive list.
+        # So this is a documented absence, not an open question: the family gets
+        # json_object plus a schema check on this side, and a bounded retry.
+        "output_mode": OutputMode.JSON_OBJECT,
+        "tokenizer": None,
+        "note": JSON_SCHEMA_UNSUPPORTED_BY_CURRENT_DOCS,
     },
 }
 
@@ -309,6 +360,11 @@ class Quota:
     max_input_tokens_per_minute: int | None = None
     max_requests_per_minute: int | None = None
     requests_per_day: int | None = None
+    #: Some accounts meter input and output separately (ITPM / OTPM) and some
+    #: meter one combined figure. They are judged differently: a combined limit
+    #: has to cover the prompt *and* the reserved completion, while separate
+    #: limits are each compared with their own side.
+    max_output_tokens_per_minute: int | None = None
     source: str = "not measured; read the account's rate-limit headers"
 
     @property
@@ -326,6 +382,7 @@ class Quota:
 @dataclass(frozen=True)
 class Preflight:
     prompt_tokens_estimated: int
+    reserved_output_tokens: int
     quota: Quota
     fits: bool
     reason: str
@@ -337,6 +394,7 @@ class Preflight:
     def summary(self) -> dict:
         return {
             "prompt_tokens_estimated": self.prompt_tokens_estimated,
+            "reserved_output_tokens": self.reserved_output_tokens,
             "fits": self.fits,
             "reason": self.reason,
             "reason_code": self.reason_code,
@@ -344,25 +402,39 @@ class Preflight:
         }
 
 
-def preflight(prompt: str, *, quota: Quota, requests_per_day: int = 1) -> Preflight:
-    """Decide whether this prompt may be sent, without changing the prompt.
+def preflight(
+    prompt: str,
+    *,
+    quota: Quota,
+    requests_per_day: int = 1,
+    reserved_output_tokens: int = DEFAULT_COMPLETION_RESERVE,
+) -> Preflight:
+    """Decide whether this request may be sent, without changing the prompt.
 
     There is no ``max_chars`` and no truncation argument, by design. If the
-    bundle does not fit, the finding is that the free tier cannot run this
-    analysis - which is a fact worth having - and not that v5.1 needs shortening.
+    bundle does not fit, the finding is that the tier cannot run this analysis -
+    which is worth having - and not that v5.1 needs shortening.
+
+    The completion reserve counts. Where an account meters one combined
+    tokens-per-minute figure, the model's own output is spent from the same
+    allowance as the prompt, so a preflight that weighed only the input would
+    approve requests the API then refuses. Where input and output are metered
+    separately, each is compared with its own limit instead.
     """
 
     estimated = estimate_tokens(prompt)
+    combined = estimated + max(0, reserved_output_tokens)
 
     if not quota.is_known:
         return Preflight(
             prompt_tokens_estimated=estimated,
+            reserved_output_tokens=reserved_output_tokens,
             quota=quota,
             fits=False,
             reason=(
-                f"the account's limits have not been measured, so whether ~{estimated} input tokens "
-                "fit is unknown. Read them from the rate-limit headers of one real request before "
-                "running a batch"
+                f"the account's limits have not been measured, so whether ~{estimated} input "
+                f"tokens plus a {reserved_output_tokens} token completion reserve fit is unknown. "
+                "Read them from the rate-limit headers of one real request before running a batch"
             ),
             reason_code=None,
         )
@@ -371,6 +443,7 @@ def preflight(prompt: str, *, quota: Quota, requests_per_day: int = 1) -> Prefli
     if per_request is not None and estimated > per_request:
         return Preflight(
             prompt_tokens_estimated=estimated,
+            reserved_output_tokens=reserved_output_tokens,
             quota=quota,
             fits=False,
             reason=(
@@ -381,40 +454,83 @@ def preflight(prompt: str, *, quota: Quota, requests_per_day: int = 1) -> Prefli
             reason_code=ANALYSIS_FREE_QUOTA_BLOCKED,
         )
 
-    per_minute = quota.max_input_tokens_per_minute or quota.max_tokens_per_minute
-    if per_minute is not None and estimated > per_minute:
+    # Separate input and output meters, judged separately.
+    if quota.max_input_tokens_per_minute is not None:
+        if estimated > quota.max_input_tokens_per_minute:
+            return Preflight(
+                prompt_tokens_estimated=estimated,
+                reserved_output_tokens=reserved_output_tokens,
+                quota=quota,
+                fits=False,
+                reason=(
+                    f"~{estimated} input tokens exceeds the whole input allowance per minute "
+                    f"({quota.max_input_tokens_per_minute}); a single request cannot be sent"
+                ),
+                reason_code=ANALYSIS_FREE_QUOTA_BLOCKED,
+            )
+        if (
+            quota.max_output_tokens_per_minute is not None
+            and reserved_output_tokens > quota.max_output_tokens_per_minute
+        ):
+            return Preflight(
+                prompt_tokens_estimated=estimated,
+                reserved_output_tokens=reserved_output_tokens,
+                quota=quota,
+                fits=False,
+                reason=(
+                    f"a {reserved_output_tokens} token completion reserve exceeds the output "
+                    f"allowance per minute ({quota.max_output_tokens_per_minute})"
+                ),
+                reason_code=ANALYSIS_FREE_QUOTA_BLOCKED,
+            )
         return Preflight(
             prompt_tokens_estimated=estimated,
+            reserved_output_tokens=reserved_output_tokens,
+            quota=quota,
+            fits=True,
+            reason=(
+                f"~{estimated} input tokens and a {reserved_output_tokens} token reserve are "
+                "inside the separately measured input and output limits"
+            ),
+        )
+
+    # One combined meter: the prompt and the reserve share it.
+    per_minute = quota.max_tokens_per_minute
+    if per_minute is not None and combined > per_minute:
+        return Preflight(
+            prompt_tokens_estimated=estimated,
+            reserved_output_tokens=reserved_output_tokens,
             quota=quota,
             fits=False,
             reason=(
-                f"~{estimated} input tokens exceeds the whole per-minute allowance ({per_minute}); "
-                "a single request cannot be sent at all"
+                f"~{estimated} input tokens plus a {reserved_output_tokens} token completion "
+                f"reserve is {combined}, against a combined allowance of {per_minute} per minute. "
+                "A single request cannot be sent at all"
             ),
             reason_code=ANALYSIS_FREE_QUOTA_BLOCKED,
         )
 
     if per_minute is not None and requests_per_day > 1:
-        minutes = (estimated * requests_per_day) / per_minute
+        minutes = (combined * requests_per_day) / per_minute
         return Preflight(
             prompt_tokens_estimated=estimated,
+            reserved_output_tokens=reserved_output_tokens,
             quota=quota,
             fits=True,
             reason=(
-                f"~{estimated} input tokens each; {requests_per_day} of them need about "
-                f"{minutes:.1f} minute(s) of the per-minute allowance, so the batch has to be paced"
+                f"~{combined} tokens each including the reserve; {requests_per_day} of them need "
+                f"about {minutes:.1f} minute(s) of the per-minute allowance, so the batch has to "
+                "be paced"
             ),
         )
 
     return Preflight(
         prompt_tokens_estimated=estimated,
+        reserved_output_tokens=reserved_output_tokens,
         quota=quota,
         fits=True,
-        reason=f"~{estimated} input tokens is inside the measured limits",
+        reason=f"~{combined} tokens including the reserve is inside the measured limits",
     )
-
-
-# ------------------------------------------------------- structured outputs
 
 
 #: The headers Groq documents. ``x-ratelimit-limit-requests`` is requests per
@@ -428,18 +544,19 @@ RATE_LIMIT_HEADERS = {
     "remaining_tokens": "x-ratelimit-remaining-tokens",
     "reset_requests": "x-ratelimit-reset-requests",
     "reset_tokens": "x-ratelimit-reset-tokens",
+    # Not in Groq's documented set today. Read anyway: an account that meters
+    # input and output separately reports them under these names, and the two
+    # are judged differently from one combined figure.
+    "input_tokens_per_minute": "x-ratelimit-limit-input-tokens",
+    "output_tokens_per_minute": "x-ratelimit-limit-output-tokens",
 }
 
 #: What the probe sends. No canonical prompt, no addenda, no security, no price,
-#: no material. The point is to learn the account's limits before anything that
-#: matters is transmitted, so the probe must not be the thing that transmits it.
-PROBE_PROMPT = "Reply with {\"ok\": true}."
-PROBE_SCHEMA = {
-    "type": "object",
-    "properties": {"ok": {"type": "boolean"}},
-    "required": ["ok"],
-    "additionalProperties": False,
-}
+#: no material, and no response format. The point is to learn the account's
+#: limits before anything that matters is transmitted, so the probe must not be
+#: the thing that transmits it - and it must not depend on a structured-output
+#: capability it is partly being run to discover.
+PROBE_PROMPT = "ok"
 
 
 def _int_or_none(value) -> int | None:
@@ -458,7 +575,12 @@ def quota_from_headers(headers: dict, *, source: str) -> Quota:
     return Quota(
         max_input_tokens_per_request=None,
         max_tokens_per_minute=_int_or_none(lowered.get(RATE_LIMIT_HEADERS["tokens_per_minute"])),
-        max_input_tokens_per_minute=None,
+        max_input_tokens_per_minute=_int_or_none(
+            lowered.get(RATE_LIMIT_HEADERS["input_tokens_per_minute"])
+        ),
+        max_output_tokens_per_minute=_int_or_none(
+            lowered.get(RATE_LIMIT_HEADERS["output_tokens_per_minute"])
+        ),
         max_requests_per_minute=None,
         requests_per_day=_int_or_none(lowered.get(RATE_LIMIT_HEADERS["requests_per_day"])),
         source=source,
@@ -537,6 +659,69 @@ def response_format(name: str, schema: dict, *, strict: bool) -> dict:
     }
 
 
+def json_object_format() -> dict:
+    """For a model the vendor does not document for json_schema.
+
+    Valid JSON is all this asks for. The shape is then checked here, which is
+    where it has to be checked anyway: a schema honoured by the provider is a
+    convenience, and the contract is enforced on this side regardless.
+    """
+
+    return {"type": "json_object"}
+
+
+def schema_violations(payload: dict, schema: dict) -> list[str]:
+    """The subset of JSON Schema this contract actually uses, checked locally.
+
+    Deliberately not a general validator. It covers required keys, null unions,
+    enums and arrays of enums, because that is what :func:`stage3_schema` and
+    :func:`entry_analysis_schema` are made of - and a partial check that is
+    obviously partial is safer than a dependency that looks total.
+    """
+
+    problems: list[str] = []
+    properties = schema.get("properties", {})
+
+    for key in schema.get("required", []):
+        if key not in payload:
+            problems.append(f"missing required field {key!r}")
+
+    if not schema.get("additionalProperties", True):
+        for key in payload:
+            if key not in properties and not key.startswith("_"):
+                problems.append(f"unexpected field {key!r}")
+
+    for key, spec in properties.items():
+        if key not in payload:
+            continue
+        value = payload[key]
+        allowed = spec.get("type")
+        types = [allowed] if isinstance(allowed, str) else list(allowed or [])
+        if value is None:
+            if types and "null" not in types:
+                problems.append(f"{key!r} is null and null is not permitted")
+            continue
+        if "enum" in spec and value not in spec["enum"]:
+            problems.append(f"{key!r} is {value!r}, which is not one of {spec['enum']}")
+        if types and "array" in types or spec.get("type") == "array":
+            if not isinstance(value, list):
+                problems.append(f"{key!r} should be an array")
+            else:
+                member = (spec.get("items") or {}).get("enum")
+                if member:
+                    for entry in value:
+                        if entry not in member:
+                            problems.append(f"{key!r} contains {entry!r}, not one of {member}")
+        elif types and "number" in types and not isinstance(value, int | float):
+            problems.append(f"{key!r} should be a number, got {type(value).__name__}")
+        elif types and "boolean" in types and not isinstance(value, bool):
+            problems.append(f"{key!r} should be a boolean, got {type(value).__name__}")
+        elif types and "string" in types and not isinstance(value, str):
+            problems.append(f"{key!r} should be a string, got {type(value).__name__}")
+
+    return problems
+
+
 def strict_models(env: dict[str, str] | None = None) -> frozenset[str]:
     source = env if env is not None else os.environ
     configured = (source.get(ENV_STRICT_MODELS) or "").strip()
@@ -588,6 +773,10 @@ class GroqHostedProvider:
     version: str = PROVIDER_VERSION
     transport: Any = fetch
     strict_model_ids: frozenset[str] = field(default_factory=DOCUMENTED_STRICT_MODELS.copy)
+    #: Overrides the derived mode when a family is known to accept a best-effort
+    #: schema. Left unset, an undocumented model gets json_object.
+    forced_output_mode: OutputMode | None = None
+    max_json_object_attempts: int = MAX_JSON_OBJECT_ATTEMPTS
     last_usage: GroqUsage | None = field(default=None, repr=False)
     last_preflight: Preflight | None = field(default=None, repr=False)
 
@@ -618,6 +807,20 @@ class GroqHostedProvider:
     def supports_strict(self) -> bool:
         return self.model_id in self.strict_model_ids
 
+    @property
+    def output_mode(self) -> OutputMode:
+        """What this model may be asked for, from what its vendor documents.
+
+        A model absent from the strict list is not thereby assumed to honour a
+        best-effort schema either. The safe reading of a positive list is that
+        anything not on it gets json_object plus a local schema check, which
+        works for both and costs a retry loop.
+        """
+
+        if self.supports_strict:
+            return OutputMode.STRICT_JSON_SCHEMA
+        return self.forced_output_mode or OutputMode.JSON_OBJECT
+
     # ------------------------------------------------------------- requests
 
     def _headers(self) -> dict[str, str]:
@@ -627,34 +830,27 @@ class GroqHostedProvider:
             "Accept": "application/json",
         }
 
-    def _call(self, prompt: str, *, schema_name: str, schema: dict) -> dict:
-        self.policy.assert_may_receive_the_canonical_method()
-
-        check = preflight(prompt, quota=self.quota)
-        self.last_preflight = check
-        if not check.fits and check.reason_code == ANALYSIS_FREE_QUOTA_BLOCKED:
-            raise FreeQuotaExceeded(f"{check.reason_code}: {check.reason}")
-        if not check.fits:
-            # The hole this closes: an unmeasured quota produced fits=False with
-            # no reason code, and the send went ahead anyway. The canonical
-            # method would have gone out before anyone knew whether it could.
-            raise QuotaUnknown(
-                f"{check.reason} Run quota_probe() first: it measures the account's limits with a "
-                "request that carries no canonical prompt, no addenda and no real market data."
+    def _request_body(self, prompt: str, *, schema_name: str, schema: dict, mode: OutputMode) -> bytes:
+        if mode.sends_a_schema:
+            fmt = response_format(
+                schema_name, schema, strict=mode is OutputMode.STRICT_JSON_SCHEMA
             )
+        elif mode is OutputMode.JSON_OBJECT:
+            fmt = json_object_format()
+        else:
+            fmt = None
 
-        body = json.dumps(
-            {
-                "model": self.model_id,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": self.temperature,
-                "max_completion_tokens": self.max_completion_tokens,
-                "response_format": response_format(
-                    schema_name, schema, strict=self.supports_strict
-                ),
-            }
-        ).encode("utf-8")
+        payload = {
+            "model": self.model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": self.temperature,
+            "max_completion_tokens": self.max_completion_tokens,
+        }
+        if fmt is not None:
+            payload["response_format"] = fmt
+        return json.dumps(payload).encode("utf-8")
 
+    def _post(self, body: bytes):
         response = self.transport(
             f"{self.base_url}/chat/completions",
             headers=self._headers(),
@@ -663,9 +859,9 @@ class GroqHostedProvider:
         )
         if response.status != 200:
             raise GroqError(f"groq returned {response.status}")
-        payload = json.loads(response.body.decode("utf-8"))
-        self.last_usage = GroqUsage.from_payload(payload)
+        return response
 
+    def _content_of(self, payload: dict) -> str:
         try:
             choice = payload["choices"][0]
             message = choice["message"]
@@ -679,14 +875,70 @@ class GroqHostedProvider:
                 f"empty content (finish_reason={choice.get('finish_reason')!r}). A truncated "
                 "structured output is not a partial answer, it is not an answer"
             )
-        try:
-            parsed = json.loads(content)
-        except json.JSONDecodeError as exc:
-            # Structured outputs make this unlikely and not impossible, and a
-            # half-parsed answer must never become a prediction.
-            raise StructuredOutputError(f"the content was not JSON: {exc}") from exc
-        parsed["_raw"] = content
-        return parsed
+        return content
+
+    def _call(self, prompt: str, *, schema_name: str, schema: dict) -> dict:
+        self.policy.assert_may_receive_the_canonical_method()
+
+        check = preflight(
+            prompt, quota=self.quota, reserved_output_tokens=self.max_completion_tokens
+        )
+        self.last_preflight = check
+        if not check.fits and check.reason_code == ANALYSIS_FREE_QUOTA_BLOCKED:
+            raise FreeQuotaExceeded(f"{check.reason_code}: {check.reason}")
+        if not check.fits:
+            # The hole this closes: an unmeasured quota produced fits=False with
+            # no reason code, and the send went ahead anyway. The canonical
+            # method would have gone out before anyone knew whether it could.
+            raise QuotaUnknown(
+                f"{check.reason} Run quota_probe() first: it measures the account's limits with a "
+                "request that carries no canonical prompt, no addenda and no real market data."
+            )
+
+        mode = self.output_mode
+        attempts = self.max_json_object_attempts if mode.needs_client_side_retry else 1
+        body = self._request_body(prompt, schema_name=schema_name, schema=schema, mode=mode)
+        last: str | None = None
+
+        for attempt in range(1, attempts + 1):
+            response = self._post(body)
+            payload = json.loads(response.body.decode("utf-8"))
+            self.last_usage = GroqUsage.from_payload(payload)
+            content = self._content_of(payload)
+
+            try:
+                parsed = json.loads(content)
+            except json.JSONDecodeError as exc:
+                last = f"the content was not JSON: {exc}"
+                if attempt < attempts:
+                    continue
+                raise StructuredOutputError(last) from exc
+
+            if not isinstance(parsed, dict):
+                last = f"the content was JSON but not an object ({type(parsed).__name__})"
+                if attempt < attempts:
+                    continue
+                raise StructuredOutputError(last)
+
+            # Checked here whatever the mode. A schema the provider enforced is
+            # a convenience; the contract is this system's, so it is verified on
+            # this side even when the vendor promised to honour it.
+            problems = schema_violations(parsed, schema)
+            if problems:
+                last = "the answer did not match the contract: " + "; ".join(problems)
+                if attempt < attempts:
+                    continue
+                raise StructuredOutputError(
+                    f"{last} (after {attempts} attempt(s); the analysis fails rather than "
+                    "proceeding to a decision on a malformed answer)"
+                )
+
+            parsed["_raw"] = content
+            parsed["_attempts"] = attempt
+            parsed["_output_mode"] = mode.value
+            return parsed
+
+        raise StructuredOutputError(last or "no answer")  # pragma: no cover - loop always returns
 
     # -------------------------------------------------------------- stage 3
 
@@ -755,15 +1007,16 @@ class GroqHostedProvider:
 
         self.policy.assert_may_receive_the_canonical_method()
 
+        # No response_format at all. The probe exists to read headers, and
+        # asking for structured output would make it depend on the very
+        # capability it is being run to find out about - a probe that fails on
+        # an undocumented model teaches nothing about that model's limits.
         body = json.dumps(
             {
                 "model": self.model_id,
                 "messages": [{"role": "user", "content": PROBE_PROMPT}],
                 "temperature": 0.0,
                 "max_completion_tokens": 16,
-                "response_format": response_format(
-                    "quota_probe", PROBE_SCHEMA, strict=self.supports_strict
-                ),
             }
         ).encode("utf-8")
 
@@ -813,7 +1066,7 @@ class GroqHostedProvider:
                     "terms_url": self.policy.terms_url,
                     "retention_url": self.policy.retention_url,
                     "production_recommended": PRODUCTION_RECOMMENDED_SETTING,
-                    "strict_structured_outputs": self.supports_strict,
+                    "output_mode": self.output_mode.value,
                     "recorded_at": datetime.now(UTC).date().isoformat(),
                 }
             ),
@@ -852,7 +1105,13 @@ __all__ = [
     "Quota",
     "Retention",
     "StructuredOutputError",
+    "DEFAULT_COMPLETION_RESERVE",
+    "JSON_SCHEMA_UNSUPPORTED_BY_CURRENT_DOCS",
+    "MAX_JSON_OBJECT_ATTEMPTS",
+    "OutputMode",
     "entry_analysis_schema",
+    "json_object_format",
+    "schema_violations",
     "estimate_tokens",
     "preflight",
     "response_format",

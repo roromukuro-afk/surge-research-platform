@@ -125,11 +125,13 @@ class FakeWriter:
 
 
 # ------------------------------------------------------------------ Parquet
+#: Matches the FakeFetcher exactly: same provider, same dataset, same reading of
+#: the terms. Anything less than an exact match is refused, which is the point.
 _ALLOWED = PersistenceDecision(
-    provider_id="fixture",
-    dataset_key="EODHD_US_EOD_BULK",
+    provider_id=PROVIDER,
+    dataset_key=DATASET,
     permission=Permission.ALLOWED,
-    policy_version="fixture-1.0.0",
+    policy_version="ecb-2026-09-16",
 )
 
 
@@ -507,9 +509,10 @@ def test_nothing_is_written_when_the_terms_do_not_permit_keeping_it(tmp_path, pe
         store=store,
         parquet=ParquetSeriesStore(store),
         persistence=PersistenceDecision(
-            provider_id="alpaca_historical_sip",
-            dataset_key="ALPACA_US_BARS_SIP",
+            provider_id=PROVIDER,
+            dataset_key=DATASET,
             permission=permission,
+            policy_version="ecb-2026-09-16",
             terms_url="https://example.invalid/terms",
         ),
     )
@@ -526,3 +529,116 @@ def test_an_unknown_decision_says_what_is_missing():
     assert not decision.may_persist
     with pytest.raises(LicenseViolation, match="no licence policy was supplied"):
         decision.assert_may_persist(target="the object store")
+
+
+# -------------------------------------- a permission is for one thing only
+
+
+def _decision(**overrides) -> PersistenceDecision:
+    base = {
+        "provider_id": PROVIDER,
+        "dataset_key": DATASET,
+        "permission": Permission.ALLOWED,
+        "policy_version": "ecb-2026-09-16",
+    }
+    base.update(overrides)
+    return PersistenceDecision(**base)
+
+
+def test_a_genuine_permission_for_another_provider_is_refused(tmp_path):
+    """The ECB decision is real and correct - and it is not about Alpaca. Without
+    this, a true permission would appear in the audit trail for a dataset it was
+    never written about."""
+
+    with pytest.raises(LicenseViolation, match="about provider"):
+        MarketIngestJob(
+            FakeFetcher(),
+            store=LocalObjectStore(tmp_path),
+            persistence=_decision(provider_id="alpaca_historical_sip"),
+        )
+
+
+def test_the_right_provider_with_the_wrong_dataset_is_refused(tmp_path):
+    with pytest.raises(LicenseViolation, match="about dataset"):
+        MarketIngestJob(
+            FakeFetcher(),
+            store=LocalObjectStore(tmp_path),
+            persistence=_decision(dataset_key="SOME_OTHER_DATASET"),
+        )
+
+
+def test_a_stale_policy_version_is_refused_at_write_time(tmp_path):
+    """A decision made under one reading of the terms does not authorise a write
+    governed by another. The provider and dataset match, so this can only be
+    caught where the fetch names the policy it was governed by."""
+
+    store = LocalObjectStore(tmp_path)
+    job = MarketIngestJob(
+        FakeFetcher(),
+        store=store,
+        parquet=ParquetSeriesStore(store),
+        persistence=_decision(policy_version="ecb-2025-01-01"),
+    )
+
+    with pytest.raises(LicenseViolation, match="under policy"):
+        job.ingest_day(date(2026, 9, 16))
+
+    assert list(tmp_path.rglob("*")) == []
+
+
+def test_a_decision_with_no_policy_version_cannot_authorise_a_durable_write(tmp_path):
+    """Absent is a mismatch, not a wildcard."""
+
+    store = LocalObjectStore(tmp_path)
+    job = MarketIngestJob(
+        FakeFetcher(),
+        store=store,
+        persistence=_decision(policy_version=None),
+    )
+
+    with pytest.raises(LicenseViolation, match="names no policy_version"):
+        job.ingest_day(date(2026, 9, 16))
+
+
+def test_an_exactly_matching_allowed_policy_writes(tmp_path):
+    store = LocalObjectStore(tmp_path)
+    job = MarketIngestJob(FakeFetcher(), store=store, persistence=_ALLOWED)
+
+    outcome = job.ingest_day(date(2026, 9, 16))
+
+    assert outcome.ok
+    assert outcome.rows == 2
+
+
+def test_the_standard_way_in_is_built_from_the_stored_policy():
+    """Building a decision by hand is what makes a mismatch possible; the
+    constructor that cannot mismatch is the one to reach for."""
+
+    from surge.licensing import LicenseMode, LicensePolicy, Obligation
+
+    policy = LicensePolicy(
+        provider_id=PROVIDER,
+        dataset_key=DATASET,
+        policy_version="ecb-2026-09-16",
+        license_mode=LicenseMode.PUBLIC_DOMAIN,
+        public_display_allowed=Permission.ALLOWED,
+        third_party_access_allowed=Permission.ALLOWED,
+        commercial_use_allowed=Permission.ALLOWED,
+        academic_use_allowed=Permission.ALLOWED,
+        raw_redistribution_allowed=Permission.ALLOWED,
+        derived_output_sharing_allowed=Permission.ALLOWED,
+        delete_on_cancel=Obligation.NOT_REQUIRED,
+        delete_on_downgrade=Obligation.NOT_REQUIRED,
+        attribution_required=Obligation.REQUIRED,
+        modification_disclosure_required=Obligation.NOT_REQUIRED,
+        entitlement_plan="public",
+        terms_url="https://example.invalid/terms",
+        private_persistence_allowed=Permission.ALLOWED,
+    )
+
+    decision = PersistenceDecision.from_license_policy(policy)
+
+    assert decision.may_persist
+    decision.assert_governs_fetch(
+        provider_id=PROVIDER, dataset_key=DATASET, policy_version="ecb-2026-09-16"
+    )

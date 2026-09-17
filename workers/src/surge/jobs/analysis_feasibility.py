@@ -7,13 +7,22 @@ scaffolding is code. What a request costs is therefore measurable now, and
 comparing it against a provider's *published* limits decides whether an account
 is worth opening at all.
 
-Two honesty constraints shape the output.
+Three honesty constraints shape the output.
 
-**The estimate is an estimate.** Nobody here is running the provider's
-tokeniser. The count treats a CJK character as roughly one token and Latin text
-as roughly one per three and a half characters, which is deliberately the
-pessimistic direction for a Japanese prompt: being told a request fits and then
-having it rejected is worse than the reverse.
+**Exact where exact is possible.** The GPT-OSS models are tokenised with
+``o200k_harmony``, which OpenAI publishes, so those numbers are counted rather
+than estimated. Families whose tokeniser is not published keep the estimate, and
+the report says which is which - a number labelled exact has to be exact.
+
+**The estimate is an estimate.** It treats a CJK character as roughly one token
+and Latin text as roughly one per three and a half characters, deliberately the
+pessimistic direction for a Japanese prompt. Where both numbers exist they are
+shown together: agreement is evidence the estimate can be trusted for the
+providers that publish nothing.
+
+**The completion counts.** A tier that meters one combined tokens-per-minute
+figure spends the model's own output from the same allowance as the prompt, so
+the reserve is added before the comparison.
 
 **Published limits are not the account's limits.** They decide whether to
 bother; they never decide whether to send. ``quota_probe()`` measures the real
@@ -35,10 +44,12 @@ from surge.analysis.bundle import InputBundle
 from surge.analysis.entry_analysis import IntradayBundle, render_entry_prompt
 from surge.analysis.groq_provider import (
     ANALYSIS_FREE_QUOTA_BLOCKED,
+    DEFAULT_COMPLETION_RESERVE,
     PUBLISHED_FREE_LIMITS,
     estimate_tokens,
 )
 from surge.analysis.llm import render_prompt
+from surge.analysis.tokenizer import Count, exact_tokens_or_none
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 CANONICAL_PATH = REPO_ROOT / "docs" / "prompts" / "short-surge-v5.1.original.md"
@@ -50,20 +61,26 @@ DIGEST = "0" * 64
 
 @dataclass(frozen=True)
 class Measurement:
-    canonical_only: int
-    canonical_plus_addenda: int
-    minimum_stage3_request: int
-    minimum_entry_request: int
+    canonical_only: Count
+    canonical_plus_addenda: Count
+    minimum_stage3_request: Count
+    minimum_entry_request: Count
     canonical_bytes: int
     addenda_files: int
 
     @property
+    def floor(self) -> int:
+        """The largest of the two minimum requests, on the safest reading."""
+
+        return max(self.minimum_stage3_request.worst, self.minimum_entry_request.worst)
+
+    @property
     def summary(self) -> dict:
         return {
-            "canonical_only_estimated_tokens": self.canonical_only,
-            "canonical_plus_addenda_estimated_tokens": self.canonical_plus_addenda,
-            "minimum_stage3_request_tokens": self.minimum_stage3_request,
-            "minimum_entry_request_tokens": self.minimum_entry_request,
+            "canonical_only_tokens": self.canonical_only.summary,
+            "canonical_plus_addenda_tokens": self.canonical_plus_addenda.summary,
+            "minimum_stage3_request_tokens": self.minimum_stage3_request.summary,
+            "minimum_entry_request_tokens": self.minimum_entry_request.summary,
             "canonical_bytes": self.canonical_bytes,
             "addenda_files": self.addenda_files,
         }
@@ -106,49 +123,80 @@ def _minimum_entry_prompt(canonical: str, addenda: list[str]) -> str:
     return render_entry_prompt(bundle, canonical, addenda)
 
 
-def measure() -> Measurement:
+def _count(text: str, encoding: str | None) -> Count:
+    return Count(
+        estimated=estimate_tokens(text),
+        exact=exact_tokens_or_none(text, encoding=encoding),
+        encoding=encoding,
+    )
+
+
+def measure(encoding: str | None = "o200k_harmony") -> Measurement:
+    """Measure the request floor, exactly where the tokeniser is published.
+
+    ``encoding`` defaults to the one the GPT-OSS family uses, because that is
+    the family whose limit decides the question. A caller measuring for a
+    different family passes its encoding, or None to fall back to the estimate.
+    """
+
     canonical = CANONICAL_PATH.read_text(encoding="utf-8")
     addenda = _addenda_texts()
     return Measurement(
-        canonical_only=estimate_tokens(canonical),
-        canonical_plus_addenda=estimate_tokens(canonical + "\n".join(addenda)),
-        minimum_stage3_request=estimate_tokens(_minimum_stage3_prompt(canonical, addenda)),
-        minimum_entry_request=estimate_tokens(_minimum_entry_prompt(canonical, addenda)),
+        canonical_only=_count(canonical, encoding),
+        canonical_plus_addenda=_count(canonical + "\n".join(addenda), encoding),
+        minimum_stage3_request=_count(_minimum_stage3_prompt(canonical, addenda), encoding),
+        minimum_entry_request=_count(_minimum_entry_prompt(canonical, addenda), encoding),
         canonical_bytes=len(canonical.encode("utf-8")),
         addenda_files=len(addenda),
     )
 
 
-def assess_tier(measurement: Measurement, name: str, limits: dict) -> dict:
+def assess_tier(
+    measurement: Measurement,
+    name: str,
+    limits: dict,
+    *,
+    reserved_output_tokens: int = DEFAULT_COMPLETION_RESERVE,
+) -> dict:
     """Compare the floor against one published tier, and name the consequence."""
 
     tpm = limits.get("tokens_per_minute")
     tpd = limits.get("tokens_per_day")
-    floor = max(measurement.minimum_stage3_request, measurement.minimum_entry_request)
+    floor = measurement.floor
+    combined = floor + reserved_output_tokens
 
     verdict: dict = {
         "model_family": name,
-        "limits": dict(limits),
+        "limits": {k: (v.value if hasattr(v, "value") else v) for k, v in limits.items()},
         "largest_minimum_request": floor,
+        "reserved_output_tokens": reserved_output_tokens,
+        "request_including_reserve": combined,
+        "measured_exactly": measurement.minimum_entry_request.is_exact,
     }
 
-    if tpm is not None and floor > tpm:
+    if tpm is not None and combined > tpm:
         verdict["fits"] = False
         verdict["reason_code"] = ANALYSIS_FREE_QUOTA_BLOCKED
         verdict["why"] = (
-            f"the smallest possible request is about {floor:,} tokens and this family allows "
-            f"{tpm:,} tokens per minute. One request cannot be sent at all, whatever the pacing"
+            f"the smallest possible request is {floor:,} tokens, and with a "
+            f"{reserved_output_tokens:,} token completion reserve it needs {combined:,} against "
+            f"this family's {tpm:,} per minute. One request cannot be sent at all, whatever the "
+            "pacing"
         )
         return verdict
 
     verdict["fits"] = True
     if tpm:
-        verdict["requests_per_minute_at_this_size"] = max(1, tpm // floor)
+        verdict["requests_per_minute_at_this_size"] = max(1, tpm // combined)
     if tpd:
-        verdict["requests_per_day_at_this_size"] = tpd // floor
+        verdict["requests_per_day_at_this_size"] = tpd // combined
     if limits.get("requests_per_day") is not None:
         verdict["requests_per_day_cap"] = limits["requests_per_day"]
-    verdict["why"] = "the floor fits this family's published per-minute limit"
+    verdict["why"] = (
+        f"{combined:,} tokens including the reserve fits this family's {tpm:,} per minute"
+        if tpm
+        else "no per-minute limit is published for this family"
+    )
     return verdict
 
 
@@ -166,22 +214,22 @@ def assess(measurement: Measurement, tiers: dict | None = None) -> dict:
     usable = [
         tier
         for tier in per_tier
-        if tier["fits"] and tier["limits"].get("strict_structured_outputs") is True
+        if tier["fits"] and tier["limits"].get("output_mode") == "STRICT_JSON_SCHEMA"
     ]
     possible = [tier for tier in per_tier if tier["fits"]]
 
     if usable:
         conclusion = (
-            "a free tier can carry this analysis with strict structured outputs: "
+            "a free family can carry this analysis with strict structured outputs: "
             + ", ".join(t["model_family"] for t in usable)
         )
         reason_code = None
     elif possible:
         conclusion = (
-            "no free family both fits and is documented for strict structured outputs. "
+            "no free family both fits and is documented for json_schema. "
             + ", ".join(t["model_family"] for t in possible)
-            + " fits on size; whether it supports the structured output contract is unverified "
-            "and has to be measured before it can be relied on"
+            + " fits on size and is a documented absence from the structured-outputs list, so it "
+            "would run on json_object with the contract checked on this side and a bounded retry"
         )
         reason_code = None
     else:
@@ -221,31 +269,45 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))
-        return 0 if verdict["fits_with_strict_structured_outputs"] else 1
+        return 0 if verdict["fits_somewhere"] else 1
 
-    print(f"canonical v5.1            {measurement.canonical_bytes:>9,} bytes")
-    print(f"canonical only            {measurement.canonical_only:>9,} tokens (estimated)")
-    print(
-        f"canonical + {measurement.addenda_files} addenda     "
-        f"{measurement.canonical_plus_addenda:>9,} tokens (estimated)"
-    )
-    print(f"minimum Stage 3 request   {measurement.minimum_stage3_request:>9,} tokens (no data)")
-    print(f"minimum entry request     {measurement.minimum_entry_request:>9,} tokens (no data)")
+    def line(label: str, count) -> None:
+        mark = "exact" if count.is_exact else "  est"
+        both = (
+            f"{count.exact:>9,} {mark}   (estimate {count.estimated:,})"
+            if count.is_exact
+            else f"{count.estimated:>9,} {mark}"
+        )
+        print(f"{label:<26}{both}")
+
+    print(f"{'canonical v5.1':<26}{measurement.canonical_bytes:>9,} bytes")
+    line("canonical only", measurement.canonical_only)
+    line(f"canonical + {measurement.addenda_files} addenda", measurement.canonical_plus_addenda)
+    line("minimum Stage 3 request", measurement.minimum_stage3_request)
+    line("minimum entry request", measurement.minimum_entry_request)
+    if measurement.minimum_entry_request.is_exact:
+        print(f"{'tokeniser':<26}{measurement.minimum_entry_request.encoding:>9}")
     print()
+
     for tier in verdict["tiers"]:
-        strict = tier["limits"].get("strict_structured_outputs")
-        strict_text = {True: "yes", False: "no", None: "unverified"}[strict]
         print(f"{tier['model_family']}")
         print(
             f"    tokens/minute {tier['limits'].get('tokens_per_minute'):>8,}"
             f"    requests/day {tier['limits'].get('requests_per_day')}"
-            f"    strict structured outputs: {strict_text}"
+            f"    output mode: {tier['limits'].get('output_mode')}"
+        )
+        if tier["limits"].get("note"):
+            print(f"    note: {tier['limits']['note']}")
+        print(
+            f"    request {tier['largest_minimum_request']:,}"
+            f" + reserve {tier['reserved_output_tokens']:,}"
+            f" = {tier['request_including_reserve']:,}"
         )
         print(f"    fits: {tier['fits']}  - {tier['why']}")
         if tier["fits"] and tier.get("requests_per_day_at_this_size") is not None:
             print(
                 f"    at this size: {tier['requests_per_day_at_this_size']:,} requests/day on "
-                "tokens alone"
+                f"tokens alone, capped at {tier.get('requests_per_day_cap')} by requests/day"
             )
         print()
 
@@ -253,7 +315,7 @@ def main(argv: list[str] | None = None) -> int:
     if verdict["reason_code"]:
         print(f"            {verdict['reason_code']}")
     print(f"never:      {verdict['never']}")
-    return 0 if verdict["fits_with_strict_structured_outputs"] else 1
+    return 0 if verdict["fits_somewhere"] else 1
 
 
 if __name__ == "__main__":  # pragma: no cover

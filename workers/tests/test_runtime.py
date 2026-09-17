@@ -18,6 +18,7 @@ import pytest
 
 from surge.runtime.readiness import (
     CheckStatus,
+    Liveness,
     MarketInputs,
     Verdict,
     assess,
@@ -282,6 +283,7 @@ def _connected(**overrides) -> dict:
     base = {
         "material_sources_live": 1,
         "eod_price_provider": "a settled provider",
+        "price_rows_observed": 5_000,
         "intraday_price_provider": "a settled provider",
         "eod_analysis_provider": "a real model",
         "eod_analysis_is_a_stand_in": False,
@@ -341,6 +343,7 @@ def test_the_us_price_question_is_two_questions():
             "US",
             **_connected(
                 fx_provider="ECB",
+                fx_rows_observed=900,
                 eod_price_provider="alpaca_historical_sip (delayed SIP)",
                 intraday_price_provider=None,
             )
@@ -368,7 +371,7 @@ def test_the_two_markets_are_judged_separately():
     report = assess_all(
         [
             _market("JP", material_sources_live=1),
-            _market("US", **_connected(fx_provider="ECB")),
+            _market("US", **_connected(fx_provider="ECB", fx_rows_observed=900)),
         ]
     )
     verdicts = {m.market_code: m.verdict for m in report.markets}
@@ -508,3 +511,143 @@ def test_the_schedules_are_the_ones_the_installer_registers(tmp_path):
 
     for name in SCHEDULES:
         assert f'"{name}"' in installer
+
+
+# ------------------------------------- bound is not the same as observed
+
+
+def _fx_check(readiness):
+    return next(c for c in readiness.checks if c.name == "fx_provider")
+
+
+def test_a_binding_with_no_rows_is_not_a_working_source():
+    """The case this exists for: FX_USDJPY is bound to the ECB, the binding is
+    enabled, the adapter is tested - and market.fx_rates holds nothing."""
+
+    readiness = assess(_market("US", fx_binding="ecb", fx_rows_observed=0))
+    check = _fx_check(readiness)
+
+    assert check.status is CheckStatus.FAIL
+    assert check.liveness is Liveness.BOUND_NOT_LIVE_OBSERVED
+    assert "IMPLEMENTED and BOUND, not yet live observed" in check.detail
+    assert "market.fx_rates" in check.detail
+
+
+def test_an_unbound_role_reads_differently_from_a_bound_one():
+    """Different things to do next: one needs a decision, the other needs a
+    first fetch. Collapsing them would hide which."""
+
+    unbound = _fx_check(assess(_market("US", fx_binding=None, fx_rows_observed=0)))
+
+    assert unbound.liveness is Liveness.NOT_BOUND
+    assert "no provider is bound" in unbound.detail
+
+
+def test_rows_actually_observed_make_it_a_capability():
+    readiness = assess(_market("US", fx_binding="ecb", fx_rows_observed=1_234))
+    check = _fx_check(readiness)
+
+    assert check.status is CheckStatus.PASS
+    assert check.liveness is Liveness.LIVE_OBSERVED
+    assert "1,234 row(s) actually observed" in check.detail
+    assert check.is_a_capability
+
+
+def test_a_bound_price_source_with_no_bars_still_blocks():
+    readiness = assess(_market("JP", eod_price_binding="jquants", price_rows_observed=0))
+    check = next(c for c in readiness.checks if c.name == "eod_price_provider")
+
+    assert check.blocks
+    assert check.liveness is Liveness.BOUND_NOT_LIVE_OBSERVED
+
+
+def test_the_liveness_of_each_check_is_in_the_summary():
+    summary = assess(_market("US", fx_binding="ecb", fx_rows_observed=0)).summary
+
+    assert summary["liveness"]["fx_provider"] == "BOUND_NOT_LIVE_OBSERVED"
+
+
+# ------------------------------------------------- what the database answers
+
+
+class _FakeCursor:
+    def __init__(self, answers):
+        self._answers = answers
+        self._row = None
+        self.seen = []
+
+    def execute(self, sql, params):
+        for key, value in self._answers.items():
+            if key in sql:
+                self._row = (value,)
+                self.seen.append(key)
+                return
+        self._row = None
+
+    def fetchone(self):
+        return self._row
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, answers):
+        self.answers = answers
+
+    def cursor(self):
+        return _FakeCursor(self.answers)
+
+
+def test_collect_reads_the_bindings_and_the_row_counts():
+    """The whole point of connecting: these are facts the database holds and
+    nobody should be typing them on a command line."""
+
+    from surge.runtime.readiness import collect
+
+    conn = _FakeConn(
+        {
+            "provider_role_bindings": "ecb",
+            "market.fx_rates": 0,
+            "market.daily_bars": 0,
+            "labels.objective_labels": 0,
+            "pg_constraint": 1,
+            "news.sources": 1,
+        }
+    )
+
+    readiness = collect(conn, "US", intraday_price_provider=None)
+    check = _fx_check(readiness)
+
+    assert check.liveness is Liveness.BOUND_NOT_LIVE_OBSERVED
+    assert "ecb is bound and enabled" in check.detail
+
+
+def test_a_query_that_cannot_be_run_is_reported_as_a_failed_check():
+    """An unreadable check is a failed check, and it says which one."""
+
+    from surge.runtime.readiness import collect
+
+    class _Exploding(_FakeConn):
+        def cursor(self):
+            cursor = _FakeCursor(self.answers)
+            original = cursor.execute
+
+            def execute(sql, params):
+                if "fx_rates" in sql:
+                    raise RuntimeError("relation does not exist")
+                return original(sql, params)
+
+            cursor.execute = execute
+            return cursor
+
+    readiness = _Exploding({"market.daily_bars": 0}).cursor  # noqa: F841
+    readiness = collect(_Exploding({"market.daily_bars": 0}), "US")
+
+    failed = [c for c in readiness.checks if c.name == "database_check_failed"]
+    assert failed
+    assert "fx_rows" in failed[0].detail
+    assert failed[0].blocks

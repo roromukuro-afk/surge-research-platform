@@ -25,9 +25,11 @@ import pytest
 from surge.analysis.entry_analysis import EntryAnalysisState
 from surge.analysis.groq_provider import (
     ANALYSIS_FREE_QUOTA_BLOCKED,
+    DEFAULT_COMPLETION_RESERVE,
     ENV_API_KEY,
     GEMINI_FREE_TIER_POLICY,
     GROQ_POLICY,
+    JSON_SCHEMA_UNSUPPORTED_BY_CURRENT_DOCS,
     PUBLISHED_FREE_LIMITS_GPT_OSS,
     CredentialsMissing,
     FreeQuotaExceeded,
@@ -35,6 +37,7 @@ from surge.analysis.groq_provider import (
     GroqHostedProvider,
     InputPolicyViolation,
     InputUse,
+    OutputMode,
     Quota,
     QuotaUnknown,
     Retention,
@@ -44,6 +47,7 @@ from surge.analysis.groq_provider import (
     preflight,
     quota_from_headers,
     response_format,
+    schema_violations,
     stage3_schema,
     strict_models,
 )
@@ -166,7 +170,7 @@ def test_a_provider_whose_terms_are_silent_is_refused_too():
 def test_the_policy_is_enforced_on_every_call_not_just_at_construction():
     from dataclasses import replace
 
-    provider = _provider(_completion({"state": "REJECT", "rationale": "no"}))
+    provider = _provider(_completion(_full_stage3()))
     provider.policy = replace(GROQ_POLICY, input_use=InputUse.USED_FOR_TRAINING)
 
     with pytest.raises(InputPolicyViolation):
@@ -208,13 +212,62 @@ def test_a_prompt_over_the_per_request_limit_is_the_blocked_quota_decision():
 
 def test_the_preflight_has_no_way_to_shorten_anything():
     """Structural, not a convention: there is no truncation argument to reach
-    for when a bundle does not fit."""
+    for when a bundle does not fit. The reserve sizes the *completion*, which
+    makes a request larger rather than smaller."""
 
     import inspect
 
     parameters = set(inspect.signature(preflight).parameters)
 
-    assert parameters == {"prompt", "quota", "requests_per_day"}
+    assert parameters == {"prompt", "quota", "requests_per_day", "reserved_output_tokens"}
+    assert not {p for p in parameters if "max" in p or "trunc" in p or "chars" in p}
+
+
+def test_a_combined_meter_counts_the_completion_reserve_too():
+    """Groq's free tier meters one figure, so the model's own output is spent
+    from the same allowance as the prompt. Weighing only the input approves
+    requests the API then refuses."""
+
+    prompt = "x" * 14_000  # about 4,000 estimated tokens
+
+    without_reserve = preflight(prompt, quota=Quota(max_tokens_per_minute=5_000),
+                                reserved_output_tokens=0)
+    with_reserve = preflight(prompt, quota=Quota(max_tokens_per_minute=5_000),
+                             reserved_output_tokens=2_048)
+
+    assert without_reserve.fits
+    assert not with_reserve.fits
+    assert with_reserve.reason_code == ANALYSIS_FREE_QUOTA_BLOCKED
+    assert "completion reserve" in with_reserve.reason
+
+
+def test_separate_input_and_output_meters_are_judged_separately():
+    """An account with ITPM and OTPM is not the same as one combined figure,
+    and adding them would refuse requests that fit."""
+
+    prompt = "x" * 14_000
+
+    ok = preflight(
+        prompt,
+        quota=Quota(max_input_tokens_per_minute=5_000, max_output_tokens_per_minute=3_000),
+        reserved_output_tokens=2_048,
+    )
+    too_much_output = preflight(
+        prompt,
+        quota=Quota(max_input_tokens_per_minute=5_000, max_output_tokens_per_minute=1_000),
+        reserved_output_tokens=2_048,
+    )
+
+    assert ok.fits
+    assert "separately measured" in ok.reason
+    assert not too_much_output.fits
+    assert "output allowance" in too_much_output.reason
+
+
+def test_the_default_reserve_is_the_one_the_provider_actually_asks_for():
+    provider = GroqHostedProvider(model_id="openai/gpt-oss-20b", api_key="x")
+
+    assert DEFAULT_COMPLETION_RESERVE == provider.max_completion_tokens
 
 
 def test_a_batch_that_needs_pacing_still_fits():
@@ -232,7 +285,7 @@ def test_an_unmeasured_quota_refuses_to_send_rather_than_sending_anyway():
 
     def transport(url, **kwargs):
         sent.append(url)
-        return _Response(_completion({"state": "REJECT", "rationale": "no"}))
+        return _Response(_completion(_full_stage3()))
 
     provider = GroqHostedProvider(
         model_id="openai/gpt-oss-120b",
@@ -245,6 +298,28 @@ def test_an_unmeasured_quota_refuses_to_send_rather_than_sending_anyway():
         provider.analyse(LLMRequest(prompt="the canonical method", bundle=None))
 
     assert sent == []
+
+
+def test_the_probe_sends_no_response_format_at_all():
+    """It exists to read headers. Asking for structured output would make it
+    depend on the very capability it is partly being run to discover."""
+
+    sent = {}
+
+    def transport(url, **kwargs):
+        sent["body"] = json.loads(kwargs["data"].decode())
+        return _Response(_completion({"ok": True}),
+                         headers={"x-ratelimit-limit-tokens": "8000"})
+
+    provider = GroqHostedProvider(
+        model_id="groq/compound",
+        api_key="gsk-not-a-real-key",
+        transport=transport,
+        quota=Quota(),
+    )
+    provider.quota_probe()
+
+    assert "response_format" not in sent["body"]
 
 
 def test_the_probe_carries_no_canonical_prompt_and_no_market_data():
@@ -278,6 +353,7 @@ def test_the_probe_carries_no_canonical_prompt_and_no_market_data():
     content = sent["body"]["messages"][0]["content"]
     assert len(content) < 60
     assert "canonical" not in content.lower()
+    assert "response_format" not in sent["body"]
 
 
 def test_a_probe_that_learns_nothing_says_so():
@@ -318,7 +394,7 @@ def test_the_published_free_limits_are_recorded_for_comparison():
 
 def test_a_call_over_quota_raises_rather_than_sending():
     provider = _provider(
-        _completion({"state": "REJECT", "rationale": "no"}),
+        _completion(_full_stage3()),
         quota=Quota(max_input_tokens_per_request=10),
     )
 
@@ -349,20 +425,144 @@ def test_the_entry_schema_carries_the_two_fields_an_entry_cannot_do_without():
     assert set(schema["required"]) == set(schema["properties"])
 
 
-def test_strict_is_requested_only_for_a_model_documented_to_support_it():
-    documented = _provider(_completion({"state": "REJECT", "rationale": "no"}))
-    undocumented = _provider(
-        _completion({"state": "REJECT", "rationale": "no"}), model_id="some/new-model"
-    )
+def _full_stage3(**overrides) -> dict:
+    base = {
+        "state": "REJECT",
+        "rationale": "no route fired",
+        "confidence_note": None,
+        "reachable_zone_low": None,
+        "reachable_zone_high": None,
+        "reachable_zone_basis_kinds": [],
+        "reachable_zone_basis": None,
+        "concepts_considered": [],
+    }
+    base.update(overrides)
+    return base
 
-    assert documented.supports_strict
-    assert not undocumented.supports_strict
 
+def test_a_documented_model_gets_a_strict_schema():
+    documented = _provider(_completion(_full_stage3()))
+
+    assert documented.output_mode is OutputMode.STRICT_JSON_SCHEMA
     documented.analyse(LLMRequest(prompt="p", bundle=None))
-    undocumented.analyse(LLMRequest(prompt="p", bundle=None))
 
     assert documented._sent["body"]["response_format"]["json_schema"]["strict"] is True
-    assert undocumented._sent["body"]["response_format"]["json_schema"]["strict"] is False
+
+
+def test_an_undocumented_model_gets_json_object_rather_than_a_schema():
+    """Groq's structured-outputs page is a positive list. A family missing from
+    it is a documented absence, so the safe reading is json_object plus a schema
+    check on this side - not a best-effort schema nobody promised."""
+
+    undocumented = _provider(_completion(_full_stage3()), model_id="groq/compound")
+
+    assert undocumented.output_mode is OutputMode.JSON_OBJECT
+    undocumented.analyse(LLMRequest(prompt="p", bundle=None))
+
+    assert undocumented._sent["body"]["response_format"] == {"type": "json_object"}
+    assert "json_schema" not in json.dumps(undocumented._sent["body"])
+
+
+def test_the_compound_family_is_recorded_as_a_documented_absence():
+    from surge.analysis.groq_provider import PUBLISHED_FREE_LIMITS
+
+    compound = PUBLISHED_FREE_LIMITS["groq/compound*"]
+
+    assert compound["output_mode"] is OutputMode.JSON_OBJECT
+    assert compound["note"] == JSON_SCHEMA_UNSUPPORTED_BY_CURRENT_DOCS
+
+
+def test_the_contract_is_checked_here_even_when_the_provider_enforced_it():
+    """A schema honoured by the vendor is a convenience. The contract belongs to
+    this system, so it is verified on this side in every mode."""
+
+    provider = _provider(_completion({"state": "NOT_A_STATE", "rationale": "x"}))
+
+    with pytest.raises(StructuredOutputError, match="not one of"):
+        provider.analyse(LLMRequest(prompt="p", bundle=None))
+
+
+def test_a_json_object_answer_is_retried_a_bounded_number_of_times():
+    attempts = {"n": 0}
+
+    def transport(url, **kwargs):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            return _Response({"choices": [{"message": {"content": "not json"},
+                                           "finish_reason": "stop"}]})
+        return _Response(_completion(_full_stage3()))
+
+    provider = GroqHostedProvider(
+        model_id="groq/compound",
+        api_key="gsk-not-a-real-key",
+        transport=transport,
+        quota=MEASURED,
+    )
+
+    answer = provider.analyse(LLMRequest(prompt="p", bundle=None))
+
+    assert attempts["n"] == 3
+    assert answer.state is Stage3State.REJECT
+
+
+def test_retry_exhausted_fails_the_analysis_rather_than_proceeding():
+    """A malformed answer must not reach a decision. Three tries and it is a
+    failed analysis, which is a real outcome with a real record."""
+
+    def transport(url, **kwargs):
+        return _Response({"choices": [{"message": {"content": "{\"state\": \"NOPE\"}"},
+                                       "finish_reason": "stop"}]})
+
+    provider = GroqHostedProvider(
+        model_id="groq/compound",
+        api_key="gsk-not-a-real-key",
+        transport=transport,
+        quota=MEASURED,
+    )
+
+    with pytest.raises(StructuredOutputError, match="after 3 attempt"):
+        provider.analyse(LLMRequest(prompt="p", bundle=None))
+
+
+def test_a_strict_answer_is_not_retried():
+    """Retrying a strict-mode failure spends the quota twice for a model that
+    was supposed to guarantee the shape."""
+
+    attempts = {"n": 0}
+
+    def transport(url, **kwargs):
+        attempts["n"] += 1
+        return _Response({"choices": [{"message": {"content": "not json"},
+                                       "finish_reason": "stop"}]})
+
+    provider = GroqHostedProvider(
+        model_id="openai/gpt-oss-120b",
+        api_key="gsk-not-a-real-key",
+        transport=transport,
+        quota=MEASURED,
+    )
+
+    with pytest.raises(StructuredOutputError):
+        provider.analyse(LLMRequest(prompt="p", bundle=None))
+
+    assert attempts["n"] == 1
+
+
+def test_the_local_schema_check_covers_what_the_contract_uses():
+    schema = stage3_schema()
+
+    assert schema_violations(_full_stage3(), schema) == []
+    assert any("missing required" in p for p in schema_violations({"state": "REJECT"}, schema))
+    assert any(
+        "not one of" in p
+        for p in schema_violations(_full_stage3(state="WRONG"), schema)
+    )
+    assert any(
+        "not one of" in p
+        for p in schema_violations(
+            _full_stage3(reachable_zone_basis_kinds=["PRIOR_HIGH"]), schema
+        )
+    )
 
 
 def test_the_strict_model_list_is_configuration():
@@ -494,3 +694,4 @@ def test_the_registry_row_records_the_policy_and_costs_nothing():
     assert row["enabled"] is False
     assert "NOT_USED_FOR_TRAINING" in row["notes"]
     assert "Zero Data Retention" in row["notes"]
+    assert "STRICT_JSON_SCHEMA" in row["notes"]

@@ -1,9 +1,15 @@
 """`python -m surge.jobs.readiness_cli` - can this market go live, and if not why.
 
-Reads what the database can answer and takes the rest as explicit flags, because
-whether anyone has settled on a price provider is a fact about the world rather
-than a row in a table. Guessing it from the presence of an environment variable
-would make the report wrong in the reassuring direction.
+Connects when ``SURGE_DATABASE_URL`` is set and asks the database the questions
+the database can answer: whether the security master is fresh, whether a
+universe run is published, whether the teacher tables are still empty, which
+providers are bound, and - separately - whether any of those bindings has ever
+produced a row. The rest comes from flags, because whether anyone has *settled*
+on a price provider is a fact about the world rather than a row in a table.
+
+Earlier this looked at the connection string and never opened it, which made the
+report a description of the flags it was given. Noticing that a variable is set
+is not the same as asking.
 
 Exit code is 0 when at least one market is LIVE_READY, and 1 otherwise, so a
 scheduler can use it as a gate.
@@ -16,7 +22,14 @@ import json
 import os
 import subprocess
 
-from surge.runtime.readiness import MarketInputs, ReadinessReport, assess_all
+from surge.runtime.readiness import (
+    MarketInputs,
+    MarketReadiness,
+    ReadinessReport,
+    Verdict,
+    assess,
+    collect,
+)
 
 
 def _git_sha() -> str | None:
@@ -26,6 +39,25 @@ def _git_sha() -> str | None:
         ).stdout.strip()
     except (subprocess.SubprocessError, OSError):
         return None
+
+
+#: What a flag may answer. Everything else in MarketInputs is the database's to
+#: fill, and passing it here would let a command line overrule a measurement.
+def _overrides_for(market: str, args) -> dict:
+    prefix = market.lower()
+    return {
+        "eod_price_provider": getattr(args, f"{prefix}_eod", None),
+        "intraday_price_provider": getattr(args, f"{prefix}_intraday", None),
+        "fx_provider": args.fx,
+        "eod_analysis_provider": args.eod_analysis_provider,
+        "eod_analysis_is_a_stand_in": not args.eod_analysis_is_real,
+        "entry_analysis_provider": args.entry_analysis_provider,
+        "entry_analysis_is_a_stand_in": not args.entry_analysis_is_real,
+        "scheduler_configured": args.scheduler,
+        "object_store_configured": args.object_store,
+        "migrations_in_sync": args.migrations_in_sync,
+        "ci_head_green": args.ci_green,
+    }
 
 
 def _inputs_for(market: str, args) -> MarketInputs:
@@ -85,15 +117,62 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     markets = [m.strip().upper() for m in args.markets.split(",") if m.strip()]
-    report: ReadinessReport = assess_all([_inputs_for(m, args) for m in markets])
-
     database_url = os.environ.get("SURGE_DATABASE_URL")
-    if not database_url:
-        report.notes.append(
+
+    notes: list[str] = []
+    markets_readiness: list[MarketReadiness] = []
+
+    if database_url:
+        try:
+            import psycopg2
+        except ImportError:  # pragma: no cover - depends on the environment
+            psycopg2 = None
+
+        if psycopg2 is None:
+            notes.append(
+                "SURGE_DATABASE_URL is set and psycopg2 is not installed, so the database checks "
+                "could not be run. They are reported as failing rather than assumed to pass"
+            )
+            markets_readiness = [assess(_inputs_for(m, args)) for m in markets]
+        else:
+            connection = psycopg2.connect(database_url)
+            try:
+                # Read-only, and explicitly so. A readiness report has no
+                # business being able to change what it is reporting on.
+                connection.set_session(readonly=True, autocommit=True)
+                for market in markets:
+                    markets_readiness.append(
+                        collect(connection, market, **_overrides_for(market, args))
+                    )
+            finally:
+                connection.close()
+            notes.append(
+                "the database was read for the checks it can answer: security master freshness, "
+                "the authoritative universe run, teacher row count, the mock prediction guard, "
+                "live material sources, provider role bindings, and - separately from the "
+                "bindings - whether any market data or FX row has actually been observed"
+            )
+    else:
+        notes.append(
             "no database connection was supplied, so the checks that read the database "
-            "(security master, universe run, teacher row count, mock guard) were not run. "
-            "They are reported as failing rather than assumed to pass"
+            "(security master, universe run, teacher row count, mock guard, provider bindings, "
+            "observed rows) were not run. They are reported as failing rather than assumed to pass"
         )
+        markets_readiness = [assess(_inputs_for(m, args)) for m in markets]
+
+    report = ReadinessReport(markets=markets_readiness)
+    if not report.any_market_live:
+        report.notes.append(
+            "no market is live. Each blocker names the decision that would clear it, and a check "
+            "reading BOUND_NOT_LIVE_OBSERVED is implemented and bound and has never fetched "
+            "anything - which needs a first run rather than a decision"
+        )
+    partial = [m.market_code for m in report.markets if m.verdict is Verdict.PARTIAL_LIVE]
+    if partial:
+        report.notes.append(
+            f"{', '.join(partial)} can run part of the pipeline for real"
+        )
+    report.notes.extend(notes)
 
     sha = _git_sha()
     if sha:

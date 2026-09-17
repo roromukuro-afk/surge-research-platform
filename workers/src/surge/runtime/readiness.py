@@ -29,13 +29,33 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-READINESS_VERSION = "readiness-1.2.0"
+READINESS_VERSION = "readiness-1.3.0"
 
 
 class Verdict(StrEnum):
     LIVE_READY = "LIVE_READY"
     PARTIAL_LIVE = "PARTIAL_LIVE"
     BLOCKED = "BLOCKED"
+
+
+class Liveness(StrEnum):
+    """Three states, because "configured" and "working" are not the same claim.
+
+    The case that forced this: ``FX_USDJPY`` is bound to the ECB, the binding is
+    enabled, the adapter is written and tested - and ``market.fx_rates`` holds
+    zero rows. Reporting that as a working FX source would be false, and
+    reporting it as "no FX source" would throw away the fact that everything
+    except the first real fetch is done.
+    """
+
+    NOT_BOUND = "NOT_BOUND"
+    #: Implemented and bound, and nothing has actually been fetched yet.
+    BOUND_NOT_LIVE_OBSERVED = "BOUND_NOT_LIVE_OBSERVED"
+    LIVE_OBSERVED = "LIVE_OBSERVED"
+
+    @property
+    def is_working(self) -> bool:
+        return self is Liveness.LIVE_OBSERVED
 
 
 class CheckStatus(StrEnum):
@@ -59,6 +79,8 @@ class Check:
     #: would make a market with nothing connected look partly live.
     is_a_capability: bool = False
     blocker_id: str | None = None
+    #: For checks that distinguish a binding from an observation.
+    liveness: Liveness | None = None
 
     @property
     def blocks(self) -> bool:
@@ -105,6 +127,9 @@ class MarketReadiness:
             ],
             "blocker_ids": self.blocker_ids,
             "checks": {c.name: c.status.value for c in self.checks},
+            "liveness": {
+                c.name: c.liveness.value for c in self.checks if c.liveness is not None
+            },
             "version": self.version,
         }
 
@@ -171,6 +196,27 @@ SQL_CHECKS: dict[str, str] = {
         select count(*) from news.sources
         where enabled = true and live_verified_at is not null and scope::text = %(market)s
     """,
+    #: A binding is a configuration. It says which provider would be used, and
+    #: nothing at all about whether anything has been fetched.
+    "price_binding": """
+        select provider_id from market.provider_role_bindings
+        where enabled = true and effective_to is null
+          and role::text = case when %(market)s = 'JP' then 'EOD_CURRENT_JP' else 'EOD_CURRENT_US' end
+        order by priority limit 1
+    """,
+    "fx_binding": """
+        select provider_id from market.provider_role_bindings
+        where enabled = true and effective_to is null and role::text = 'FX_USDJPY'
+        order by priority limit 1
+    """,
+    #: And these are the observations. Deliberately separate queries: one
+    #: answers "is it configured", the other "has it ever produced a row".
+    "price_rows": """
+        select count(*) from market.daily_bars b
+        join ref.securities s using (security_id)
+        where s.market_code = %(market)s
+    """,
+    "fx_rows": "select count(*) from market.fx_rates",
 }
 
 
@@ -241,6 +287,60 @@ def check_provider(
     )
 
 
+def check_capability(
+    name: str,
+    *,
+    settled_provider: str | None,
+    bound_provider: str | None,
+    rows_observed: int,
+    what_it_holds: str,
+    blocker_id: str | None,
+    gates_predictions: bool = True,
+) -> Check:
+    """One check that separates "bound" from "has ever produced data".
+
+    A binding with no rows is reported as a failure and described as an
+    implementation that has not run, which is a different thing to do next from
+    an unbound role: one needs a decision, the other needs a first fetch.
+    """
+
+    provider = settled_provider or bound_provider
+    if not provider:
+        return Check(
+            name=name,
+            status=CheckStatus.FAIL,
+            detail=f"no provider is bound for this role, and {what_it_holds} is empty",
+            gates_predictions=gates_predictions,
+            is_a_capability=True,
+            blocker_id=blocker_id,
+            liveness=Liveness.NOT_BOUND,
+        )
+
+    if rows_observed <= 0:
+        return Check(
+            name=name,
+            status=CheckStatus.FAIL,
+            detail=(
+                f"{provider} is bound and enabled, and {what_it_holds} holds no rows. "
+                "IMPLEMENTED and BOUND, not yet live observed: the adapter and the binding are "
+                "done and nothing has been fetched, so this cannot be reported as a working source"
+            ),
+            gates_predictions=gates_predictions,
+            is_a_capability=True,
+            blocker_id=blocker_id,
+            liveness=Liveness.BOUND_NOT_LIVE_OBSERVED,
+        )
+
+    return Check(
+        name=name,
+        status=CheckStatus.PASS,
+        detail=f"{provider}, with {rows_observed:,} row(s) actually observed in {what_it_holds}",
+        gates_predictions=gates_predictions,
+        is_a_capability=True,
+        liveness=Liveness.LIVE_OBSERVED,
+    )
+
+
 @dataclass(frozen=True)
 class MarketInputs:
     """What the caller could determine about one market.
@@ -260,6 +360,14 @@ class MarketInputs:
     #: supply an entry_reference_price, however good it is for history.
     intraday_price_provider: str | None = None
     fx_provider: str | None = None
+    #: What the database says is bound, as distinct from what a person settled
+    #: on. Both matter and they answer different questions.
+    eod_price_binding: str | None = None
+    fx_binding: str | None = None
+    #: What has actually been fetched. A binding with zero rows is an
+    #: implementation, not a source.
+    price_rows_observed: int = 0
+    fx_rows_observed: int = 0
     material_sources_live: int = 0
     #: Stage 3. Produces setups and watches, never an entry.
     eod_analysis_provider: str | None = None
@@ -304,17 +412,13 @@ def assess(inputs: MarketInputs) -> MarketReadiness:
             ),
             blocker_id=None,
         ),
-        check_provider(
+        check_capability(
             "eod_price_provider",
-            configured=bool(inputs.eod_price_provider),
-            detail=(
-                f"{inputs.eod_price_provider}"
-                if inputs.eod_price_provider
-                else "no settled end-of-day price source. Without consolidated session OHLC there "
-                "is no outcome resolution, because the path ladder reads the session high and low"
-            ),
+            settled_provider=inputs.eod_price_provider,
+            bound_provider=inputs.eod_price_binding,
+            rows_observed=inputs.price_rows_observed,
+            what_it_holds="market.daily_bars",
             blocker_id="D-102" if inputs.market_code == "JP" else "D-103-EOD",
-            is_a_capability=True,
         ),
         check_provider(
             "intraday_entry_price_provider",
@@ -328,16 +432,22 @@ def assess(inputs: MarketInputs) -> MarketReadiness:
             ),
             blocker_id="D-06b" if inputs.market_code == "JP" else "D-103-LIVE",
         ),
-        check_provider(
-            "fx_provider",
-            configured=bool(inputs.fx_provider) or inputs.market_code == "JP",
-            detail=(
-                "not needed: a yen market needs no conversion for the 3,000 yen filter"
-                if inputs.market_code == "JP"
-                else (inputs.fx_provider or "no FX source; the 3,000 yen eligibility filter cannot "
-                      "be applied to a non-yen price")
-            ),
-            blocker_id=None if inputs.market_code == "JP" else "D-02a",
+        (
+            Check(
+                name="fx_provider",
+                status=CheckStatus.PASS,
+                detail="not needed: a yen market needs no conversion for the 3,000 yen filter",
+                blocker_id=None,
+            )
+            if inputs.market_code == "JP"
+            else check_capability(
+                "fx_provider",
+                settled_provider=inputs.fx_provider,
+                bound_provider=inputs.fx_binding,
+                rows_observed=inputs.fx_rows_observed,
+                what_it_holds="market.fx_rates",
+                blocker_id="D-02a",
+            )
         ),
         Check(
             name="material_sources",
@@ -449,12 +559,16 @@ def assess_all(markets: Sequence[MarketInputs]) -> ReadinessReport:
 def collect(conn, market_code: str, *, universe_version: str = "universe-1.0.0", **overrides):
     """Read what the database can answer, and let the caller supply the rest.
 
-    The provider questions are not things the database knows. It knows whether a
-    universe run is published and whether the teacher tables are empty; whether
-    anyone has settled on a price source is a fact about the world.
+    The provider questions split in two. Whether anyone has *settled* on a price
+    source is a fact about the world and comes from the caller; whether a
+    binding exists and whether it has ever produced a row are facts about the
+    database, and both are read here. Keeping them apart is what lets the report
+    say "bound, never fetched" instead of collapsing it into either "ready" or
+    "nothing here".
     """
 
     values: dict[str, object] = {}
+    errors: list[str] = []
     with conn.cursor() as cur:
         for name, sql in SQL_CHECKS.items():
             try:
@@ -463,7 +577,7 @@ def collect(conn, market_code: str, *, universe_version: str = "universe-1.0.0",
                 values[name] = row[0] if row else None
             except Exception as exc:  # noqa: BLE001 - an unreadable check is a failed check
                 values[name] = None
-                values[f"{name}_error"] = f"{type(exc).__name__}: {exc}"
+                errors.append(f"{name}: {type(exc).__name__}: {exc}")
 
     inputs = MarketInputs(
         market_code=market_code,
@@ -472,20 +586,36 @@ def collect(conn, market_code: str, *, universe_version: str = "universe-1.0.0",
         teacher_row_count=int(values.get("teacher_rows") or 0),
         mock_guard_constraints=int(values.get("mock_cannot_predict") or 0),
         material_sources_live=int(values.get("live_news_sources") or 0),
+        eod_price_binding=values.get("price_binding"),
+        fx_binding=values.get("fx_binding"),
+        price_rows_observed=int(values.get("price_rows") or 0),
+        fx_rows_observed=int(values.get("fx_rows") or 0),
         **overrides,
     )
-    return assess(inputs)
+    readiness = assess(inputs)
+    for error in errors:
+        # An unreadable check is a failed check, and it should say which one.
+        readiness.checks.append(
+            Check(
+                name="database_check_failed",
+                status=CheckStatus.FAIL,
+                detail=f"a readiness query could not be run, so its answer is unknown - {error}",
+            )
+        )
+    return readiness
 
 
 __all__ = [
     "READINESS_VERSION",
     "Check",
     "CheckStatus",
+    "Liveness",
     "MarketInputs",
     "MarketReadiness",
     "ReadinessReport",
     "Verdict",
     "assess",
     "assess_all",
+    "check_capability",
     "collect",
 ]

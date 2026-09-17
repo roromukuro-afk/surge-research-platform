@@ -259,6 +259,14 @@ class MarketIngestJob:
         # in the permissive direction, silently, for every provider added later.
         # A caller that has not read the terms passes PersistenceDecision.unknown
         # and is refused, which is the correct outcome for not knowing.
+        #
+        # Checked against the fetcher here as well as against the provenance at
+        # write time. Failing at construction is a better place to find out than
+        # halfway through a backfill, and the write-time check still stands
+        # because the provenance is what actually describes the bytes.
+        persistence.assert_is_for(
+            provider_id=fetcher.provider_id, dataset_key=fetcher.dataset_key
+        )
         self._persistence = persistence
         self._fetcher = fetcher
         self._store = store
@@ -305,6 +313,17 @@ class MarketIngestJob:
         # durable - the object store, the raw object manifest, the parquet
         # partition, the bars and the coverage rows - so this is the one place
         # that has to hold for a provider whose terms do not permit storage.
+        #
+        # Two checks, and the order matters. First that the permission is about
+        # *this* data: an ALLOWED decision for another provider is a real
+        # permission for something else, and letting it through would put a
+        # genuine licence in the audit trail for a dataset it was never about.
+        # Only then whether it says yes.
+        self._persistence.assert_governs_fetch(
+            provider_id=provenance.source_id,
+            dataset_key=provenance.dataset,
+            policy_version=fetched.license_policy_version,
+        )
         self._persistence.assert_may_persist(target="the object store and the market tables")
 
         stored = self._store.put_content_addressed(
