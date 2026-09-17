@@ -80,6 +80,29 @@ class NormalisedCode:
     def is_resolvable(self) -> bool:
         return self.kind is not CodeNormalisation.UNEXPECTED_SHAPE
 
+    @property
+    def lookup_keys(self) -> tuple[str, ...]:
+        """The keys to try against the security master, best first.
+
+        Normalisation and lookup are different jobs, and this is where they
+        separate. A five-character code whose fifth character is not "0" is kept
+        whole - the rule never silently strips it - but the master may hold the
+        same security under its four-character base, and it usually does:
+        measured against live data, every TDnet code of the form 13264 / 587A4
+        was an ETF the master carries as 1326 / 587A.
+
+        So the exact form is tried first and the base second, and the caller
+        records *which one matched*. A match on the base is a weaker claim than
+        a match on the exact code and is labelled as such; it is not the same
+        thing as having stripped the character and forgotten.
+        """
+
+        if self.kind is CodeNormalisation.FIVE_CHAR_KEPT:
+            return (self.normalised, self.normalised[:4])
+        if self.kind is CodeNormalisation.UNEXPECTED_SHAPE:
+            return ()
+        return (self.normalised,)
+
 
 def normalise_company_code(raw: str | None) -> NormalisedCode:
     """Turn a five-character TDnet code into something the master can match.

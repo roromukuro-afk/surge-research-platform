@@ -79,6 +79,27 @@ Codes arrive as five characters. The trailing zero is **not** stripped unconditi
 
 Of 300 live items, **280 were stripped and 20 were kept** — and every kept one was a fund. Stripping them would have merged each with whatever four-digit issuer shares its prefix. The raw code is always stored beside the normalised one, and a database check constraint keeps the two in step so the wrong branch cannot be recorded.
 
+### Normalisation and lookup are different jobs
+
+Keeping `13264` whole is right, and on its own it resolves nothing: the security master carries that ETF as **`1326`**. All 477 ETFs in the master are held under four-character codes; TDnet reports them with a fifth character.
+
+So the lookup tries the exact form **first** and the four-character base **second**, and records which one matched:
+
+| Match | `mapping_confidence` |
+|---|---|
+| exact code against the exchange's listing | `REGISTRY_ANCHORED` |
+| four-character base | `PROVISIONAL` |
+
+That is not the same thing as stripping the character and forgetting. The rule still never silently merges; a weaker claim is stored as a weaker claim, and `matched_lookup_key` says which key produced it.
+
+### How much of a live page resolves
+
+238 distinct normalised codes from one live pass, checked against the Phase 1 master:
+
+- **224 resolved (94.1 %)**
+- **9 were ETFs** reachable only through the base fallback (`13264`→`1326`, `587A4`→`587A`, …)
+- **5 did not resolve at all**: `3260`, `619A`, `621A`, `625A`, `9388`. None is present in `ref.listings` under any form, so these are listings newer than the Phase 1 snapshot. That is a **security master freshness finding**, not a normalisation bug, and it is what `unmapped_company_codes` exists to surface.
+
 ## Title classification
 
 The body is out of reach, so the disclosure type is derived from the headline. Measured against the same 300 live titles: **5.3 % fall through to `OTHER`**, and `OTHER` still produces a material candidate — the classifier types things, it never excludes them.

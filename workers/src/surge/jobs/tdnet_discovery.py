@@ -66,6 +66,24 @@ class DiscoveredItem:
     market_code: str | None = None
     unmapped_reason: str | None = None
     verification: dict | None = None
+    #: Which lookup key matched. Differs from the normalised code when the
+    #: master held the security under its four-character base.
+    matched_key: str | None = None
+    matched_on_base: bool = False
+
+    @property
+    def mapping_confidence(self) -> str | None:
+        """How the link was established, not how strongly anyone feels about it.
+
+        An exact code match against the exchange's own listing is
+        REGISTRY_ANCHORED. A match on the four-character base is one inference
+        step further out, so it is PROVISIONAL - which is a legitimate state to
+        store and an illegitimate one to hide.
+        """
+
+        if self.security_id is None:
+            return None
+        return "PROVISIONAL" if self.matched_on_base else "REGISTRY_ANCHORED"
 
     @property
     def is_mapped(self) -> bool:
@@ -93,8 +111,9 @@ class DiscoveredItem:
             "update_history": self.item.update_history,
             "security_id": self.security_id,
             "listing_market_code": self.market_code,
-            "mapping_confidence": "REGISTRY_ANCHORED" if self.is_mapped else None,
+            "mapping_confidence": self.mapping_confidence,
             "unmapped_reason": self.unmapped_reason,
+            "matched_lookup_key": self.matched_key,
             "source_endpoint": endpoint,
             "raw_response_sha256": response_sha256,
             "system_first_seen_at": times.system_first_seen_at,
@@ -271,16 +290,30 @@ class TdnetDiscoveryJob:
         security_id: str | None = None
         market_code: str | None = None
         unmapped_reason: str | None = None
+        matched_key: str | None = None
+        matched_on_base = False
 
         if item.code.kind is CodeNormalisation.UNEXPECTED_SHAPE:
             unmapped_reason = f"code {item.code.raw!r} is not a shape the normaliser recognises"
         else:
-            security_id, market_code = self._resolver.resolve(item.code.normalised, as_of=item.pubdate)
+            resolve_code = getattr(self._resolver, "resolve_code", None)
+            if resolve_code is not None:
+                security_id, market_code, matched_key = resolve_code(item.code, as_of=item.pubdate)
+            else:
+                security_id, market_code = self._resolver.resolve(item.code.normalised, as_of=item.pubdate)
+                matched_key = item.code.normalised if security_id else None
+
             if security_id is None:
                 unmapped_reason = (
                     f"{item.code.normalised} (raw {item.code.raw}) is not in the security master "
                     f"as of {item.pubdate.date()}"
                 )
+            elif matched_key != item.code.normalised:
+                # Matched on the four-character base rather than on the code as
+                # given. Almost always an ETF the master carries without the
+                # suffix - but "almost always" is why this is recorded as a
+                # weaker claim rather than treated as an exact hit.
+                matched_on_base = True
 
         # The four times. available_to_model_at is when we stored the index row,
         # never the disclosure's own pubdate - a disclosure published at 13:00
@@ -327,6 +360,8 @@ class TdnetDiscoveryJob:
             market_code=market_code,
             unmapped_reason=unmapped_reason,
             verification=verification,
+            matched_key=matched_key,
+            matched_on_base=matched_on_base,
         )
 
 
@@ -346,3 +381,56 @@ def _fingerprint(item: TdnetItem) -> str:
         body=None,
         summary=f"{item.code.raw}|{item.url_xbrl or ''}|{item.update_history or ''}",
     )
+
+
+class DatabaseResolver:
+    """Resolves a normalised TDnet code against the Phase 1 security master.
+
+    Reads as of the disclosure's own publication time, not as of now: a code
+    listed last week was not resolvable when a disclosure from last month was
+    published, and the master carries the history that says so.
+
+    Takes a connection rather than opening one, so the caller owns the
+    transaction and a discovery pass commits once.
+    """
+
+    def __init__(self, conn) -> None:
+        self._conn = conn
+        self._cache: dict[str, tuple[str | None, str | None]] = {}
+
+    SQL = """
+    select s.security_id::text, s.market_code::text
+    from ref.listings l
+    join ref.securities s using (security_id)
+    where l.local_code = %(code)s
+      and s.market_code = 'JP'
+      and l.effective_to is null
+      and l.available_at <= %(as_of)s
+    order by l.is_primary desc nulls last, l.effective_from desc
+    limit 1
+    """
+
+    def resolve(self, normalised_code: str, *, as_of: datetime) -> tuple[str | None, str | None]:
+        if normalised_code in self._cache:
+            return self._cache[normalised_code]
+        with self._conn.cursor() as cur:
+            cur.execute(self.SQL, {"code": normalised_code, "as_of": as_of})
+            row = cur.fetchone()
+        resolved = (row[0], row[1]) if row else (None, None)
+        self._cache[normalised_code] = resolved
+        return resolved
+
+    def resolve_code(self, code, *, as_of: datetime) -> tuple[str | None, str | None, str | None]:
+        """Try each lookup key in turn and say which one matched.
+
+        Returns ``(security_id, market_code, matched_key)``. A match on the
+        four-character base rather than on the exact code is a weaker claim, and
+        the caller downgrades the mapping confidence accordingly - the point of
+        returning the key rather than only the result.
+        """
+
+        for key in code.lookup_keys:
+            security_id, market_code = self.resolve(key, as_of=as_of)
+            if security_id is not None:
+                return security_id, market_code, key
+        return None, None, None

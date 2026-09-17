@@ -341,3 +341,234 @@ def test_the_summary_counts_flags_separately_from_types():
     assert counts["EARNINGS_RESULT"] == 2
     assert counts["_corrections"] == 1
     assert counts["_routine"] == 1
+
+
+# ------------------------------------------------- integration with the pipeline
+
+
+def _discovered(title="2026年９月期業績予想の修正に関するお知らせ", code="72030", security_id="sec-1"):
+    from surge.jobs.tdnet_discovery import TdnetDiscoveryJob
+
+    class Resolver:
+        def resolve(self, normalised_code, *, as_of):
+            return (security_id, "JP") if security_id else (None, None)
+
+    payload = (
+        _RESPONSE_TEXT.replace("業績予想の修正に関するお知らせ", title)
+        .replace('"company_code": "92730"', f'"company_code": "{code}"')
+    ).encode("utf-8")
+
+    class Stub:
+        spec = None
+        limit = 300
+
+        def fetch_recent(self, *, now=None):
+            return parse_response(payload, endpoint="stub", fetched_at=FETCHED)
+
+        def window_is_safe(self, result):
+            return True
+
+        def advance_cursor(self, result):
+            return result.max_id
+
+    job = TdnetDiscoveryJob(source=Stub(), resolver=Resolver())
+    report = job.run(now=FETCHED)
+    return report
+
+
+def test_a_title_only_discovery_measures_only_what_a_title_supports():
+    """Five of the seven features are None, and that is the honest answer."""
+
+    from surge.material.from_tdnet import to_features
+
+    report = _discovered()
+    features = to_features(report.items[0], knowledge_cutoff=FETCHED)
+
+    assert features.novelty == pytest.approx(0.60)
+    assert features.directness == pytest.approx(1.0)
+    assert set(features.unmeasured) == {
+        "surprise",
+        "magnitude",
+        "persistence",
+        "market_reaction",
+        "priced_in",
+    }
+
+
+def test_a_routine_disclosure_scores_low_novelty_without_being_dropped():
+    from surge.material.from_tdnet import to_features
+
+    report = _discovered(title="ETFの収益分配金見込額のお知らせ")
+    features = to_features(report.items[0], knowledge_cutoff=FETCHED)
+
+    assert features.novelty == pytest.approx(0.10)
+    assert "routine" in features.methods["novelty"]
+
+
+def test_a_correction_is_less_novel_than_a_first_disclosure():
+    from surge.material.from_tdnet import to_features
+
+    first = to_features(_discovered().items[0], knowledge_cutoff=FETCHED)
+    corrected = to_features(
+        _discovered(title="（訂正）2026年９月期業績予想の修正に関するお知らせ").items[0],
+        knowledge_cutoff=FETCHED,
+    )
+    assert corrected.novelty < first.novelty
+
+
+def test_the_link_is_registry_anchored_not_strong():
+    """The code came from the exchange but reached us through a third party and
+    was normalised by a rule of ours. That is one step removed from reading the
+    identifier off a registry, and the vocabulary has a word for it."""
+
+    from surge.material.from_tdnet import to_relation
+
+    relation = to_relation(_discovered().items[0])
+    assert relation.confidence.value == "REGISTRY_ANCHORED"
+    assert relation.relation_type.value == "DIRECT_COMPANY"
+    assert relation.evidence["raw_company_code"] == "72030"
+
+
+def test_an_unmapped_row_produces_no_candidate_but_is_still_counted():
+    from surge.material.from_tdnet import to_material_evaluations
+
+    report = _discovered(security_id=None)
+    assert report.unmapped_company_codes == len(report.items)
+    assert to_material_evaluations(report.items, knowledge_cutoff=FETCHED) == {}
+
+
+def test_a_title_only_discovery_fires_M1_and_cannot_fire_the_others():
+    """The design working rather than a gap in it.
+
+    M1 asks for a regulated disclosure with novelty, which a title supports. M2,
+    M3 and M6 ask for independent verification, magnitude and priced-in, which it
+    does not - and the route engine refuses a missing feature rather than
+    treating it as a pass.
+    """
+
+    from surge.material.from_tdnet import to_material_evaluations
+    from surge.material.routes import build_candidate
+
+    report = _discovered()
+    evaluations = to_material_evaluations(report.items, knowledge_cutoff=FETCHED)
+    candidate = build_candidate("sec-1", evaluations["sec-1"])
+
+    assert candidate.discovery_routes == ["M1"]
+    assert candidate.is_candidate is True
+    for event_id, refusals in candidate.refusals.items():
+        assert "M6" in refusals or event_id
+
+
+def test_one_issuer_disclosing_twice_is_one_candidate_with_two_events():
+    from surge.material.from_tdnet import to_material_evaluations
+
+    report = _discovered()
+    evaluations = to_material_evaluations(report.items, knowledge_cutoff=FETCHED)
+    # Both rows in the fixture map to the same security under this resolver.
+    assert list(evaluations) == ["sec-1"]
+    assert len(evaluations["sec-1"]) == 2
+
+
+# ---------------------------------------------- lookup keys and the base fallback
+
+
+def test_an_ordinary_code_has_exactly_one_lookup_key():
+    assert normalise_company_code("72030").lookup_keys == ("7203",)
+    assert normalise_company_code("7203").lookup_keys == ("7203",)
+
+
+def test_a_kept_five_char_code_tries_the_exact_form_then_the_base():
+    """Normalisation and lookup are different jobs.
+
+    The rule keeps 13264 whole and never strips it. But the security master
+    carries that ETF as 1326 - measured, every 5-character TDnet code in a live
+    sample was an ETF the master held under its 4-character base - so the lookup
+    tries the exact form first and the base second, and records which matched.
+    """
+
+    assert normalise_company_code("13264").lookup_keys == ("13264", "1326")
+    assert normalise_company_code("587A4").lookup_keys == ("587A4", "587A")
+
+
+def test_an_unusable_code_has_no_lookup_keys():
+    assert normalise_company_code("nonsense").lookup_keys == ()
+
+
+def test_a_base_match_is_provisional_not_registry_anchored():
+    """A weaker claim, labelled as one. It is not the same thing as having
+    stripped the character and forgotten."""
+
+    from surge.jobs.tdnet_discovery import TdnetDiscoveryJob
+
+    class BaseOnlyResolver:
+        """Holds 1326 but not 13264, exactly like the real master."""
+
+        def resolve(self, normalised_code, *, as_of):
+            return ("sec-etf", "JP") if normalised_code == "1326" else (None, None)
+
+        def resolve_code(self, code, *, as_of):
+            for key in code.lookup_keys:
+                security_id, market = self.resolve(key, as_of=as_of)
+                if security_id:
+                    return security_id, market, key
+            return None, None, None
+
+    payload = _RESPONSE_TEXT.replace('"company_code": "587A4"', '"company_code": "13264"').encode("utf-8")
+
+    class Stub:
+        limit = 300
+
+        def fetch_recent(self, *, now=None):
+            return parse_response(payload, endpoint="stub", fetched_at=FETCHED)
+
+        def window_is_safe(self, result):
+            return True
+
+        def advance_cursor(self, result):
+            return result.max_id
+
+    report = TdnetDiscoveryJob(source=Stub(), resolver=BaseOnlyResolver()).run(now=FETCHED)
+    etf = next(d for d in report.items if d.item.code.raw == "13264")
+
+    assert etf.security_id == "sec-etf"
+    assert etf.matched_key == "1326"
+    assert etf.matched_on_base is True
+    assert etf.mapping_confidence == "PROVISIONAL"
+
+    # An exact match on the other row stays the stronger claim.
+    exact = next(d for d in report.items if d.item.code.raw == "92730")
+    assert exact.security_id is None or exact.mapping_confidence == "REGISTRY_ANCHORED"
+
+
+def test_the_row_records_which_key_matched():
+    from surge.jobs.tdnet_discovery import TdnetDiscoveryJob
+
+    class Resolver:
+        def resolve(self, normalised_code, *, as_of):
+            return ("sec-1", "JP") if normalised_code == "9273" else (None, None)
+
+        def resolve_code(self, code, *, as_of):
+            for key in code.lookup_keys:
+                sid, market = self.resolve(key, as_of=as_of)
+                if sid:
+                    return sid, market, key
+            return None, None, None
+
+    class Stub:
+        limit = 300
+
+        def fetch_recent(self, *, now=None):
+            return parse_response(RESPONSE, endpoint="stub", fetched_at=FETCHED)
+
+        def window_is_safe(self, result):
+            return True
+
+        def advance_cursor(self, result):
+            return result.max_id
+
+    report = TdnetDiscoveryJob(source=Stub(), resolver=Resolver()).run(now=FETCHED)
+    row = report.items[0].tdnet_row(run_id=None, response_sha256="a" * 64, endpoint="stub")
+
+    assert row["matched_lookup_key"] == "9273"
+    assert row["mapping_confidence"] == "REGISTRY_ANCHORED"
+    assert row["raw_company_code"] == "92730"
