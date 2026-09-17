@@ -132,8 +132,11 @@ def test_a_second_begin_for_the_same_trigger_creates_nothing(conn):
 
 
 def test_beginning_from_a_watch_that_is_not_at_its_trigger_is_refused(conn):
-    """An ARMED watch has not been triggered, so there is nothing to reanalyse.
-    The watch machine says so, and begin_entry_analysis inherits that."""
+    """There is nothing to reanalyse, and the machine says so before the
+    legality table is even consulted: begin_entry_analysis declares TRIGGER_HIT
+    as the from_state, the trigger compares that against the state it reads
+    under a lock, and a mismatch is reported as a stale read - which is what it
+    is. The execution row is never created, so the two stay in step."""
 
     with conn.cursor() as cur:
         watch_id, security_id = _watch(cur)
@@ -145,7 +148,7 @@ def test_beginning_from_a_watch_that_is_not_at_its_trigger_is_refused(conn):
         )
         transition_id = cur.fetchone()[0]
 
-        with pytest.raises(psycopg2.errors.RaiseException, match="illegal watch transition"):
+        with pytest.raises(psycopg2.errors.RaiseException, match="not TRIGGER_HIT as declared"):
             _begin(DatabaseExecutionStore(conn), str(watch_id), str(security_id), transition_id)
 
 

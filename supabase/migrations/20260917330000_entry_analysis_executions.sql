@@ -48,7 +48,12 @@ create table if not exists prod.entry_analysis_executions (
   --: again is a new analysis, and without this the second one would be refused
   --: as a duplicate of the first.
   trigger_transition_id bigint not null references prod.watch_transitions (transition_id),
-  security_id uuid not null references ref.securities (security_id),
+  --: No foreign key to ref.securities, and every other prod table agrees. An
+  --: identity rebuild remaps security ids (CLAUDE.md 1-10b), and a hard
+  --: reference from the production record would either block that migration or
+  --: cascade into rewriting history. The id is still the identity; it is simply
+  --: not enforced from here.
+  security_id uuid not null,
   analysis_kind prod.analysis_kind not null,
   status prod.analysis_execution_status not null default 'STARTED',
 
