@@ -174,7 +174,8 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
     'as_of_date', p_as_of_date,
     'eligibility', (
       select to_jsonb(x) from (
-        select decision::text, price, price_currency, price_jpy, fx_age_seconds, price_age_days, rule_version
+        select decision::text as decision, price, price_currency, converted_jpy,
+               fx_age_seconds, price_age_days, rule_version
         from market.price_eligibility
         where security_id = p_security_id and as_of_date = p_as_of_date
         limit 1
@@ -186,12 +187,12 @@ language sql stable security invoker set search_path = pg_catalog, public as $$
       limit 1
     ),
     'technical_routes', (
-      select discovery_routes from screening.route_candidates
+      select to_jsonb(discovery_routes) from screening.route_candidates
       where security_id = p_security_id and trade_date = p_as_of_date
       limit 1
     ),
     'material_routes', (
-      select jsonb_build_object('routes', discovery_routes, 'event_ids', event_ids,
+      select jsonb_build_object('routes', to_jsonb(discovery_routes), 'event_ids', to_jsonb(event_ids),
                                 'strongest_relation', strongest_relation::text)
       from material.candidates
       where security_id = p_security_id and as_of_date = p_as_of_date
