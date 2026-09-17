@@ -132,11 +132,10 @@ def test_a_second_begin_for_the_same_trigger_creates_nothing(conn):
 
 
 def test_beginning_from_a_watch_that_is_not_at_its_trigger_is_refused(conn):
-    """There is nothing to reanalyse, and the machine says so before the
-    legality table is even consulted: begin_entry_analysis declares TRIGGER_HIT
-    as the from_state, the trigger compares that against the state it reads
-    under a lock, and a mismatch is reported as a stale read - which is what it
-    is. The execution row is never created, so the two stay in step."""
+    """There is nothing to reanalyse, and begin_entry_analysis now says so
+    itself rather than leaving it to the transition trigger: it locks the watch
+    and checks the state before inserting anything. The execution row is never
+    created, so the record and the machine stay in step."""
 
     with conn.cursor() as cur:
         watch_id, security_id = _watch(cur)
@@ -148,7 +147,7 @@ def test_beginning_from_a_watch_that_is_not_at_its_trigger_is_refused(conn):
         )
         transition_id = cur.fetchone()[0]
 
-        with pytest.raises(psycopg2.errors.RaiseException, match="not TRIGGER_HIT as declared"):
+        with pytest.raises(psycopg2.errors.RaiseException, match="no unanswered trigger"):
             _begin(DatabaseExecutionStore(conn), str(watch_id), str(security_id), transition_id)
 
 
@@ -163,7 +162,13 @@ def test_a_stored_answer_leaves_the_analysis_started_and_findable(conn):
         store = DatabaseExecutionStore(conn)
         begun = _begin(store, watch_id, security_id, trigger_id)
 
-        store.record_answer(begun.execution.analysis_execution_id, _answer())
+        store.record_answer(
+            begun.execution.analysis_execution_id,
+            _answer(),
+            prompt_sha256="p" * 64,
+            bundle_sha256="b" * 64,
+            canonical_prompt_sha256="c" * 64,
+        )
 
         plan = plan_recovery(store)
         resumable = [
@@ -188,7 +193,13 @@ def test_the_in_flight_view_shows_whether_the_model_was_already_paid_for(conn):
             (begun.execution.analysis_execution_id,),
         )
         before = cur.fetchone()
-        store.record_answer(begun.execution.analysis_execution_id, _answer())
+        store.record_answer(
+            begun.execution.analysis_execution_id,
+            _answer(),
+            prompt_sha256="p" * 64,
+            bundle_sha256="b" * 64,
+            canonical_prompt_sha256="c" * 64,
+        )
         cur.execute(
             "select has_a_stored_answer from ui.entry_analysis_in_flight "
             "where analysis_execution_id = %s",
@@ -211,7 +222,14 @@ def test_a_completed_analysis_cannot_be_changed_again(conn):
         watch_id, security_id, trigger_id = _triggered_watch(cur)
         store = DatabaseExecutionStore(conn)
         begun = _begin(store, watch_id, security_id, trigger_id)
-        store.record_answer(begun.execution.analysis_execution_id, _answer())
+        store.record_answer(
+            begun.execution.analysis_execution_id,
+            _answer(),
+            prompt_sha256="p" * 64,
+            bundle_sha256="b" * 64,
+            canonical_prompt_sha256="c" * 64,
+        )
+        _move(cur, watch_id, "IN_REANALYSIS", "REARMED", kind="REANALYSIS")
         store.complete(
             begun.execution.analysis_execution_id,
             validation=EntryValidation(status=ValidationStatus.PASSED),
@@ -221,7 +239,7 @@ def test_a_completed_analysis_cannot_be_changed_again(conn):
         with pytest.raises(psycopg2.errors.RaiseException, match="already COMPLETED"):
             store.fail(
                 begun.execution.analysis_execution_id,
-                failure_class=FailureClass.PROVIDER_ERROR,
+                failure_class=FailureClass.QUOTA_BLOCKED,
                 failure_detail="after the fact",
                 now=LATER,
             )

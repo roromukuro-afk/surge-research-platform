@@ -53,7 +53,17 @@ def test_every_readiness_query_actually_runs(conn):
     with conn.cursor() as cur:
         for name, sql in SQL_CHECKS.items():
             try:
-                cur.execute(sql, {"market": "JP", "universe_version": "universe-1.0.0"})
+                cur.execute(
+                    sql,
+                    {
+                        "market": "JP",
+                        "universe_version": "universe-1.0.0",
+                        # The freshness queries are scoped to the bound provider;
+                        # null means "any", which is what a smoke of the SQL wants.
+                        "price_provider": None,
+                        "fx_provider": None,
+                    },
+                )
                 cur.fetchone()
             except Exception as exc:  # noqa: BLE001 - reported, not swallowed
                 conn.rollback()
@@ -96,7 +106,8 @@ def test_a_binding_without_rows_is_reported_as_bound_and_not_observed(conn):
     assert check.liveness in (
         Liveness.NOT_BOUND,
         Liveness.BOUND_NOT_LIVE_OBSERVED,
-        Liveness.LIVE_OBSERVED,
+        Liveness.LIVE_FRESH,
+        Liveness.LIVE_STALE,
     )
     if check.liveness is Liveness.BOUND_NOT_LIVE_OBSERVED:
         assert "not yet live observed" in check.detail

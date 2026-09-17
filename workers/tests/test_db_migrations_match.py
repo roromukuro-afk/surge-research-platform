@@ -48,18 +48,20 @@ def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _bodies_in_the_files() -> dict[tuple[str, str], str]:
-    """The last definition of each function across the migrations, in order.
+def _bodies_in_the_files() -> dict[tuple[str, str], set[str]]:
+    """Every body each function name is given across the migrations.
 
-    Last wins, because a later migration replacing an earlier one is exactly how
-    this project corrects a function.
+    A set rather than "the last one wins", because a name can be overloaded:
+    ``ref.listings_as_of`` has two signatures and the database holds both. A
+    last-wins map would call the older signature drifted for no better reason
+    than that it is not the newer one.
     """
 
-    bodies: dict[tuple[str, str], str] = {}
+    bodies: dict[tuple[str, str], set[str]] = {}
     for path in sorted(MIGRATIONS.glob("*.sql")):
         text = path.read_text(encoding="utf-8")
         for schema, name, _tag, body in _FUNCTION.findall(text):
-            bodies[(schema.lower(), name.lower())] = _normalise(body)
+            bodies.setdefault((schema.lower(), name.lower()), set()).add(_normalise(body))
     return bodies
 
 
@@ -80,7 +82,7 @@ def test_the_migrations_define_functions_at_all():
 
     bodies = _bodies_in_the_files()
 
-    assert len(bodies) > 20
+    assert len(bodies) > 60
     assert ("prod", "begin_entry_analysis") in bodies
 
 
@@ -102,11 +104,11 @@ def test_every_function_in_the_database_matches_its_migration(conn):
     drifted = []
     for schema, name, source in live:
         expected = bodies.get((schema.lower(), name.lower()))
-        if expected is None:
+        if not expected:
             # Not defined by a `create or replace` in any migration - a `create
             # function` without `or replace`, or something an extension owns.
             continue
-        if _normalise(source) != expected:
+        if _normalise(source) not in expected:
             drifted.append(f"{schema}.{name}")
 
     assert drifted == [], (

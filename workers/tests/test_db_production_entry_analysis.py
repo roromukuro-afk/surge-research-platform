@@ -83,13 +83,19 @@ def _assert_disposable(conn) -> None:
         )
 
 
+#: The watches each test created, so the fixture can remove them afterwards.
+#: A module-level list rather than an attribute on the connection, because a
+#: psycopg2 connection is a C object and will not carry one.
+_CREATED: list[str] = []
+
+
 @pytest.fixture()
 def conn():
     connection = psycopg2.connect(DSN)
     connection.autocommit = False
     _assert_disposable(connection)
-    created: list[str] = []
-    connection.created_watches = created  # type: ignore[attr-defined]
+    created = _CREATED
+    created.clear()
     try:
         yield connection
     finally:
@@ -127,7 +133,7 @@ def _triggered(conn) -> tuple[str, str, int]:
         )
         trigger_id = cur.fetchone()[0]
     conn.commit()
-    conn.created_watches.append(str(watch_id))
+    _CREATED.append(str(watch_id))
     return str(watch_id), str(security_id), trigger_id
 
 
