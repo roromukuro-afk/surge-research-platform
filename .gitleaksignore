@@ -1,0 +1,12 @@
+# Findings that have been examined and are not secrets.
+#
+# One fingerprint per line, and nothing broader. A path or rule exclusion would
+# switch the scanner off for a whole file or a whole class of secret; this only
+# silences the exact line in the exact commit that was checked by hand.
+#
+# f742b3c .env.example:40 - gitleaks' generic-api-key rule matched across a line
+# break: an EMPTY "SURGE_EODHD_API_TOKEN=" followed on the next line by the plan
+# name "EOD Historical Data - All World", which the rule read as the token's
+# value. The file has never held a real value, and the plan defaults have since
+# been moved into comments so the pattern cannot recur.
+f742b3c92c23aadda163a13d26657c1b8a2d3c46:.env.example:generic-api-key:40
