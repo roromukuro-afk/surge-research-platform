@@ -20,6 +20,20 @@ correct state today: the runner is real, the pipeline it would invoke is
 `IMPLEMENTED_NOT_LIVE_VERIFIED`, and a run log full of fictional successes would
 be worse than an empty one.
 
+## Do not register the tasks yet
+
+The implementation is finished. Registering it is not the next step, and this is
+a deliberate decision rather than an oversight (D-199).
+
+No market has a price provider or an analysis provider connected. Registering
+the tasks today would start four jobs every day that can only fail, and the run
+log - the thing that exists so a real gap is visible - would fill with failures
+that mean nothing. Worse, it would teach whoever reads it that the red lines are
+normal, which is exactly the habit the offline record depends on not forming.
+
+Register them when one market has a real price source and a real analysis
+provider. Until then the steps below are for trying it out, not for production.
+
 ## Steps
 
 Run these in PowerShell from `ops/windows`. No administrator rights are needed:
@@ -71,6 +85,9 @@ can actually read `.env.local`.
 Registering the task is yours to run - it changes your machine's configuration,
 so it is not something to do on your behalf. Everything up to it is written and
 testable without your involvement, which is why steps 1 and 2 exist.
+
+But it is not yours to run *yet*. See the note above: an empty pipeline on a
+schedule is worse than no schedule.
 
 ## The one thing to know about `StartWhenAvailable`
 

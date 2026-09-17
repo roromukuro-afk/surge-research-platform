@@ -32,7 +32,7 @@ this repository does. A model id belongs in ``GROQ_MODEL``; what belongs here is
 the contract it has to satisfy.
 
 **There is no truncation.** When a bundle does not fit the free tier, the answer
-is ``D-32_BLOCKED_FREE_QUOTA``, not a shorter canonical prompt. Trimming v5.1 to
+is ``ANALYSIS_FREE_QUOTA_BLOCKED``, not a shorter canonical prompt. Trimming v5.1 to
 fit a quota would make every answer an answer to a different method, and the
 difference would not be visible in the output.
 """
@@ -65,9 +65,43 @@ ENV_STRICT_MODELS = "GROQ_STRICT_MODELS"
 #: never requires a particular model, only a particular contract.
 DOCUMENTED_STRICT_MODELS = frozenset({"openai/gpt-oss-120b", "openai/gpt-oss-20b"})
 
-#: The decision id to raise when the canonical prompt plus the bundle will not
-#: fit whatever the account is actually allowed.
-BLOCKED_FREE_QUOTA = "D-32_BLOCKED_FREE_QUOTA"
+#: A runtime reason code, not a decision id. The decisions are D-189 (real EOD /
+#: Stage 3 provider) and D-190 (real intraday entry provider); this is what the
+#: preflight reports when the canonical prompt plus the bundle will not fit
+#: whatever the account is actually allowed.
+ANALYSIS_FREE_QUOTA_BLOCKED = "ANALYSIS_FREE_QUOTA_BLOCKED"
+
+#: Groq's published free-plan limits, read from
+#: https://console.groq.com/docs/rate-limits on 2026-09-17. Recorded per model
+#: family rather than as one number for the provider, because they differ by an
+#: order of magnitude and collapsing them is exactly the mistake that made
+#: D-103 wrong: one endpoint group's constraint generalised to a whole vendor.
+#:
+#: Published limits are a starting point and not the account's. They decide
+#: whether an account is worth opening; the account's own headers decide whether
+#: anything is sent.
+PUBLISHED_FREE_LIMITS = {
+    "openai/gpt-oss-*": {
+        "requests_per_minute": 30,
+        "requests_per_day": 1_000,
+        "tokens_per_minute": 8_000,
+        "tokens_per_day": 200_000,
+        "strict_structured_outputs": True,
+    },
+    "groq/compound*": {
+        "requests_per_minute": 30,
+        "requests_per_day": 250,
+        "tokens_per_minute": 70_000,
+        "tokens_per_day": None,
+        # Not listed among the models Groq documents for strict mode. Recorded
+        # as unknown rather than assumed either way - it is the difference
+        # between a usable fallback and a dead end, and it has to be measured.
+        "strict_structured_outputs": None,
+    },
+}
+
+#: Kept for callers that want the strict-capable family specifically.
+PUBLISHED_FREE_LIMITS_GPT_OSS = PUBLISHED_FREE_LIMITS["openai/gpt-oss-*"]
 
 
 class GroqError(RuntimeError):
@@ -80,6 +114,14 @@ class CredentialsMissing(GroqError):
 
 class FreeQuotaExceeded(GroqError):
     """The request does not fit. The prompt is not the thing that gives way."""
+
+
+class QuotaUnknown(GroqError):
+    """The account's limits have not been measured, so nothing may be sent.
+
+    Separate from :class:`FreeQuotaExceeded` because the remedy is different:
+    one is answered by measuring, the other by not using the free tier.
+    """
 
 
 class InputPolicyViolation(GroqError):
@@ -138,6 +180,32 @@ class DataPolicy:
     def may_receive_the_canonical_method(self) -> bool:
         return self.input_use is InputUse.NOT_USED_FOR_TRAINING
 
+    @property
+    def privacy_gate_passes(self) -> bool:
+        """Whether this provider may be used for production analysis.
+
+        Stricter than :attr:`may_receive_the_canonical_method`, and deliberately.
+        Not training on inputs is what makes an experiment acceptable; Zero Data
+        Retention *confirmed switched on for this account* is what makes routine
+        production traffic acceptable. "Available" is a fact about the product
+        and says nothing about the account, so it does not pass.
+        """
+
+        return self.may_receive_the_canonical_method and self.zero_data_retention_enabled is True
+
+    @property
+    def privacy_gate_detail(self) -> str:
+        if not self.may_receive_the_canonical_method:
+            return f"inputs are {self.input_use.value}"
+        if self.zero_data_retention_enabled is True:
+            return "inputs are not trained on and ZDR is confirmed enabled on the account"
+        if self.zero_data_retention_enabled is False:
+            return "ZDR is available and is switched off for this account"
+        return (
+            "ZDR is available and nobody has confirmed it is switched on for this account. "
+            "Whether it is on is a fact about the account, and this code has never seen the account"
+        )
+
     def assert_may_receive_the_canonical_method(self) -> None:
         if self.may_receive_the_canonical_method:
             return
@@ -154,10 +222,14 @@ class DataPolicy:
 GROQ_POLICY = DataPolicy(
     provider_id=PROVIDER_ID,
     input_use=InputUse.NOT_USED_FOR_TRAINING,
-    retention=Retention.NONE_BY_DEFAULT,
+    # Not NONE_BY_DEFAULT. "Groq does not retain customer data for inference
+    # requests" sits beside a documented possibility of transient retention for
+    # reliability and abuse handling, and until Zero Data Retention is confirmed
+    # switched on for the account, the weaker of the two is what is true.
+    retention=Retention.TRANSIENT_FOR_ABUSE_AND_RELIABILITY,
     zero_data_retention_available=True,
     zero_data_retention_enabled=None,
-    terms_url="https://groq.com/terms-of-sale/",
+    terms_url="https://console.groq.com/docs/legal/services-agreement",
     retention_url="https://console.groq.com/docs/your-data",
     tier_distinction="the retention page draws no distinction between the free and paid tiers",
     notes=(
@@ -236,6 +308,7 @@ class Quota:
     max_tokens_per_minute: int | None = None
     max_input_tokens_per_minute: int | None = None
     max_requests_per_minute: int | None = None
+    requests_per_day: int | None = None
     source: str = "not measured; read the account's rate-limit headers"
 
     @property
@@ -256,7 +329,9 @@ class Preflight:
     quota: Quota
     fits: bool
     reason: str
-    decision_id: str | None = None
+    #: A runtime reason code, not a decision id. Present only when the request
+    #: is refused because it does not fit a *measured* limit.
+    reason_code: str | None = None
 
     @property
     def summary(self) -> dict:
@@ -264,7 +339,7 @@ class Preflight:
             "prompt_tokens_estimated": self.prompt_tokens_estimated,
             "fits": self.fits,
             "reason": self.reason,
-            "decision": self.decision_id,
+            "reason_code": self.reason_code,
             "quota_source": self.quota.source,
         }
 
@@ -289,7 +364,7 @@ def preflight(prompt: str, *, quota: Quota, requests_per_day: int = 1) -> Prefli
                 "fit is unknown. Read them from the rate-limit headers of one real request before "
                 "running a batch"
             ),
-            decision_id=None,
+            reason_code=None,
         )
 
     per_request = quota.max_input_tokens_per_request
@@ -303,7 +378,7 @@ def preflight(prompt: str, *, quota: Quota, requests_per_day: int = 1) -> Prefli
                 "canonical prompt is not shortened to fit a quota: every answer would then be an "
                 "answer to a different method, and nothing in the output would show it"
             ),
-            decision_id=BLOCKED_FREE_QUOTA,
+            reason_code=ANALYSIS_FREE_QUOTA_BLOCKED,
         )
 
     per_minute = quota.max_input_tokens_per_minute or quota.max_tokens_per_minute
@@ -316,7 +391,7 @@ def preflight(prompt: str, *, quota: Quota, requests_per_day: int = 1) -> Prefli
                 f"~{estimated} input tokens exceeds the whole per-minute allowance ({per_minute}); "
                 "a single request cannot be sent at all"
             ),
-            decision_id=BLOCKED_FREE_QUOTA,
+            reason_code=ANALYSIS_FREE_QUOTA_BLOCKED,
         )
 
     if per_minute is not None and requests_per_day > 1:
@@ -340,6 +415,54 @@ def preflight(prompt: str, *, quota: Quota, requests_per_day: int = 1) -> Prefli
 
 
 # ------------------------------------------------------- structured outputs
+
+
+#: The headers Groq documents. ``x-ratelimit-limit-requests`` is requests per
+#: DAY and ``x-ratelimit-limit-tokens`` is tokens per MINUTE - an asymmetry worth
+#: naming, because reading either as "per request window" would be wrong by
+#: three orders of magnitude in opposite directions.
+RATE_LIMIT_HEADERS = {
+    "requests_per_day": "x-ratelimit-limit-requests",
+    "tokens_per_minute": "x-ratelimit-limit-tokens",
+    "remaining_requests": "x-ratelimit-remaining-requests",
+    "remaining_tokens": "x-ratelimit-remaining-tokens",
+    "reset_requests": "x-ratelimit-reset-requests",
+    "reset_tokens": "x-ratelimit-reset-tokens",
+}
+
+#: What the probe sends. No canonical prompt, no addenda, no security, no price,
+#: no material. The point is to learn the account's limits before anything that
+#: matters is transmitted, so the probe must not be the thing that transmits it.
+PROBE_PROMPT = "Reply with {\"ok\": true}."
+PROBE_SCHEMA = {
+    "type": "object",
+    "properties": {"ok": {"type": "boolean"}},
+    "required": ["ok"],
+    "additionalProperties": False,
+}
+
+
+def _int_or_none(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except ValueError:
+        return None
+
+
+def quota_from_headers(headers: dict, *, source: str) -> Quota:
+    """Read an account's real limits out of one response's headers."""
+
+    lowered = {str(k).lower(): v for k, v in (headers or {}).items()}
+    return Quota(
+        max_input_tokens_per_request=None,
+        max_tokens_per_minute=_int_or_none(lowered.get(RATE_LIMIT_HEADERS["tokens_per_minute"])),
+        max_input_tokens_per_minute=None,
+        max_requests_per_minute=None,
+        requests_per_day=_int_or_none(lowered.get(RATE_LIMIT_HEADERS["requests_per_day"])),
+        source=source,
+    )
 
 
 def _enum_list(values) -> list[str]:
@@ -509,8 +632,16 @@ class GroqHostedProvider:
 
         check = preflight(prompt, quota=self.quota)
         self.last_preflight = check
-        if not check.fits and check.decision_id == BLOCKED_FREE_QUOTA:
-            raise FreeQuotaExceeded(f"{check.decision_id}: {check.reason}")
+        if not check.fits and check.reason_code == ANALYSIS_FREE_QUOTA_BLOCKED:
+            raise FreeQuotaExceeded(f"{check.reason_code}: {check.reason}")
+        if not check.fits:
+            # The hole this closes: an unmeasured quota produced fits=False with
+            # no reason code, and the send went ahead anyway. The canonical
+            # method would have gone out before anyone knew whether it could.
+            raise QuotaUnknown(
+                f"{check.reason} Run quota_probe() first: it measures the account's limits with a "
+                "request that carries no canonical prompt, no addenda and no real market data."
+            )
 
         body = json.dumps(
             {
@@ -608,6 +739,57 @@ class GroqHostedProvider:
             raw_text=parsed["_raw"],
         )
 
+    # ----------------------------------------------------------- the probe
+
+    def quota_probe(self) -> Quota:
+        """Learn this account's limits, before sending anything that matters.
+
+        One request, carrying a fixed two-word prompt and a two-field schema. No
+        canonical prompt, no addenda, no security, no price, no material - the
+        whole point is to find out what the account allows *before* the method
+        is transmitted, so a probe that carried the method would defeat itself.
+
+        The measured quota replaces whatever was configured, and until it has
+        run, :meth:`analyse` and :meth:`analyse_entry` refuse to send.
+        """
+
+        self.policy.assert_may_receive_the_canonical_method()
+
+        body = json.dumps(
+            {
+                "model": self.model_id,
+                "messages": [{"role": "user", "content": PROBE_PROMPT}],
+                "temperature": 0.0,
+                "max_completion_tokens": 16,
+                "response_format": response_format(
+                    "quota_probe", PROBE_SCHEMA, strict=self.supports_strict
+                ),
+            }
+        ).encode("utf-8")
+
+        response = self.transport(
+            f"{self.base_url}/chat/completions",
+            headers=self._headers(),
+            data=body,
+            method="POST",
+            accept_statuses=(429,),
+        )
+        headers = getattr(response, "headers", {}) or {}
+        measured = quota_from_headers(
+            headers,
+            source=(
+                f"measured from this account's rate-limit headers on a probe request "
+                f"(HTTP {response.status})"
+            ),
+        )
+        if not measured.is_known:
+            raise QuotaUnknown(
+                "the probe returned no rate-limit headers, so the account's limits are still "
+                "unknown. Nothing carrying the canonical method will be sent until they are"
+            )
+        self.quota = measured
+        return measured
+
     # ---------------------------------------------------------------- record
 
     def registry_row(self, *, live_verified_at: datetime | None = None) -> dict:
@@ -645,7 +827,12 @@ def _decimal(value) -> Decimal | None:
 
 
 __all__ = [
-    "BLOCKED_FREE_QUOTA",
+    "ANALYSIS_FREE_QUOTA_BLOCKED",
+    "PUBLISHED_FREE_LIMITS",
+    "PUBLISHED_FREE_LIMITS_GPT_OSS",
+    "RATE_LIMIT_HEADERS",
+    "QuotaUnknown",
+    "quota_from_headers",
     "DOCUMENTED_STRICT_MODELS",
     "ENV_API_KEY",
     "ENV_MODEL",

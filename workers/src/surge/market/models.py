@@ -41,16 +41,35 @@ class VenueBasis(StrEnum):
 
     So the basis travels with the bar, and the outcome path refuses anything that
     is not whole-market rather than trusting the caller to remember.
+
+    ``_REQUESTED`` and ``_VERIFIED`` are kept apart because the evidence is
+    different and only one of them is a reading of the data. A provider whose
+    response carries no feed identifier cannot be checked; what is known is that
+    an explicit ``feed=sip`` was sent, the call returned 200, and the published
+    API contract says what that means. That is a good reason to believe the bars
+    are consolidated and it is not verification, and recording it as
+    ``_VERIFIED`` would be a claim about evidence nobody has.
     """
 
-    CONSOLIDATED_SIP = "CONSOLIDATED_SIP"
+    #: An explicit consolidated-feed request that returned successfully, from a
+    #: provider that does not identify the feed in its response.
+    CONSOLIDATED_SIP_REQUESTED = "CONSOLIDATED_SIP_REQUESTED"
+    #: The response itself said which feed it came from, and it was the tape.
+    CONSOLIDATED_SIP_VERIFIED = "CONSOLIDATED_SIP_VERIFIED"
     SINGLE_VENUE_IEX = "SINGLE_VENUE_IEX"
     SINGLE_VENUE_OTHER = "SINGLE_VENUE_OTHER"
     PROVIDER_UNSPECIFIED = "PROVIDER_UNSPECIFIED"
 
     @property
     def is_whole_market(self) -> bool:
-        return self is VenueBasis.CONSOLIDATED_SIP
+        return self in (
+            VenueBasis.CONSOLIDATED_SIP_REQUESTED,
+            VenueBasis.CONSOLIDATED_SIP_VERIFIED,
+        )
+
+    @property
+    def feed_was_verified_in_the_response(self) -> bool:
+        return self is VenueBasis.CONSOLIDATED_SIP_VERIFIED
 
 
 class VenueBasisError(RuntimeError):
@@ -105,6 +124,9 @@ class CanonicalBar:
     trade_count: int | None = None
     vwap: Decimal | None = None
 
+    #: The feed value this bar was asked for, verbatim. Stored beside the basis
+    #: so the evidence is inspectable rather than inferred from an enum name.
+    requested_feed: str | None = None
     venue_basis: VenueBasis = VenueBasis.PROVIDER_UNSPECIFIED
     open_basis: PriceBasis = PriceBasis.PROVIDER_UNSPECIFIED
     high_basis: PriceBasis = PriceBasis.PROVIDER_UNSPECIFIED

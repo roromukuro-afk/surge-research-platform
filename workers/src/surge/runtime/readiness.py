@@ -29,7 +29,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-READINESS_VERSION = "readiness-1.1.0"
+READINESS_VERSION = "readiness-1.2.0"
 
 
 class Verdict(StrEnum):
@@ -363,7 +363,7 @@ def assess(inputs: MarketInputs) -> MarketReadiness:
                 else "the only Stage 3 provider is the deterministic stand-in. Its verdicts are "
                 "evidence the pipeline runs and no evidence about any security"
             ),
-            blocker_id="D-32-EOD",
+            blocker_id="D-189",
         ),
         check_provider(
             "entry_analysis_provider",
@@ -377,7 +377,7 @@ def assess(inputs: MarketInputs) -> MarketReadiness:
                 "ENTRY state and runs against a closed market - so connecting a model there leaves "
                 "this unanswered. A formal prediction comes only from the intraday contract"
             ),
-            blocker_id="D-32-ENTRY",
+            blocker_id="D-190",
         ),
         check_provider(
             "scheduler",

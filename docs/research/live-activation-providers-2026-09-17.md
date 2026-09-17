@@ -127,28 +127,45 @@ Services Agreement より:
   ドキュメント記載値で通しておくと、通らなくなる瞬間まで通り続ける
 - 超過時は `D-32_BLOCKED_FREE_QUOTA` を返す。prompt は削らない
 
-### ユーザー作業（credential）
+### 2026-09-17: zero-cost feasibility を実測した（credential 不要）
 
-Groq の無料 tier は**クレジットカード不要**と各所で説明されている
-（これは三次情報なので、実際の登録画面で確認いただく）。
-**key はチャットに貼らない。`.env.local` へ置く。**
+入力の大きさはこのリポジトリの性質なので、アカウントを作る前に測れる。
 
-1. Groq Console でアカウントを作り、**Data Controls で Zero Data Retention を有効化**する。
-2. API key を作成し、`.env.local` に `GROQ_API_KEY=...` として置く。
-3. 使う model を `.env.local` に `GROQ_MODEL=...` として置く。
-   strict な Structured Outputs を使うなら
-   `openai/gpt-oss-120b` か `openai/gpt-oss-20b`。
-4. 疎通と契約適合をまとめて確認するのは次の 1 コマンド。
-   ネットワークを使わない contract test なので、key が無くても通る:
+| 測定項目 | 推定 token |
+|---|---|
+| Canonical v5.1 のみ（32,012 bytes） | **9,872** |
+| Canonical + addenda 4 本 | **13,237** |
+| 最小 Stage 3 リクエスト（データ 0 件） | **13,503** |
+| 最小 Entry リクエスト（データ 0 件） | **13,784** |
 
-```bash
-cd workers && python -m pytest tests/test_groq_provider.py -q
-```
+Groq の公開 free 制限（`console.groq.com/docs/rate-limits`、2026-09-17 時点）と比較:
 
-5. 実 key での 1 回目のリクエストでは、**レスポンスヘッダの rate limit を読み取り**、
-   `Quota` に実測値を入れる。それまで preflight は通らない（意図的）。
+| model family | tokens/minute | requests/day | strict structured outputs | 収まるか |
+|---|---|---|---|---|
+| `openai/gpt-oss-*` | 8,000 | 1,000 | **対応** | **不可**。1 リクエストすら送れない |
+| `groq/compound*` | 70,000 | 250 | **未確認** | size 上は可 |
 
----
+**結論**: `openai/gpt-oss-*` では **`ANALYSIS_FREE_QUOTA_BLOCKED`**。
+`groq/compound*` は大きさでは収まるが、strict structured outputs の対応が未確認で、
+**未確認を「対応している」と読まない**。
+
+**「Groq 無料は不可」と一般化しない。** これは model family ごとの制限であって
+provider 全体の制限ではない。同じ一般化が D-103 の最初の結論を誤らせた（D-176）。
+
+再実行は `python -m surge.jobs.analysis_feasibility`。
+
+注意: これは推定であって provider の tokeniser ではない。
+CJK を 1 文字 ≒ 1 token として数えており、日本語 prompt に対しては**厳しい側**に外れる。
+**公開制限はアカウントの制限でもない** — 実値は `quota_probe()` が
+（canonical も addenda も実データも含まない極小リクエストで）rate-limit header から読む。
+
+### ユーザー作業
+
+**今は無い。** 前回このセクションに Groq アカウント作成手順を書いたが、**早すぎた**。
+上の実測により、strict structured outputs に対応する family では
+無料枠でこの分析を実行できないことが分かっている。
+先に決めるべきなのは「どの model family を使うのか」で、それは
+`groq/compound*` の structured output 対応を確認してからになる。
 
 ## 3. D-06b — JP 場中価格
 

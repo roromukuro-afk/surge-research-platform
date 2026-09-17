@@ -312,7 +312,7 @@ def test_a_stand_in_analysis_provider_blocks_on_its_own():
     )
 
     assert readiness.verdict is Verdict.PARTIAL_LIVE
-    assert readiness.blocker_ids == ["D-32-ENTRY", "D-32-EOD"]
+    assert readiness.blocker_ids == ["D-189", "D-190"]
 
 
 def test_a_connected_stage3_alone_is_not_ready_to_predict():
@@ -329,7 +329,7 @@ def test_a_connected_stage3_alone_is_not_ready_to_predict():
     )
 
     assert readiness.verdict is Verdict.PARTIAL_LIVE
-    assert readiness.blocker_ids == ["D-32-ENTRY"]
+    assert readiness.blocker_ids == ["D-190"]
 
 
 def test_the_us_price_question_is_two_questions():

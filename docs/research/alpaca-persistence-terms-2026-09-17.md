@@ -42,9 +42,24 @@ Outcome 用データと Entry 用データが同一 provider である必要は�
 
 **`feed=sip` を必ず明示する。** ドキュメント上の既定値は現在 `sip` だが、
 既定値が契約に応じて解決される種類のものは、無料キーで静かに `iex` になり得る。
-`bars_url()` は `feed != "sip"` を例外にし、`to_canonical_bars()` は
-**レスポンス側でも**もう一度確認する。リクエストで固定したことと
-レスポンスが何であったかは別の事実だからである。
+
+**2026-09-17 訂正: これは「検証」ではない。** 前回この節に
+「`to_canonical_bars()` はレスポンス側でも確認する」と書いたが、
+**確認していたのは caller の引数だけ**だった。
+Alpaca の bars response は symbols / bars / currency / page token を返すだけで、
+**feed 識別子を含まない**。確認する対象が存在しない。
+
+根拠として言えるのは次の 3 点であり、これは信じるに足る根拠であって検証ではない:
+
+1. 明示的に `feed=sip` を送った
+2. HTTP 200 が返った
+3. 公開されている API 契約がその組み合わせの意味を定めている
+
+したがって `venue_basis` は **`CONSOLIDATED_SIP_REQUESTED`** として保存し、
+`requested_feed` を verbatim で併記する。
+`response_verified_feed = true` のようなフラグは**作らない**。
+将来 Alpaca が response に feed を書くようになれば normaliser がそれを読み、
+`CONSOLIDATED_SIP_VERIFIED` に変わる。
 
 **`adjustment=raw` を明示する。** 3,000円 Hard Filter も Outcome も
 「実際に取引された価格」で判定する（CLAUDE.md 1-9, 1-16）。
@@ -52,7 +67,7 @@ Outcome 用データと Entry 用データが同一 provider である必要は�
 **15分の窓をリクエスト前に検査する。** API の 403 ではなく、
 呼び出し側の言葉で理由を述べる。時計ずれのため 1 分の余裕を足している。
 
-**`venue_basis` を bar に持たせた。** `CONSOLIDATED_SIP` /
+**`venue_basis` を bar に持たせた。** consolidated と
 `SINGLE_VENUE_IEX` を区別し、`assert_may_resolve_an_outcome()` が
 whole-market でない bar を Outcome パスへ渡すことを拒否する。
 IEX の調査結果を**メモではなく構造**にした。取りこぼした到達は
@@ -114,16 +129,22 @@ Basic の遅延 SIP が取引所側の warehousing 条項を引き継ぐのか�
 ### したがって何をするか
 
 監査の指示どおり **credential smoke までは進め、large historical ingest は開始しない**。
-これをコメントではなく guard にした:
 
-```
-SMOKE_MAX_SYMBOLS = 5
-SMOKE_MAX_SESSIONS = 10
-assert_smoke_sized(...)  -> PersistenceTermsUnconfirmed
-```
+**2026-09-17 追補: これを caller の規律ではなく構造にした。**
+`assert_smoke_sized()` だけでは、呼ばなければ効かない。
 
-`market.provider_role_bindings` の `EOD_CURRENT_US` / `EOD_HISTORY_US` は
-**enabled = false** で登録した。有効化が、履歴の蓄積を始める行為そのものだからである。
+1. **`MarketIngestJob` は `PersistenceDecision` を必須引数で受け取る**（既定値なし）。
+   object store・raw_objects・parquet・daily_bars・coverage へ書く**前に**判定し、
+   `ALLOWED` 以外（PROHIBITED / NOT_SPECIFIED / UNKNOWN）はすべて例外で止まる。
+   規約を読んでいない caller は `PersistenceDecision.unknown()` を渡すことになり、
+   それは止まる — **知らないことの正しい結果は「書かない」**。
+2. **`credential_smoke()` は fetch → validate → report → discard**。
+   bar を返さず `SmokeReport`（件数・日付・ハッシュ・ラベルのみ、価格を1つも含まない）を返す。
+   bar を返せば「捨てること」が caller の規律になる。
+3. `market.provider_role_bindings` の `EOD_CURRENT_US` / `EOD_HISTORY_US` は
+   **enabled = false**。有効化が蓄積を始める行為そのものだからである。
+
+書面照会文は [alpaca-persistence-enquiry.md](alpaca-persistence-enquiry.md) に作成済み。
 
 ## 残りの確認項目
 
@@ -138,23 +159,13 @@ assert_smoke_sized(...)  -> PersistenceTermsUnconfirmed
 | corporate actions | 未確認。ingest を始める前に確認する |
 | delisted coverage | 未確認。同上 |
 
-## ユーザー作業（credential が必要になった時点で）
+## ユーザー作業
 
-**API key をチャットに貼らない。`.env.local` に置く。**
+**今は無い。** 前回このセクションに「Alpaca でアカウントを作る」手順を書いたが、
+**早すぎた**（監査 2 §7・次の停止地点）。保存可否が `NOT_SPECIFIED` のままでは、
+credential があっても smoke 以上のことはできない。
+まず [書面照会](alpaca-persistence-enquiry.md) を送り、回答を見てから account を作る。
 
-1. Alpaca でアカウントを作る（Paper trading のみでも market data key は発行される）。
-2. 発行された Key ID と Secret Key を、リポジトリの外の `.env.local` に置く。
-   変数名は `APCA_API_KEY_ID` と `APCA_API_SECRET_KEY`（Alpaca の公式名）。
-3. 次の 1 コマンドで疎通と feed を同時に確認する。
-   成功すれば `venue_basis: CONSOLIDATED_SIP` の bar が数本返る。
-   401 なら key、403 なら feed か窓の指定が問題。
-
-```bash
-cd workers && python -m pytest tests/test_alpaca_historical.py -q
-```
-
-（上はネットワークを使わない contract test。実 key での smoke コマンドは
-adapter の `fetch_bars` を使うが、**保存条項が NOT_SPECIFIED の間は
-`assert_smoke_sized` の上限内でしか実行しない**。）
-
-4. 居住地に関する書面確認は、Alpaca を正式採用する場合にのみ必要になる。
+照会の回答が「許可」または「条件付き許可」だった時点で、
+番号付きの最小手順（何を取得し、どこに置き、どの 1 コマンドで何を確認するか）を出す。
+**API key をチャットに貼らない。`.env.local` へ置く。**

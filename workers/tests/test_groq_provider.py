@@ -8,7 +8,7 @@ encoded as a guard rather than left in a research note.
 
 It refuses to shorten the prompt to fit a free quota. A truncated canonical
 prompt would make every answer an answer to a different method, and nothing in
-the output would show it; the correct finding is D-32_BLOCKED_FREE_QUOTA.
+the output would show it; the correct finding is ANALYSIS_FREE_QUOTA_BLOCKED.
 
 And it refuses a half-formed structured output. A truncated JSON answer is not a
 partial analysis, it is not an analysis.
@@ -24,10 +24,11 @@ import pytest
 
 from surge.analysis.entry_analysis import EntryAnalysisState
 from surge.analysis.groq_provider import (
-    BLOCKED_FREE_QUOTA,
+    ANALYSIS_FREE_QUOTA_BLOCKED,
     ENV_API_KEY,
     GEMINI_FREE_TIER_POLICY,
     GROQ_POLICY,
+    PUBLISHED_FREE_LIMITS_GPT_OSS,
     CredentialsMissing,
     FreeQuotaExceeded,
     GroqError,
@@ -35,11 +36,13 @@ from surge.analysis.groq_provider import (
     InputPolicyViolation,
     InputUse,
     Quota,
+    QuotaUnknown,
     Retention,
     StructuredOutputError,
     entry_analysis_schema,
     estimate_tokens,
     preflight,
+    quota_from_headers,
     response_format,
     stage3_schema,
     strict_models,
@@ -50,15 +53,25 @@ NOW = datetime(2026, 9, 17, 6, 0, tzinfo=UTC)
 
 
 class _Response:
-    def __init__(self, payload, status=200):
+    def __init__(self, payload, status=200, headers=None):
         self.status = status
         self.body = json.dumps(payload).encode()
         self.requested_at = NOW
         self.received_at = NOW
+        self.headers = headers or {}
 
     @property
     def bytes(self):
         return len(self.body)
+
+
+#: A quota that has been measured. Every call that is meant to succeed needs
+#: one, because an unmeasured quota now refuses to send.
+MEASURED = Quota(
+    max_tokens_per_minute=30_000,
+    requests_per_day=1_000,
+    source="fixture: pretend these came from response headers",
+)
 
 
 def _completion(content: dict, *, refusal=None, finish_reason="stop") -> dict:
@@ -81,6 +94,7 @@ def _provider(payload, **overrides) -> GroqHostedProvider:
         sent["method"] = kwargs.get("method")
         return _Response(payload)
 
+    overrides.setdefault("quota", MEASURED)
     provider = GroqHostedProvider(
         model_id=overrides.pop("model_id", "openai/gpt-oss-120b"),
         api_key="gsk-not-a-real-key",
@@ -96,12 +110,37 @@ def _provider(payload, **overrides) -> GroqHostedProvider:
 
 def test_groq_is_recorded_as_not_training_on_inputs():
     assert GROQ_POLICY.input_use is InputUse.NOT_USED_FOR_TRAINING
-    assert GROQ_POLICY.retention is Retention.NONE_BY_DEFAULT
     assert GROQ_POLICY.zero_data_retention_available
     # Whether it is switched on is a fact about the account, which this code has
     # never seen. Recording False would be a claim; None is the truth.
     assert GROQ_POLICY.zero_data_retention_enabled is None
     assert GROQ_POLICY.may_receive_the_canonical_method
+
+
+def test_retention_is_the_weaker_of_the_two_things_the_terms_say():
+    """"Groq does not retain customer data for inference requests" sits beside a
+    documented possibility of transient retention for reliability and abuse
+    handling. Until ZDR is confirmed on, the weaker one is what is true."""
+
+    assert GROQ_POLICY.retention is Retention.TRANSIENT_FOR_ABUSE_AND_RELIABILITY
+
+
+def test_the_privacy_gate_needs_zdr_confirmed_on_the_account():
+    """Not training on inputs makes an experiment acceptable. Routine production
+    traffic needs ZDR actually switched on, and "available" is a fact about the
+    product rather than about the account."""
+
+    from dataclasses import replace
+
+    assert not GROQ_POLICY.privacy_gate_passes
+    assert "never seen the account" in GROQ_POLICY.privacy_gate_detail
+
+    confirmed = replace(GROQ_POLICY, zero_data_retention_enabled=True)
+    assert confirmed.privacy_gate_passes
+
+    off = replace(GROQ_POLICY, zero_data_retention_enabled=False)
+    assert not off.privacy_gate_passes
+    assert "switched off" in off.privacy_gate_detail
 
 
 def test_the_free_gemini_tier_is_refused_the_canonical_method():
@@ -156,14 +195,14 @@ def test_an_unmeasured_quota_does_not_pass_the_preflight():
 
     assert not check.fits
     assert "have not been measured" in check.reason
-    assert check.decision_id is None
+    assert check.reason_code is None
 
 
 def test_a_prompt_over_the_per_request_limit_is_the_blocked_quota_decision():
     check = preflight("x" * 400_000, quota=Quota(max_input_tokens_per_request=8_000))
 
     assert not check.fits
-    assert check.decision_id == BLOCKED_FREE_QUOTA
+    assert check.reason_code == ANALYSIS_FREE_QUOTA_BLOCKED
     assert "not shortened to fit a quota" in check.reason
 
 
@@ -185,13 +224,105 @@ def test_a_batch_that_needs_pacing_still_fits():
     assert "has to be paced" in check.reason
 
 
+def test_an_unmeasured_quota_refuses_to_send_rather_than_sending_anyway():
+    """The hole this closes: fits=False with no reason code fell through the
+    guard and the canonical method went out before anyone knew it could."""
+
+    sent = []
+
+    def transport(url, **kwargs):
+        sent.append(url)
+        return _Response(_completion({"state": "REJECT", "rationale": "no"}))
+
+    provider = GroqHostedProvider(
+        model_id="openai/gpt-oss-120b",
+        api_key="gsk-not-a-real-key",
+        transport=transport,
+        quota=Quota(),
+    )
+
+    with pytest.raises(QuotaUnknown, match="quota_probe"):
+        provider.analyse(LLMRequest(prompt="the canonical method", bundle=None))
+
+    assert sent == []
+
+
+def test_the_probe_carries_no_canonical_prompt_and_no_market_data():
+    """A probe that carried the method would defeat its own purpose."""
+
+    sent = {}
+
+    def transport(url, **kwargs):
+        sent["body"] = json.loads(kwargs["data"].decode())
+        return _Response(
+            _completion({"ok": True}),
+            headers={
+                "x-ratelimit-limit-tokens": "8000",
+                "x-ratelimit-limit-requests": "1000",
+            },
+        )
+
+    provider = GroqHostedProvider(
+        model_id="openai/gpt-oss-120b",
+        api_key="gsk-not-a-real-key",
+        transport=transport,
+        quota=Quota(),
+    )
+
+    measured = provider.quota_probe()
+
+    assert measured.max_tokens_per_minute == 8_000
+    assert measured.requests_per_day == 1_000
+    assert measured.is_known
+    assert provider.quota is measured
+    content = sent["body"]["messages"][0]["content"]
+    assert len(content) < 60
+    assert "canonical" not in content.lower()
+
+
+def test_a_probe_that_learns_nothing_says_so():
+    def transport(url, **kwargs):
+        return _Response(_completion({"ok": True}), headers={})
+
+    provider = GroqHostedProvider(
+        model_id="openai/gpt-oss-120b",
+        api_key="gsk-not-a-real-key",
+        transport=transport,
+        quota=Quota(),
+    )
+
+    with pytest.raises(QuotaUnknown, match="no rate-limit headers"):
+        provider.quota_probe()
+
+
+def test_the_documented_header_asymmetry_is_read_correctly():
+    """x-ratelimit-limit-requests is per DAY and x-ratelimit-limit-tokens is per
+    MINUTE. Reading either as the other is wrong by orders of magnitude."""
+
+    quota = quota_from_headers(
+        {"X-RateLimit-Limit-Tokens": "8000", "X-RateLimit-Limit-Requests": "1000"},
+        source="test",
+    )
+
+    assert quota.max_tokens_per_minute == 8_000
+    assert quota.requests_per_day == 1_000
+
+
+def test_the_published_free_limits_are_recorded_for_comparison():
+    """Used to decide whether an account is worth opening. Not used to send:
+    the account's own headers replace them first."""
+
+    assert PUBLISHED_FREE_LIMITS_GPT_OSS["tokens_per_minute"] == 8_000
+    assert PUBLISHED_FREE_LIMITS_GPT_OSS["requests_per_day"] == 1_000
+
+
 def test_a_call_over_quota_raises_rather_than_sending():
     provider = _provider(
         _completion({"state": "REJECT", "rationale": "no"}),
         quota=Quota(max_input_tokens_per_request=10),
     )
 
-    with pytest.raises(FreeQuotaExceeded, match=BLOCKED_FREE_QUOTA):
+    with pytest.raises(FreeQuotaExceeded, match=ANALYSIS_FREE_QUOTA_BLOCKED):
         provider.analyse(LLMRequest(prompt="x" * 10_000, bundle=None))
 
 

@@ -61,6 +61,11 @@ class LicenseAction(StrEnum):
     ACADEMIC_USE = "ACADEMIC_USE"
     RAW_REDISTRIBUTION = "RAW_REDISTRIBUTION"
     DERIVED_OUTPUT_SHARING = "DERIVED_OUTPUT_SHARING"
+    #: Keeping the data at all, in a private non-public store. Every stored row
+    #: depends on this permission and it was the one action with no entry here:
+    #: display, redistribution and commercial use were each modelled while "may
+    #: we keep it" was assumed.
+    PRIVATE_PERSISTENCE = "PRIVATE_PERSISTENCE"
 
 
 class LicenseViolation(RuntimeError):
@@ -157,6 +162,10 @@ class LicensePolicy:
     entitlement_plan: str | None
     terms_url: str
     notes: str | None = None
+    #: Whether the terms permit keeping this in a private research database.
+    #: Defaults to UNKNOWN so a policy written before this field existed blocks
+    #: a durable write rather than silently permitting one.
+    private_persistence_allowed: Permission = Permission.UNKNOWN
 
     def permission(self, action: LicenseAction) -> Permission:
         return {
@@ -166,6 +175,7 @@ class LicensePolicy:
             LicenseAction.ACADEMIC_USE: self.academic_use_allowed,
             LicenseAction.RAW_REDISTRIBUTION: self.raw_redistribution_allowed,
             LicenseAction.DERIVED_OUTPUT_SHARING: self.derived_output_sharing_allowed,
+            LicenseAction.PRIVATE_PERSISTENCE: self.private_persistence_allowed,
         }[action]
 
     def assert_allows(self, action: LicenseAction) -> None:
@@ -192,6 +202,70 @@ class LicensePolicy:
         """
 
         return Obligation.REQUIRED in (self.delete_on_cancel, self.delete_on_downgrade)
+
+
+#: Everything that outlives the process. A durable write is any of these, and
+#: the guard below names the one being attempted so a refusal says what would
+#: have been written where.
+DURABLE_TARGETS = (
+    "market.raw_objects",
+    "market.daily_bars",
+    "market.daily_bars_adjusted",
+    "market.corporate_actions",
+    "market.security_coverage",
+    "parquet series store",
+    "object store",
+    "historical cache",
+)
+
+
+@dataclass(frozen=True)
+class PersistenceDecision:
+    """Whether this provider's data may be kept, and on whose authority.
+
+    Passed into the ingest orchestration rather than consulted inside it, so a
+    caller cannot forget to ask: there is no default, and a caller that does not
+    know the answer has to say UNKNOWN, which blocks.
+
+    Only ALLOWED permits a durable write. PROHIBITED, NOT_SPECIFIED and UNKNOWN
+    all block, and they block for the same reason - none of them is a licence
+    that says yes. NOT_SPECIFIED is the common case and the easiest to misread:
+    terms that do not mention private storage have not agreed to it.
+    """
+
+    provider_id: str
+    dataset_key: str
+    permission: Permission
+    policy_version: str | None = None
+    terms_url: str | None = None
+    note: str | None = None
+
+    @property
+    def may_persist(self) -> bool:
+        return self.permission is Permission.ALLOWED
+
+    def assert_may_persist(self, *, target: str) -> None:
+        if self.may_persist:
+            return
+        detail = f" ({self.note})" if self.note else ""
+        source = f" See {self.terms_url}." if self.terms_url else ""
+        raise LicenseViolation(
+            f"{self.provider_id}/{self.dataset_key} may not be written to {target}: private "
+            f"persistence is {self.permission.value}{detail}. Only ALLOWED permits a durable "
+            f"write; NOT_SPECIFIED and UNKNOWN are not permission, they are the absence of it."
+            f"{source}"
+        )
+
+    @classmethod
+    def unknown(cls, provider_id: str, dataset_key: str, *, note: str | None = None):
+        """For a caller that has not read the terms. Blocks, and says so."""
+
+        return cls(
+            provider_id=provider_id,
+            dataset_key=dataset_key,
+            permission=Permission.UNKNOWN,
+            note=note or "no licence policy was supplied to the ingest job",
+        )
 
 
 def dataset(dataset_key: str) -> Dataset:

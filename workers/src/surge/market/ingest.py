@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Protocol
 
-from surge.licensing import AvailabilityBasis, dataset
+from surge.licensing import AvailabilityBasis, PersistenceDecision, dataset
 from surge.manifest import RawObjectRecord, build_manifest_record
 from surge.market.models import CanonicalCoverage, NormalisationResult
 from surge.market.parquet_store import ParquetSeriesStore, WrittenPartition
@@ -245,6 +245,7 @@ class MarketIngestJob:
         fetcher: EodFetcher,
         *,
         store: ObjectStore,
+        persistence: PersistenceDecision,
         parquet: ParquetSeriesStore | None = None,
         writer: MarketWriter | None = None,
         run_id: str | None = None,
@@ -253,6 +254,12 @@ class MarketIngestJob:
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
+        # Required, with no default. Whether a provider's data may be kept is
+        # not something this job can work out, and a default would answer it -
+        # in the permissive direction, silently, for every provider added later.
+        # A caller that has not read the terms passes PersistenceDecision.unknown
+        # and is refused, which is the correct outcome for not knowing.
+        self._persistence = persistence
         self._fetcher = fetcher
         self._store = store
         self._parquet = parquet
@@ -293,6 +300,12 @@ class MarketIngestJob:
     def _store_day(self, trade_date: date, fetched: FetchedDay, attempts: int) -> DayOutcome:
         provenance = fetched.provenance
         spec = dataset(provenance.dataset)
+
+        # Before the first byte lands anywhere. Everything below this line is
+        # durable - the object store, the raw object manifest, the parquet
+        # partition, the bars and the coverage rows - so this is the one place
+        # that has to hold for a provider whose terms do not permit storage.
+        self._persistence.assert_may_persist(target="the object store and the market tables")
 
         stored = self._store.put_content_addressed(
             provenance.source_id, provenance.dataset, fetched.raw_body, spec.content_type, spec.extension

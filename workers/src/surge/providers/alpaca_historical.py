@@ -25,6 +25,15 @@ else. Two guards make that structural rather than advisory:
   default is ``sip`` today, but a default that resolves against the caller's
   subscription is exactly the kind of thing that silently becomes ``iex`` on a
   free key, and the resulting bars would be wrong in the flattering direction.
+
+  What this does **not** amount to is verification. Alpaca's bars response
+  carries symbols, bars, a currency and a page token, and no feed identifier at
+  all, so there is nothing in it to check. The evidence for these bars being
+  consolidated is: an explicit ``feed=sip`` was sent, the request returned 200,
+  and the published API contract says what that combination means. The bars are
+  therefore stored as ``CONSOLIDATED_SIP_REQUESTED``, with the requested feed
+  recorded verbatim beside it. If Alpaca ever starts naming the feed in the
+  response, the normaliser reads it and the basis becomes ``_VERIFIED``.
 * ``end`` is checked against the 15-minute delay before a request is built. Too
   recent is an error here rather than a 403 from the API, because the reason is
   worth stating in the caller's terms.
@@ -387,20 +396,38 @@ def to_canonical_bars(
     provenance: Provenance,
     timeframe: str = TIMEFRAME_DAILY,
     market_code: str = "US",
-    feed: str = FEED,
+    requested_feed: str = FEED,
 ) -> list[CanonicalBar]:
-    """Turn one response into canonical bars, refusing a non-SIP payload.
+    """Turn one response into canonical bars.
 
-    The feed is checked again here even though the request fixed it. A response
-    is a separate fact from a request: a plan downgrade, a fallback, or a proxy
-    could return IEX bars to a SIP query, and the failure would be invisible in
-    the numbers.
+    ``requested_feed`` is what was asked for, and checking it here is checking
+    the caller's own argument - not the response. That is still worth doing,
+    because it stops a payload fetched on ``iex`` being handed in and labelled as
+    the tape; it is not, and must not be described as, confirmation that the
+    bars are consolidated.
+
+    If the payload ever does identify its feed, that is read and used, and the
+    basis records that it was verified rather than requested.
     """
 
-    if feed != FEED:
+    if requested_feed != FEED:
         raise FeedError(
-            f"a response on feed {feed!r} cannot be stored as consolidated session data. "
-            "Mark it SINGLE_VENUE and keep it out of the outcome path, or discard it"
+            f"bars requested on feed {requested_feed!r} cannot be stored as consolidated session "
+            "data. Mark them SINGLE_VENUE and keep them out of the outcome path, or discard them"
+        )
+
+    # Not present in any documented Alpaca bars response. Read rather than
+    # assumed absent, so the day it appears the adapter uses it instead of
+    # continuing to record weaker evidence than it has.
+    reported_feed = payload.get("feed")
+    if reported_feed is None:
+        venue_basis = VenueBasis.CONSOLIDATED_SIP_REQUESTED
+    elif str(reported_feed).lower() == FEED:
+        venue_basis = VenueBasis.CONSOLIDATED_SIP_VERIFIED
+    else:
+        raise FeedError(
+            f"the response identifies its feed as {reported_feed!r}, not {FEED!r}. These bars are "
+            "one venue's and must not be stored as the session"
         )
 
     currency = payload.get("currency") or "USD"
@@ -423,7 +450,8 @@ def to_canonical_bars(
                     volume=_decimal(row.get("v")),
                     trade_count=int(row["n"]) if row.get("n") is not None else None,
                     vwap=_decimal(row.get("vw")),
-                    venue_basis=VenueBasis.CONSOLIDATED_SIP,
+                    requested_feed=requested_feed,
+                    venue_basis=venue_basis,
                     # adjustment=raw was sent, so every column is as traded.
                     open_basis=PriceBasis.RAW,
                     high_basis=PriceBasis.RAW,
@@ -437,6 +465,104 @@ def to_canonical_bars(
                 )
             )
     return bars
+
+
+@dataclass(frozen=True)
+class SmokeReport:
+    """What a credential smoke found, with none of what it fetched.
+
+    Every field is a count, a hash or a label. No prices, no bars, nothing that
+    could be mistaken for stored market data if this were written to a log - and
+    nothing that *is* stored, because the smoke keeps nothing at all. While
+    private persistence is NOT_SPECIFIED this is the only shape an Alpaca call
+    is allowed to leave behind.
+    """
+
+    symbols_requested: int
+    symbols_returned: int
+    bars_returned: int
+    first_trade_date: date | None
+    last_trade_date: date | None
+    requested_feed: str
+    venue_basis: str
+    currency: str
+    http_status: int
+    content_sha256: str
+    window_end: datetime
+    discarded: bool = True
+
+    @property
+    def summary(self) -> dict:
+        return {
+            "symbols_requested": self.symbols_requested,
+            "symbols_returned": self.symbols_returned,
+            "bars_returned": self.bars_returned,
+            "first_trade_date": self.first_trade_date.isoformat() if self.first_trade_date else None,
+            "last_trade_date": self.last_trade_date.isoformat() if self.last_trade_date else None,
+            "requested_feed": self.requested_feed,
+            "venue_basis": self.venue_basis,
+            "currency": self.currency,
+            "http_status": self.http_status,
+            "content_sha256": self.content_sha256,
+            "window_end": self.window_end.isoformat(),
+            "discarded": self.discarded,
+            "note": (
+                "nothing was stored. Alpaca's terms do not say whether market data may be kept in "
+                "a private research database, and NOT_SPECIFIED is not permission"
+            ),
+        }
+
+
+def credential_smoke(
+    symbols,
+    *,
+    start: date | datetime,
+    end: datetime,
+    now: datetime | None = None,
+    credentials: Credentials | None = None,
+    transport=fetch,
+) -> SmokeReport:
+    """Fetch, validate, report, discard. Nothing is written anywhere.
+
+    This is the whole of what may be done with an Alpaca credential until the
+    persistence question is answered: prove the key works, prove the window and
+    the feed behave as documented, and keep none of it. The bars are normalised
+    - which is the validation - and then go out of scope with the function.
+
+    Deliberately returns a :class:`SmokeReport` rather than the bars. A function
+    that handed them back would make discarding them the caller's discipline,
+    and the audit's point is that discipline is not a guard.
+    """
+
+    now = now or datetime.now(UTC)
+    names = [symbols] if isinstance(symbols, str) else list(symbols)
+    sessions = max(1, (end.date() - (start.date() if isinstance(start, datetime) else start)).days)
+    assert_smoke_sized(names, sessions=sessions)
+
+    payload, provenance = fetch_bars(
+        names,
+        start=start,
+        end=end,
+        now=now,
+        credentials=credentials,
+        transport=transport,
+    )
+    bars = to_canonical_bars(payload, provenance=provenance)
+    dates = sorted(bar.trade_date for bar in bars)
+
+    return SmokeReport(
+        symbols_requested=len(names),
+        symbols_returned=len(payload.get("bars") or {}),
+        bars_returned=len(bars),
+        first_trade_date=dates[0] if dates else None,
+        last_trade_date=dates[-1] if dates else None,
+        requested_feed=FEED,
+        venue_basis=bars[0].venue_basis.value if bars else VenueBasis.PROVIDER_UNSPECIFIED.value,
+        currency=payload.get("currency") or "USD",
+        http_status=provenance.http_status,
+        content_sha256=provenance.content_sha256,
+        window_end=end,
+    )
 
 
 def next_page_token(payload: dict[str, Any]) -> str | None:
@@ -465,8 +591,10 @@ __all__ = [
     "DelayedWindowError",
     "FeedError",
     "PersistenceTermsUnconfirmed",
+    "SmokeReport",
     "assert_smoke_sized",
     "bars_url",
+    "credential_smoke",
     "capabilities",
     "check_window",
     "fetch_bars",

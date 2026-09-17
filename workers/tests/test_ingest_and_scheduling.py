@@ -14,7 +14,7 @@ from decimal import Decimal
 
 import pytest
 
-from surge.licensing import AvailabilityBasis
+from surge.licensing import AvailabilityBasis, LicenseViolation, Permission, PersistenceDecision
 from surge.market.ingest import (
     EMPTY_RESULT,
     PERMANENT_ERROR,
@@ -125,6 +125,14 @@ class FakeWriter:
 
 
 # ------------------------------------------------------------------ Parquet
+_ALLOWED = PersistenceDecision(
+    provider_id="fixture",
+    dataset_key="EODHD_US_EOD_BULK",
+    permission=Permission.ALLOWED,
+    policy_version="fixture-1.0.0",
+)
+
+
 def test_a_day_round_trips_through_parquet_without_losing_precision(tmp_path):
     """Prices are exact quantities; a float round trip would move the boundary."""
 
@@ -201,7 +209,7 @@ def test_a_day_is_stored_raw_manifested_and_written_as_parquet(tmp_path):
     store = LocalObjectStore(tmp_path)
     writer = FakeWriter()
     job = MarketIngestJob(
-        FakeFetcher(), store=store, parquet=ParquetSeriesStore(store), writer=writer, run_id=None
+        FakeFetcher(), store=store, parquet=ParquetSeriesStore(store), writer=writer, run_id=None, persistence=_ALLOWED
     )
 
     outcome = job.ingest_day(date(2026, 9, 16))
@@ -218,14 +226,14 @@ def test_a_day_is_stored_raw_manifested_and_written_as_parquet(tmp_path):
 
 def test_a_transient_failure_is_retried_and_a_permanent_one_is_not():
     flaky = FakeFetcher(fail_times=2)
-    job = MarketIngestJob(flaky, store=LocalObjectStore("/tmp/ignored"), sleep=lambda _s: None)
+    job = MarketIngestJob(flaky, store=LocalObjectStore("/tmp/ignored"), sleep=lambda _s: None, persistence=_ALLOWED)
     # the store is never touched on the failing attempts
     outcome = job.ingest_day(date(2026, 9, 16))
     assert outcome.ok is True
     assert outcome.attempts == 3
 
     permanent = FakeFetcher(fail_times=5, error=ValueError("404 not found"))
-    job = MarketIngestJob(permanent, store=LocalObjectStore("/tmp/ignored"), sleep=lambda _s: None)
+    job = MarketIngestJob(permanent, store=LocalObjectStore("/tmp/ignored"), sleep=lambda _s: None, persistence=_ALLOWED)
     outcome = job.ingest_day(date(2026, 9, 16))
     assert outcome.ok is False
     assert outcome.error_class == PERMANENT_ERROR
@@ -234,7 +242,11 @@ def test_a_transient_failure_is_retried_and_a_permanent_one_is_not():
 
 def test_retries_give_up_and_say_so(tmp_path):
     job = MarketIngestJob(
-        FakeFetcher(fail_times=99), store=LocalObjectStore(tmp_path), max_attempts=2, sleep=lambda _s: None
+        FakeFetcher(fail_times=99),
+        store=LocalObjectStore(tmp_path),
+        max_attempts=2,
+        sleep=lambda _s: None,
+        persistence=_ALLOWED,
     )
     outcome = job.ingest_day(date(2026, 9, 16))
     assert outcome.ok is False
@@ -245,7 +257,7 @@ def test_retries_give_up_and_say_so(tmp_path):
 def test_an_empty_payload_is_a_failure_not_a_quiet_success(tmp_path):
     """A holiday and an outage both produce no rows. Only one of them is fine."""
 
-    job = MarketIngestJob(FakeFetcher(empty=True), store=LocalObjectStore(tmp_path))
+    job = MarketIngestJob(FakeFetcher(empty=True), store=LocalObjectStore(tmp_path), persistence=_ALLOWED)
     outcome = job.ingest_day(date(2026, 9, 16))
 
     assert outcome.ok is False
@@ -257,7 +269,7 @@ def test_a_changed_payload_for_the_same_day_is_recorded_as_a_revision(tmp_path):
     store = LocalObjectStore(tmp_path)
     writer = FakeWriter()
     fetcher = FakeFetcher()
-    job = MarketIngestJob(fetcher, store=store, writer=writer)
+    job = MarketIngestJob(fetcher, store=store, writer=writer, persistence=_ALLOWED)
 
     first = job.ingest_day(date(2026, 9, 16))
     writer.remember(PROVIDER, DATASET, "JP/2026-09-16", first.new_sha256, first.raw_object_key)
@@ -276,7 +288,7 @@ def test_a_changed_payload_for_the_same_day_is_recorded_as_a_revision(tmp_path):
 def test_an_unchanged_refetch_is_not_a_revision(tmp_path):
     store = LocalObjectStore(tmp_path)
     writer = FakeWriter()
-    job = MarketIngestJob(FakeFetcher(), store=store, writer=writer)
+    job = MarketIngestJob(FakeFetcher(), store=store, writer=writer, persistence=_ALLOWED)
 
     first = job.ingest_day(date(2026, 9, 16))
     writer.remember(PROVIDER, DATASET, "JP/2026-09-16", first.new_sha256, first.raw_object_key)
@@ -293,7 +305,7 @@ def test_a_backfill_keeps_going_past_one_bad_day(tmp_path):
             return super().fetch_day(trade_date)
 
     store = LocalObjectStore(tmp_path)
-    job = MarketIngestJob(SometimesEmpty(), store=store, parquet=ParquetSeriesStore(store))
+    job = MarketIngestJob(SometimesEmpty(), store=store, parquet=ParquetSeriesStore(store), persistence=_ALLOWED)
     report = job.backfill([date(2026, 9, 14), date(2026, 9, 15), date(2026, 9, 16)])
 
     assert len(report.succeeded) == 2
@@ -305,7 +317,7 @@ def test_a_backfill_keeps_going_past_one_bad_day(tmp_path):
 def test_a_backfill_can_stop_when_every_remaining_day_will_fail_too(tmp_path):
     job = MarketIngestJob(
         FakeFetcher(fail_times=99, error=ValueError("403 forbidden")),
-        store=LocalObjectStore(tmp_path), sleep=lambda _s: None,
+        store=LocalObjectStore(tmp_path), sleep=lambda _s: None, persistence=_ALLOWED
     )
     report = job.backfill(trading_days(date(2026, 1, 1), date(2026, 3, 31)), stop_after_failures=3)
 
@@ -315,7 +327,7 @@ def test_a_backfill_can_stop_when_every_remaining_day_will_fail_too(tmp_path):
 def test_the_incremental_run_refetches_a_window_without_repeating_the_latest_day(tmp_path):
     store = LocalObjectStore(tmp_path)
     fetcher = FakeFetcher()
-    job = MarketIngestJob(fetcher, store=store, parquet=ParquetSeriesStore(store))
+    job = MarketIngestJob(fetcher, store=store, parquet=ParquetSeriesStore(store), persistence=_ALLOWED)
 
     report = job.incremental(
         latest=date(2026, 9, 16),
@@ -467,3 +479,50 @@ def test_every_defined_job_names_the_markets_it_covers():
         assert definition.markets
         assert definition.description
         assert 0 <= definition.due_at_utc_minutes < 24 * 60
+
+
+# --------------------------------------------- persistence is not optional
+
+
+def test_a_job_cannot_be_built_without_saying_whether_the_data_may_be_kept():
+    """No default, because a default would answer the question - permissively,
+    silently, for every provider added afterwards."""
+
+    with pytest.raises(TypeError, match="persistence"):
+        MarketIngestJob(FakeFetcher(), store=LocalObjectStore("/tmp/ignored"))
+
+
+@pytest.mark.parametrize(
+    "permission",
+    [Permission.NOT_SPECIFIED, Permission.UNKNOWN, Permission.PROHIBITED],
+)
+def test_nothing_is_written_when_the_terms_do_not_permit_keeping_it(tmp_path, permission):
+    """NOT_SPECIFIED blocks exactly as PROHIBITED does. Terms that do not mention
+    private storage have not agreed to it, and the ingest job is where that has
+    to hold - by the time a caller is choosing to write, it is too late."""
+
+    store = LocalObjectStore(tmp_path)
+    job = MarketIngestJob(
+        FakeFetcher(),
+        store=store,
+        parquet=ParquetSeriesStore(store),
+        persistence=PersistenceDecision(
+            provider_id="alpaca_historical_sip",
+            dataset_key="ALPACA_US_BARS_SIP",
+            permission=permission,
+            terms_url="https://example.invalid/terms",
+        ),
+    )
+
+    with pytest.raises(LicenseViolation, match="private persistence"):
+        job.ingest_day(date(2026, 9, 16))
+
+    assert list(tmp_path.rglob("*")) == []
+
+
+def test_an_unknown_decision_says_what_is_missing():
+    decision = PersistenceDecision.unknown("some_provider", "SOME_DATASET")
+
+    assert not decision.may_persist
+    with pytest.raises(LicenseViolation, match="no licence policy was supplied"):
+        decision.assert_may_persist(target="the object store")

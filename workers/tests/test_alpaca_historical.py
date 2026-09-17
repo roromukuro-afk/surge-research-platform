@@ -101,12 +101,45 @@ def test_another_feed_cannot_be_requested():
         alpaca.bars_url("SYNTH", start=date(2026, 9, 1), end=YESTERDAY_CLOSE, now=NOW, feed="iex")
 
 
-def test_an_iex_response_cannot_be_normalised_as_session_data():
-    """The request fixed the feed; the response is a separate fact. A downgrade
-    or a fallback could return IEX bars to a SIP query."""
+def test_bars_fetched_on_another_feed_cannot_be_labelled_as_the_session():
+    """Checking the caller's own argument, which is worth doing and is not the
+    same as reading the response."""
 
     with pytest.raises(alpaca.FeedError, match="SINGLE_VENUE"):
-        alpaca.to_canonical_bars(PAYLOAD, provenance=_provenance(), feed="iex")
+        alpaca.to_canonical_bars(PAYLOAD, provenance=_provenance(), requested_feed="iex")
+
+
+def test_the_basis_says_requested_because_the_response_names_no_feed():
+    """Alpaca's bars response carries no feed identifier, so there is nothing to
+    verify. What is known is that feed=sip was sent and the call succeeded, and
+    recording that as verification would claim evidence nobody has."""
+
+    bar = alpaca.to_canonical_bars(PAYLOAD, provenance=_provenance())[0]
+
+    assert bar.venue_basis is VenueBasis.CONSOLIDATED_SIP_REQUESTED
+    assert not bar.venue_basis.feed_was_verified_in_the_response
+    assert bar.requested_feed == "sip"
+    # Still whole-market evidence, and still allowed to resolve an outcome.
+    assert bar.may_resolve_an_outcome
+
+
+def test_a_response_that_does_name_its_feed_is_read_rather_than_ignored():
+    """Forward compatibility with evidence: if Alpaca starts identifying the
+    feed, the adapter should stop recording weaker evidence than it has."""
+
+    named = dict(PAYLOAD, feed="sip")
+
+    bar = alpaca.to_canonical_bars(named, provenance=_provenance())[0]
+
+    assert bar.venue_basis is VenueBasis.CONSOLIDATED_SIP_VERIFIED
+    assert bar.venue_basis.feed_was_verified_in_the_response
+
+
+def test_a_response_naming_a_single_venue_is_refused():
+    named = dict(PAYLOAD, feed="iex")
+
+    with pytest.raises(alpaca.FeedError, match="one venue's"):
+        alpaca.to_canonical_bars(named, provenance=_provenance())
 
 
 # -------------------------------------------------------------- the window
@@ -160,7 +193,7 @@ def test_the_documented_response_shape_normalises():
 def test_every_price_column_declares_itself_raw_and_consolidated():
     bar = alpaca.to_canonical_bars(PAYLOAD, provenance=_provenance())[0]
 
-    assert bar.venue_basis is VenueBasis.CONSOLIDATED_SIP
+    assert bar.venue_basis.is_whole_market
     assert bar.close_basis is PriceBasis.RAW
     assert bar.may_resolve_an_outcome
     assert_may_resolve_an_outcome(bar)
@@ -273,3 +306,68 @@ def test_a_fetch_sends_the_key_headers_and_records_provenance():
     assert provenance.item_count == 2
     assert seen["headers"]["APCA-API-KEY-ID"] == "PKTEST"
     assert "feed=sip" in seen["url"]
+
+
+# ---------------------------------------------- the smoke that keeps nothing
+
+
+def _smoke_transport():
+    def transport(url, **kwargs):
+        return HttpResponse(
+            url=url,
+            status=200,
+            body=json.dumps(PAYLOAD).encode(),
+            requested_at=NOW,
+            received_at=NOW,
+            headers={},
+        )
+
+    return transport
+
+
+def test_the_smoke_returns_a_report_and_not_the_bars():
+    """Handing the bars back would make discarding them the caller's discipline,
+    and discipline is not a guard."""
+
+    report = alpaca.credential_smoke(
+        ["SYNTH"],
+        start=date(2026, 9, 14),
+        end=YESTERDAY_CLOSE,
+        now=NOW,
+        credentials=alpaca.Credentials(key_id="PKTEST", secret_key="shhh"),
+        transport=_smoke_transport(),
+    )
+
+    assert report.bars_returned == 2
+    assert report.discarded is True
+    assert report.venue_basis == "CONSOLIDATED_SIP_REQUESTED"
+    assert report.requested_feed == "sip"
+    # Counts, dates, hashes and labels only - no prices anywhere in the report.
+    rendered = json.dumps(report.summary)
+    for price in ("10.5", "11.25", "13.4", "13.2"):
+        assert price not in rendered
+
+
+def test_the_smoke_refuses_a_window_that_is_really_a_backfill():
+    with pytest.raises(alpaca.PersistenceTermsUnconfirmed):
+        alpaca.credential_smoke(
+            [f"SYN{i}" for i in range(50)],
+            start=date(2020, 1, 1),
+            end=YESTERDAY_CLOSE,
+            now=NOW,
+            credentials=alpaca.Credentials(key_id="PKTEST", secret_key="shhh"),
+            transport=_smoke_transport(),
+        )
+
+
+def test_the_smoke_report_says_why_nothing_was_kept():
+    report = alpaca.credential_smoke(
+        ["SYNTH"],
+        start=date(2026, 9, 14),
+        end=YESTERDAY_CLOSE,
+        now=NOW,
+        credentials=alpaca.Credentials(key_id="PKTEST", secret_key="shhh"),
+        transport=_smoke_transport(),
+    )
+
+    assert "NOT_SPECIFIED is not permission" in report.summary["note"]
