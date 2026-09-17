@@ -57,6 +57,18 @@ _PRIOR_HIGH_AS_UPSIDE = re.compile(
 )
 
 
+#: Public alias. The intraday entry contract has to apply the same rule - a
+#: prior high is an obstacle, never upside - while *not* applying the one above
+#: it, because an intraday answer is allowed to read as an instruction to enter.
+PRIOR_HIGH_AS_UPSIDE = _PRIOR_HIGH_AS_UPSIDE
+
+
+def reads_as_prior_high_upside(text: str) -> bool:
+    """Whether this rationale argues for a rise by pointing at an old price."""
+
+    return bool(_PRIOR_HIGH_AS_UPSIDE.search(text or ""))
+
+
 @dataclass
 class ValidationResult:
     status: ValidationStatus
