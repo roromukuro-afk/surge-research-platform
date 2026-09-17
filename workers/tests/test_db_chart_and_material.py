@@ -111,14 +111,16 @@ def test_a_macro_relation_without_a_mechanism_is_refused(conn):
 def test_a_macro_relation_with_a_mechanism_is_accepted(conn):
     with conn.cursor() as cur:
         event_id = _event(cur)
+        # The causal path goes in as a parameter rather than a literal: psycopg2
+        # reads a bare % in the SQL text as a placeholder, so '70% of revenue'
+        # silently becomes a format string and the argument count stops matching.
         cur.execute(
             """
             insert into material.entity_relations
               (event_id, security_id, relation_type, confidence, causal_path, extractor, extractor_version)
-            values (%s, gen_random_uuid(), 'FX_EXPOSURE', 'PROVISIONAL',
-                    '70% of revenue is USD-denominated', 'test', '1.0.0')
+            values (%s, gen_random_uuid(), 'FX_EXPOSURE', 'PROVISIONAL', %s, 'test', '1.0.0')
             """,
-            (event_id,),
+            (event_id, "70% of revenue is USD-denominated"),
         )
         assert cur.rowcount == 1
 
