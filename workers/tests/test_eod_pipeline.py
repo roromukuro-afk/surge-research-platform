@@ -238,3 +238,28 @@ def test_the_price_filter_still_applies_inside_the_chain():
     assert report.eligibility.eligible_symbols == set()
     assert report.screening.features == []
     assert report.union == []
+
+
+def test_a_stand_in_analysis_is_never_a_live_run():
+    """Real prices plus a rule-based analysis is not a live day.
+
+    Without this, a run with every stage on real data and the deterministic
+    stand-in producing the states would report ran_on_real_data - the most
+    flattering reading available, and the wrong one.
+    """
+
+    report = _run(data_is_fixture=False)
+
+    assert report.analysis_is_a_stand_in is True
+    assert report.ran_on_real_data is False
+    assert report.summary["analysis_is_a_stand_in"] is True
+
+
+def test_the_data_question_and_the_model_question_are_separate():
+    report = _run()
+    assert report.data_is_fixture is True
+    assert report.analysis_is_a_stand_in is True
+    # Both must clear before the run counts as live, and they are reported apart
+    # so it is visible which one is outstanding.
+    assert "data_is_fixture" in report.summary
+    assert "analysis_is_a_stand_in" in report.summary

@@ -103,6 +103,7 @@ class EodReport:
             "as_of_date": self.as_of_date.isoformat(),
             "market_code": self.market_code,
             "data_is_fixture": self.data_is_fixture,
+            "analysis_is_a_stand_in": self.analysis_is_a_stand_in,
             "eligible": len(self.eligibility.eligible_symbols) if self.eligibility else 0,
             "technical_candidates": len(self.screening.candidates) if self.screening else 0,
             "material_candidates": len(self.material_candidates),
@@ -114,15 +115,35 @@ class EodReport:
         }
 
     @property
-    def ran_on_real_data(self) -> bool:
-        """True only when no stage was satisfied with fixtures.
+    def analysis_is_a_stand_in(self) -> bool:
+        """Whether the day's verdicts came from the deterministic mock.
 
-        Deliberately conservative. Reading this as "the platform is live" should
-        require every stage to have seen real data, not most of them.
+        Separate from the data question. A run can have real prices, real
+        disclosures and a rule-based stand-in producing the states, and calling
+        that "live" would be the most flattering reading available.
         """
 
-        return not self.data_is_fixture and all(
-            status is StageStatus.RAN for status in self.stage_status.values()
+        if self.stage3 is None:
+            return False
+        return any(
+            result.response.provider_kind.value == "DETERMINISTIC_MOCK"
+            for result in self.stage3.results
+        )
+
+    @property
+    def ran_on_real_data(self) -> bool:
+        """True only when no stage was satisfied with fixtures or a stand-in.
+
+        Deliberately conservative on both axes. Reading this as "the platform is
+        live" should require every stage to have seen real data AND a real model
+        to have produced the analysis - otherwise a run with real prices and a
+        rule-based stand-in would read as a live day.
+        """
+
+        return (
+            not self.data_is_fixture
+            and not self.analysis_is_a_stand_in
+            and all(status is StageStatus.RAN for status in self.stage_status.values())
         )
 
 
