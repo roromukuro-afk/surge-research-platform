@@ -436,3 +436,46 @@ def test_fingerprint_covers_only_what_we_hold():
     with_body = content_fingerprint(title="T", url="u", body="text", summary="s")
     assert without_body != with_body
     assert without_body == content_fingerprint(title="T", url="u", body=None, summary="s")
+
+
+RSS10 = b"""<?xml version="1.0" encoding="UTF-8"?>
+<rdf:RDF xmlns="http://purl.org/rss/1.0/"
+         xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+         xmlns:dc="http://purl.org/dc/elements/1.1/" xml:lang="ja">
+<channel rdf:about="https://example.go.jp/index.html">
+  <title>Agency</title>
+  <items><rdf:Seq><rdf:li rdf:resource="https://example.go.jp/a.html"/></rdf:Seq></items>
+</channel>
+<item rdf:about="https://example.go.jp/a.html">
+  <title>Machinery orders</title>
+  <link>https://example.go.jp/a.html</link>
+  <description>Summary</description>
+  <dc:date>2026-09-16T08:50:00+09:00</dc:date>
+</item>
+</rdf:RDF>
+"""
+
+
+def test_rss_1_0_items_parse_despite_their_namespace():
+    """Found by live data, not by review.
+
+    RSS 1.0 puts title, link and description in the RSS 1.0 namespace. Looking
+    for the bare names finds nothing, and a feed that parses to zero items is
+    indistinguishable from a source that published nothing that day - which is
+    the failure mode this whole file is built to keep visible.
+    """
+
+    items = parse_feed(RSS10, assume_tz=JST)
+
+    assert len(items) == 1
+    assert items[0].title == "Machinery orders"
+    assert items[0].url == "https://example.go.jp/a.html"
+    assert items[0].summary == "Summary"
+    assert items[0].published_precision is TimePrecision.EXACT
+    assert items[0].published_at == datetime(2026, 9, 15, 23, 50, tzinfo=UTC)
+
+
+def test_an_rss_1_0_item_without_a_guid_is_identified_by_rdf_about():
+    without_link = RSS10.replace(b"<link>https://example.go.jp/a.html</link>", b"")
+    items = parse_feed(without_link, assume_tz=JST)
+    assert items[0].source_document_id == "https://example.go.jp/a.html"

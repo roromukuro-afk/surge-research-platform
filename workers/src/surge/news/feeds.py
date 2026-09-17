@@ -27,6 +27,8 @@ from xml.etree import ElementTree
 from surge.news.models import FeedItem, TimePrecision
 
 ATOM_NS = "http://www.w3.org/2005/Atom"
+RSS10_NS = "http://purl.org/rss/1.0/"
+RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 DC_NS = "http://purl.org/dc/elements/1.1/"
 CONTENT_NS = "http://purl.org/rss/1.0/modules/content/"
 
@@ -170,30 +172,45 @@ def _parse_atom(root: ElementTree.Element, assume_tz: timezone | None) -> list[F
     return items
 
 
+def _child(entry: ElementTree.Element, name: str) -> str | None:
+    """Find a child by local name, whatever namespace it is in.
+
+    RSS 2.0 leaves its elements unqualified; RSS 1.0 puts the same names in the
+    RSS 1.0 namespace. Searching for the bare name finds the first and silently
+    misses the second - which is how a feed that parses to zero items looks
+    identical to a quiet day.
+    """
+
+    for candidate in (name, f"{{{RSS10_NS}}}{name}"):
+        found = entry.find(candidate)
+        if found is not None:
+            return _text(found)
+    return None
+
+
 def _parse_rss(root: ElementTree.Element, assume_tz: timezone | None) -> list[FeedItem]:
-    # RSS 2.0 nests items under <channel>; RSS 1.0 puts them beside it.
-    entries = root.findall("./channel/item") or root.findall(f"./{{{ATOM_NS}}}item") or []
-    if not entries:
-        entries = [node for node in root.iter() if node.tag.split("}")[-1] == "item"]
+    # RSS 2.0 nests items under <channel>; RSS 1.0 (RDF) puts them beside it.
+    entries = [node for node in root.iter() if node.tag.split("}")[-1] == "item"]
 
     items: list[FeedItem] = []
     for entry in entries:
-        link = _text(entry.find("link"))
-        guid = _text(entry.find("guid"))
-        raw_time = _text(entry.find("pubDate")) or _text(entry.find(f"{{{DC_NS}}}date"))
+        link = _child(entry, "link")
+        guid = _child(entry, "guid")
+        raw_time = _child(entry, "pubDate") or _text(entry.find(f"{{{DC_NS}}}date"))
         published_at, precision = parse_datetime(raw_time, assume_tz=assume_tz)
 
-        identifier = guid or link
+        # RSS 1.0 identifies an item by rdf:about rather than by a guid element.
+        identifier = guid or entry.get(f"{{{RDF_NS}}}about") or link
         if identifier is None:
             continue
         items.append(
             FeedItem(
                 source_document_id=identifier,
-                title=_text(entry.find("title")),
+                title=_child(entry, "title"),
                 url=link,
                 published_at=published_at,
                 published_precision=precision,
-                summary=_text(entry.find("description")) or _text(entry.find(f"{{{CONTENT_NS}}}encoded")),
+                summary=_child(entry, "description") or _text(entry.find(f"{{{CONTENT_NS}}}encoded")),
                 raw_fields={"guid": guid or ""},
             )
         )
