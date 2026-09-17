@@ -134,8 +134,10 @@ create table if not exists research.promotion_attempts (
   evidence jsonb,
   human_approved_by text,
 
+  --: coalesce, because array_length on an empty array is NULL, and a CHECK that
+  --: evaluates to NULL passes. The same trap as a CASE branch on NULL.
   constraint promotion_refusal_has_reasons check (
-    promoted or array_length(refusal_reasons, 1) >= 1
+    promoted or coalesce(array_length(refusal_reasons, 1), 0) >= 1
   ),
   constraint promotion_success_has_no_reasons check (
     not promoted or coalesce(array_length(refusal_reasons, 1), 0) = 0
