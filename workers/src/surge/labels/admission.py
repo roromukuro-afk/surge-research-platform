@@ -29,6 +29,12 @@ from surge.labels.models import (
 
 MINIMUM_TARGET_CLASSES = 3
 
+#: Kept as a label, excluded from a predictive target. It means the price rose
+#: and the entry thesis does not account for it, so training on it teaches a
+#: model to take credit for outcomes its own reasoning did not anticipate. A
+#: SPECIAL_PURPOSE policy may admit it by saying so.
+NOT_IN_A_PREDICTIVE_TARGET = frozenset({InterpretiveLabel.PRICE_SUCCESS_EXOGENOUS})
+
 #: Refused as a training target however it is spelled. Each of these is a single
 #: binary derived from the price path alone.
 FORBIDDEN_TARGETS = frozenset({"hit_10", "hit_20", "hit_30", "failure_line_hit"})
@@ -43,6 +49,14 @@ class AdmissionPolicy:
     admitted_labels: frozenset[InterpretiveLabel]
     min_confidence: float | None = None
     required_review_status: frozenset[ReviewStatus] = frozenset()
+    #: A policy built for something other than training a predictive model -
+    #: error analysis, say. It may admit labels the default one refuses, and it
+    #: has to say why rather than simply setting a flag.
+    special_purpose_reason: str | None = None
+
+    @property
+    def is_special_purpose(self) -> bool:
+        return self.special_purpose_reason is not None
 
     def __post_init__(self) -> None:
         if len(self.admitted_labels) < MINIMUM_TARGET_CLASSES:
@@ -52,6 +66,15 @@ class AdmissionPolicy:
                 "20%' under another name, which teaches a model to predict price moves rather than "
                 "to predict this system's decisions being right"
             )
+        exogenous = self.admitted_labels & NOT_IN_A_PREDICTIVE_TARGET
+        if exogenous and not self.is_special_purpose:
+            raise LabelError(
+                f"policy {self.policy_version} admits "
+                f"{sorted(label.value for label in exogenous)}. That label records a rise the entry "
+                "thesis does not explain, so a predictive model trained on it learns to take credit "
+                "for luck. A policy that wants it must say what it is for"
+            )
+
         # Three of the four miss labels are not prediction-model failures, and
         # training on them teaches a model to answer for a collector outage.
         wrong_misses = {
@@ -59,7 +82,7 @@ class AdmissionPolicy:
             for label in self.admitted_labels
             if label in MISS_LABELS and label not in MODEL_TRAINABLE_MISSES
         }
-        if wrong_misses:
+        if wrong_misses and not self.is_special_purpose:
             raise LabelError(
                 f"policy {self.policy_version} admits {sorted(m.value for m in wrong_misses)}. "
                 "A pipeline outage, an unforeseeable move and a signal that arrived too late are "
@@ -182,6 +205,7 @@ def _rejection_reason(
 __all__ = [
     "FORBIDDEN_TARGETS",
     "MINIMUM_TARGET_CLASSES",
+    "NOT_IN_A_PREDICTIVE_TARGET",
     "AdmissionPolicy",
     "DatasetManifest",
     "Rejection",

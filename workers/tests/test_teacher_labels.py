@@ -504,3 +504,92 @@ def test_an_entry_session_trade_counts_toward_the_measurement():
 
     assert label.hit_20 is True
     assert label.days_to_20 == 0
+
+
+# --------------------------------------- identity, lineage and the default policy
+
+
+def test_two_setups_on_one_security_on_one_day_are_two_examples():
+    """The old rule said one teacher example per security per day. A security
+    can have two setups, two theses and two episodes on the same day, and they
+    have different inputs and different answers."""
+
+    first = ObjectiveLabel(
+        security_id="sec-1",
+        as_of_date=_day(0),
+        observation_kind=ObservationKind.SETUP_NOT_ENTERED,
+        setup_id="setup-a",
+    )
+    second = ObjectiveLabel(
+        security_id="sec-1",
+        as_of_date=_day(0),
+        observation_kind=ObservationKind.SETUP_NOT_ENTERED,
+        setup_id="setup-b",
+    )
+
+    assert first.identity != second.identity
+
+
+def test_each_observation_kind_is_identified_by_its_own_thing():
+    predicted = ObjectiveLabel(
+        security_id="sec-1",
+        as_of_date=_day(0),
+        observation_kind=ObservationKind.PREDICTED,
+        episode_id="ep-1",
+    )
+    eligible = ObjectiveLabel(
+        security_id="sec-1",
+        as_of_date=_day(0),
+        observation_kind=ObservationKind.ELIGIBLE_ONLY,
+    )
+
+    assert predicted.identity[0] == "PREDICTED"
+    assert predicted.identity[1] == "ep-1"
+    assert eligible.identity[0] == "ELIGIBLE_ONLY"
+    # Same security and day, and still not the same example.
+    assert predicted.identity != eligible.identity
+
+
+def test_a_context_without_a_bundle_or_a_run_is_not_reproducible():
+    """It records that a decision happened, not what it was made from."""
+
+    from surge.labels.models import ObservationContext
+
+    bare = ObservationContext(objective_id="obj-1", information_cutoff_at=CUTOFF)
+    full = ObservationContext(
+        objective_id="obj-1",
+        information_cutoff_at=CUTOFF,
+        production_run_id="run-1",
+        feature_version="features-1.0.0",
+        input_bundle_sha256="a" * 64,
+    )
+
+    assert not bare.is_reproducible
+    assert full.is_reproducible
+
+
+def test_the_default_policy_cannot_admit_an_unexplained_rise():
+    """PRICE_SUCCESS_EXOGENOUS means the price rose and the thesis does not
+    explain why. Training a predictive model on it teaches it to claim credit
+    for luck."""
+
+    with pytest.raises(LabelError, match="take credit for luck"):
+        AdmissionPolicy(
+            policy_version="bad-3.0.0",
+            description="admits luck",
+            admitted_labels=THREE_CLASSES | {InterpretiveLabel.PRICE_SUCCESS_EXOGENOUS},
+        )
+
+
+def test_a_special_purpose_policy_may_admit_it_by_saying_why():
+    """The label stays useful for research. It just has to be asked for."""
+
+    policy = AdmissionPolicy(
+        policy_version="error-analysis-1.0.0",
+        description="for error analysis",
+        admitted_labels=THREE_CLASSES | {InterpretiveLabel.PRICE_SUCCESS_EXOGENOUS},
+        special_purpose_reason="error analysis of rises the thesis did not anticipate",
+    )
+
+    assert policy.is_special_purpose
+    assert InterpretiveLabel.PRICE_SUCCESS_EXOGENOUS in policy.admitted_labels

@@ -94,7 +94,14 @@ class ObjectiveLabel:
     as_of_date: date
     observation_kind: ObservationKind
     label_version: str = LABEL_VERSION
+    #: A readable name for this observation. Nothing parses it; it exists so a
+    #: person can find the same example again after an identity rule changes.
+    observation_key: str | None = None
     episode_id: str | None = None
+    #: Identity for a SETUP_NOT_ENTERED observation. Two setups on one security
+    #: on one day are two examples, not one.
+    setup_id: str | None = None
+    entry_attempt_id: str | None = None
     reference_price: Decimal | None = None
     reference_currency: str | None = None
     path_resolution: str | None = None
@@ -115,12 +122,73 @@ class ObjectiveLabel:
     counterfactual_later_target_hit: bool | None = None
 
     @property
+    def identity(self) -> tuple:
+        """What makes this observation distinct, by kind.
+
+        The three kinds are identified by different things, which is why the
+        database uses three partial unique indexes rather than one key. "Same
+        security, same day" is only an identity for a security nobody surfaced.
+        """
+
+        if self.observation_kind is ObservationKind.PREDICTED:
+            return ("PREDICTED", self.episode_id, self.label_version)
+        if self.observation_kind is ObservationKind.SETUP_NOT_ENTERED:
+            return ("SETUP_NOT_ENTERED", self.setup_id, self.label_version)
+        return ("ELIGIBLE_ONLY", self.security_id, self.as_of_date, self.label_version)
+
+    @property
     def is_resolved(self) -> bool:
         return self.path_resolution not in (
             None,
             "AMBIGUOUS_PATH",
             "UNRESOLVED_MISSING_DATA",
         ) and self.primary_episode_outcome != "CORPORATE_ACTION_SUSPECTED"
+
+
+@dataclass(frozen=True)
+class ObservationContext:
+    """What the system was looking at when it decided.
+
+    Teacher data is three things: the input snapshot, the decision, and the
+    outcome. With only the last two, the input has to be reconstructed later
+    from whatever the tables hold then - and a reconstruction quietly includes
+    everything that arrived after the decision, which is exactly the thing the
+    whole availability model exists to prevent.
+    """
+
+    objective_id: str
+    information_cutoff_at: datetime
+    production_run_id: str | None = None
+    universe_run_id: str | None = None
+    market_data_run_id: str | None = None
+    fx_run_id: str | None = None
+    feature_version: str | None = None
+    feature_snapshot: dict | None = None
+    feature_snapshot_ref: str | None = None
+    technical_candidate_ref: str | None = None
+    material_candidate_ref: str | None = None
+    stage2_assessment_ref: str | None = None
+    stage3_output_id: str | None = None
+    input_bundle_sha256: str | None = None
+    setup_id: str | None = None
+    entry_attempt_id: str | None = None
+    episode_id: str | None = None
+    pipeline_coverage_ref: str | None = None
+    collector_coverage_ref: str | None = None
+    #: What the collectors had by the cutoff. An example formed on 40% coverage
+    #: and one formed on 100% are different examples.
+    coverage_snapshot: dict | None = None
+    verification_status: str = "IMPLEMENTED_NOT_LIVE_VERIFIED"
+
+    @property
+    def is_reproducible(self) -> bool:
+        """Whether this example could actually be re-derived.
+
+        Deliberately strict. A context that names no run and carries no bundle
+        hash records that a decision happened, not what it was made from.
+        """
+
+        return bool(self.input_bundle_sha256 and self.production_run_id and self.feature_version)
 
 
 @dataclass(frozen=True)

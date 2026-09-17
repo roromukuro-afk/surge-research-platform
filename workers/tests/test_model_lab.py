@@ -20,6 +20,7 @@ from surge.modellab.promotion import (
     MINIMUM_CLASSES,
     MINIMUM_FOLDS,
     MINIMUM_LABELS,
+    PROVISIONAL_POLICY,
     Evidence,
     describe_current_state,
 )
@@ -287,3 +288,61 @@ def test_today_the_gate_refuses_everything():
     assert not decision.promoted
     assert any("real prices" in reason for reason in decision.reasons)
     assert any("no human approval" in reason for reason in decision.reasons)
+
+
+# ----------------------------------------------- the thresholds are provisional
+
+
+def test_the_gate_reports_which_policy_it_used_and_that_it_is_provisional():
+    """A refusal recorded without the policy behind it cannot be re-read later:
+    the numbers will have changed and nobody will know which ones applied."""
+
+    decision = gate(_good_evidence(admitted_labels=10))
+
+    assert decision.policy_version == PROVISIONAL_POLICY.policy_version
+    assert decision.policy_was_provisional is True
+    assert any("provisional" in reason for reason in decision.reasons)
+
+
+def test_the_thresholds_are_a_policy_not_a_constant():
+    """Passing a different policy changes the answer, which is the whole point
+    of them not being module constants."""
+
+    from surge.modellab.promotion import PromotionPolicy
+
+    lenient = PromotionPolicy(
+        policy_version="test-only-1.0.0",
+        minimum_labels=5,
+        minimum_classes=3,
+        minimum_positive_class=1,
+        minimum_folds=1,
+        provisional=False,
+        basis="a fixture, not a recommendation",
+    )
+    evidence = _good_evidence(
+        admitted_labels=5,
+        class_counts={"A": 2, "B": 2, "C": 1},
+        folds_evaluated=1,
+    )
+
+    assert not gate(evidence).promoted
+    assert gate(evidence, lenient).promoted
+
+
+def test_a_policy_cannot_be_written_with_a_near_binary_target():
+    from surge.modellab.promotion import PromotionPolicy
+
+    with pytest.raises(ValueError, match="near-binary"):
+        PromotionPolicy(
+            policy_version="bad-1.0.0",
+            minimum_labels=200,
+            minimum_classes=2,
+            minimum_positive_class=30,
+            minimum_folds=3,
+            basis="two classes",
+        )
+
+
+def test_the_provisional_policy_says_why_its_numbers_are_round():
+    assert PROVISIONAL_POLICY.provisional
+    assert "not derived from anything" in PROVISIONAL_POLICY.basis
