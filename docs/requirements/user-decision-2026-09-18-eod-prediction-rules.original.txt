@@ -1,0 +1,13 @@
+EOD Prediction の規則を以下で確定します。
+
+* S0 = 予測対象日の確定終値
+* Prediction は S0 の終値確定後に実行
+* 3,000円 Hard Filter は S0 の確定終値で判定
+* 目標価格 = S0確定終値 × 1.20
+* 評価開始 = 翌営業日 S1
+* outcome checkpoint = T+1 / T+3 / T+5 / T+10 / T+20
+* 最終評価期限 = T+20営業日
+
+既存の `success_label` と `hit_20_percent` は同義に変更しないでください。
+また、+20%到達判定を intraday high と close のどちらで行うかは現仕様から確定できないため、Outcome側の未決事項として残してください。これはEOD Prediction生成のblockerにはしません。
+この内容を versioned な仕様・addendum・DB制約へ、既存Canonicalと矛盾しない最小変更で反映してください。

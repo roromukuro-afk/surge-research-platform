@@ -1,0 +1,36 @@
+重要な前提を修正します。
+このシステムの予測実行は 市場の終値確定後 です。
+したがって、現在の
+`decision_completed_at < market_event_timestamp <= fetched_at`
+を満たす約定を待って `entry_reference_price` とする設計は目的と合っていません。
+予測時点の基準価格として必要なのは、その営業日の 確定終値 です。
+設計を以下のように整理してください。
+
+* prediction / analysis は市場終了後に実行
+* prediction の基準価格は、その対象セッションの確定終値
+* この価格は `decision_completed_at` より前の market event で問題ない
+* 必須なのは「対象営業日の市場終了後に取得され、その日の確定終値であること」
+* Yahoo の15〜20分遅延は、終値確定後に予測を走らせる限り問題にならない
+* JPで遅延を20分待って「判断後の約定」を探す実装は不要
+* USでもIEXの判断後約定をENTRY referenceとして待つ必要はない
+
+概念を分けてください。
+
+1. `signal_reference_price`
+   * 予測が参照する当日の確定終値
+   * EOD価格
+   * predictionに紐づく
+2. 将来実際の売買を検証する場合の `execution_price` / `next_session_entry_price`
+   * 翌営業日の寄り付き後など
+   * predictionとは別の観測
+   * 今回はまだ実装しなくてよい
+
+既存の `entry_reference_price` という名前が意味を曖昧にしているなら、migrationを含めて名称変更の影響を確認してください。既存Canonicalで名称が固定されているなら勝手に変更せず、意味の整理だけ行ってください。
+価格源はEOD用途として再評価してください。
+
+* JP：Yahoo Financeの確定終値でよい
+* US：Alpaca SIP historical daily barまたは他の確定終値
+* realtime pollingは今回のprediction生成には不要
+
+この前提で、先ほど追加した「JPで最大25分待つpolling」「判断後の約定を探すロジック」が不要なら削除・簡素化してください。
+まず設計と既存Canonical/decisionとの整合性を確認し、最小変更で修正してください。

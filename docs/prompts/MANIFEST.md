@@ -15,5 +15,8 @@ CI（Phase 1 で実装）はこの表の SHA-256 と実ファイルを照合し�
 | `docs/requirements/audit-2026-09-15-phase-0.2-final-patch.original.txt` | 監査原文 | `26386dafdb0090c1f1833f4f86031ac14d5308167742101dd88711bc32c59ad1` | 4774 | 2026-09-15 | 会話内の本文を保存時点で登録（UTF-8、LF） |
 | `docs/prompts/addenda/v5.1-addendum-2026-09-15-phase0.2-final-patch.md` | addendum（所在一覧） | `10b0b6186cfacd26fc7a68417123f58a61d314ede78c385d12c6db13b486f249` | — | 2026-09-15 | Claude Code 作成 |
 | `docs/requirements/audit-2026-09-16-phase-1-start-conditions.original.txt` | 監査原文（運用・開始条件。投資ロジックの変更なし） | `5af52996f594c6af99502251bcd8db5dc3efdd7720674b98bcb308e9d16271de` | 3574 | 2026-09-16 | 会話内の本文を保存時点で登録（UTF-8、LF） |
+| `docs/requirements/user-decision-2026-09-18-eod-premise.original.txt` | ユーザー決定原文（前提修正: Prediction は引け後、基準は確定終値） | `0f6eeeffa67daa75e1fbf2b77e3eb89857a99194ba914cbb037e28c6d9ee085e` | 2224 | 2026-09-18 | ユーザーのチャット本文を Claude Code が転記（UTF-8、LF）（D-261） |
+| `docs/requirements/user-decision-2026-09-18-eod-prediction-rules.original.txt` | ユーザー決定原文（EOD Prediction 規則） | `821e6e93318508ed0a0c635505b081faf5814a07cc5a6ea648f78c5977bfc184` | 834 | 2026-09-18 | 同上（D-267） |
+| `docs/prompts/addenda/v5.1-addendum-2026-09-18-eod-prediction.md` | addendum（所在一覧） | `c709d3f98cc2e2afb2358a9747718d402c8a3b9efb82fdc598bf10cbdd40227a` | — | 2026-09-18 | Claude Code 作成。phase0.1-audit #6・phase0.2-audit #3・phase0.2-final-patch #4 / #5 を EOD Prediction について置き換え |
 
 整形版（`docs/requirements/implementation-instructions-v1.0.formatted.md`）は原文ではないため登録しない。

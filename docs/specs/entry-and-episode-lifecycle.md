@@ -4,7 +4,7 @@
 根拠: [Phase 0.2 最終パッチ原文](../requirements/audit-2026-09-15-phase-0.2-final-patch.original.txt) > [Phase 0.2 監査原文](../requirements/audit-2026-09-15-phase-0.2.original.txt) > [Phase 0.1 監査原文](../requirements/audit-2026-09-15-phase-0.1.original.txt) > [実装指示書 v1.0 原文](../requirements/implementation-instructions-v1.0.original.txt) > v5.1
 本書で「Claude Code 解釈（要確認）」と書いた箇所は、監査・ユーザー承認前の暫定仕様である。
 
-> **2026-09-18 前提修正（[D-261](../unresolved-decisions.md)、ユーザー指示）**: Prediction は市場終了後に実行し、基準価格は対象セッションの**確定終値**（`signal_reference_price`、v5.1 の「分析基準価格」）。確定の条件は「セッション終了 + feed の遅延の後に取得したこと」（D-262）。本書の場中 ENTRY・`entry_reference_price`（判断後に取引可能だった価格）の規則は、将来の実売買検証（`execution_price` / `next_session_entry_price`、未実装）の設計として残す（名称は変えない、D-263）。EOD Prediction の具体規則は D-265 で確定するまで未実装。
+> **2026-09-18 前提修正（[D-261](../unresolved-decisions.md)、ユーザー指示）**: Prediction は市場終了後に実行し、基準価格は対象セッションの**確定終値**（`signal_reference_price`、v5.1 の「分析基準価格」）。確定の条件は「セッション終了 + feed の遅延の後に取得したこと」（D-262）。本書の場中 ENTRY・`entry_reference_price`（判断後に取引可能だった価格）の規則は、将来の実売買検証（`execution_price` / `next_session_entry_price`、未実装）の設計として残す（名称は変えない、D-263）。EOD Prediction の規則は D-267 で確定し [eod-prediction.md](eod-prediction.md) に定めた（本書の場中の規則とは別の table `prod.eod_predictions`）。
 
 ---
 
