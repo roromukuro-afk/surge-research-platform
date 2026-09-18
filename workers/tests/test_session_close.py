@@ -156,6 +156,19 @@ def test_a_thin_stock_without_a_closing_print_waits_twice_the_delay():
                          clock=lambda: datetime(2026, 9, 18, 7, 11, tzinfo=UTC)).close == Decimal("3011.0")
 
 
+def test_a_close_read_back_after_a_split_is_the_price_as_traded():
+    # Yahoo restates bars before a split into today's share count (measured
+    # 2026-09-18): after a 2:1 split effective Sep 18, Sep 17's 3,034 yen
+    # close reads 1,517. The 3,000 yen test needs the price as traded.
+    chart = _chart()
+    result = chart["chart"]["result"][0]
+    result["indicators"]["quote"][0]["close"] = [1517.0, 3011.0]
+    result["events"] = {"splits": {str(_stamp(SEP18)): {"date": _stamp(SEP18), "numerator": 2, "denominator": 1}}}
+    later = lambda: datetime(2026, 9, 18, 7, 0, tzinfo=UTC)  # noqa: E731
+    assert session_close("7203.T", SEP17, session=_yahoo(chart), clock=later).close == Decimal("3034.0")
+    assert session_close("7203.T", SEP18, session=_yahoo(chart), clock=later).close == Decimal("3011.0")
+
+
 def test_a_missing_session_or_a_foreign_currency_is_unavailable():
     later = lambda: datetime(2026, 9, 20, tzinfo=UTC)  # noqa: E731
     with pytest.raises(SessionCloseUnavailable, match="no 2026-09-16 close"):

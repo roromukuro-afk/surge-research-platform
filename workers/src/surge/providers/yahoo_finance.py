@@ -26,7 +26,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 from urllib.parse import quote as url_quote
 
@@ -133,6 +133,62 @@ class YahooSession:
         return self._get(CHART_URL + url_quote(symbol, safe=""), params=params).json()
 
 
+@dataclass(frozen=True)
+class YahooSplit:
+    """One split as Yahoo reports it: the ex date and how many shares one became."""
+
+    ex_date: date
+    numerator: Decimal
+    denominator: Decimal
+
+    @property
+    def share_multiplier(self) -> Decimal:
+        return self.numerator / self.denominator
+
+
+def parse_splits(result: dict) -> list[YahooSplit]:
+    """The split events of one chart result (``events=split``).
+
+    ``date`` is the ex date (for the 2024-10-01 Sony and SMFG splits Yahoo gives
+    2024-09-27, the day trading moved to the new share count).
+    """
+
+    splits = []
+    for item in ((result.get("events") or {}).get("splits") or {}).values():
+        numerator, denominator = item.get("numerator"), item.get("denominator")
+        if not numerator or not denominator:
+            raise YahooError(f"a split without a readable ratio: {item!r}")
+        splits.append(YahooSplit(
+            ex_date=datetime.fromtimestamp(item["date"], JST).date(),
+            numerator=Decimal(str(numerator)),
+            denominator=Decimal(str(denominator)),
+        ))
+    return sorted(splits, key=lambda s: s.ex_date)
+
+
+def split_factor_after(day: date, splits: list[YahooSplit]) -> Decimal:
+    """How much every split after ``day`` has divided that day's price by."""
+
+    factor = Decimal(1)
+    for split in splits:
+        if split.ex_date > day:
+            factor *= split.share_multiplier
+    return factor
+
+
+def as_traded_price(value, day: date, splits: list[YahooSplit]) -> Decimal:
+    """Undo Yahoo's backward split adjustment for one price on ``day``.
+
+    Yahoo restates every bar before a split's ex date into today's share count
+    (measured: Sony shows 2,673 yen the week before its 2024 5-for-1 split,
+    when it traded near 13,000). Multiplying back gives the price as traded.
+    Rounded to 0.1 yen, the finest Tokyo tick, which also clears the float noise
+    in Yahoo's numbers (3037.333251953125 x 3 is 9112.0).
+    """
+
+    return (Decimal(str(value)) * split_factor_after(day, splits)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+
+
 def session_close(
     symbol: str,
     session_date: date,
@@ -149,10 +205,14 @@ def session_close(
 
     session = session or YahooSession()
     day_start = datetime(session_date.year, session_date.month, session_date.day, tzinfo=JST)
+    # Through today, with split events: Yahoo restates earlier bars for every
+    # split since, so a close read back after a split is not the traded price
+    # until the splits after its date are undone (measured 2026-09-18).
     params = {
         "interval": "1d",
         "period1": str(int((day_start - timedelta(days=1)).timestamp())),
-        "period2": str(int((day_start + timedelta(days=2)).timestamp())),
+        "period2": str(int(max(day_start + timedelta(days=2), clock()).timestamp())),
+        "events": "split",
     }
     try:
         data = session.chart(symbol, params)
@@ -181,6 +241,7 @@ def session_close(
             close = value
     if close is None or isinstance(close, bool) or not isinstance(close, int | float) or close <= 0:
         raise SessionCloseUnavailable(f"no {session_date.isoformat()} close for {symbol}")
+    as_traded = as_traded_price(close, session_date, parse_splits(result))
 
     session_end = tse_session_end(session_date)
     regular = (meta.get("currentTradingPeriod") or {}).get("regular") or {}
@@ -195,7 +256,7 @@ def session_close(
         market_code="JP",
         symbol=symbol,
         session_date=session_date,
-        close=Decimal(str(close)),
+        close=as_traded,
         currency="JPY",
         session_closed_at=session_end,
         fetched_at=fetched_at,
@@ -229,7 +290,11 @@ __all__ = [
     "TSE_PUBLICATION_DELAY",
     "YahooError",
     "YahooSession",
+    "YahooSplit",
+    "as_traded_price",
+    "parse_splits",
     "session_close",
+    "split_factor_after",
     "tse_session_end",
     "tse_symbol",
 ]
