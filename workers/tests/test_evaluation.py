@@ -24,6 +24,7 @@ from surge.evaluation import cost, leakage, report
 from surge.evaluation.cost import Budget, BudgetExceeded, Ledger, estimate_usd, plan_problems
 from surge.evaluation.method import MethodError, load_method
 from surge.evaluation.outcome import compute_outcome
+from surge.evaluation.pacing import Pacer, PacingError
 from surge.evaluation.population import (
     Sample,
     Screen,
@@ -799,6 +800,97 @@ def test_plan_build_freeze_and_preflight_offline(planned_run):
 BUDGET = Budget(Decimal("0.05"), 10)
 
 
+class _FakeTime:
+    """A clock that moves only when something sleeps, so pacing is exact and instant."""
+
+    def __init__(self):
+        self.now = 1000.0
+        self.slept = []
+
+    def clock(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def _pacer(**kwargs):
+    fake = _FakeTime()
+    return Pacer(clock=fake.clock, sleep=fake.sleep, **kwargs)
+
+
+def test_the_pacer_keeps_15_seconds_apart_and_4_per_rolling_minute():
+    pacer = _pacer()
+    waits, counts = [], []
+    for _ in range(10):
+        waits.append(pacer.wait())
+        counts.append(pacer.mark_sent())
+    assert waits == [0.0] + [15.0] * 9
+    assert max(counts) == 4 and counts[:4] == [1, 2, 3, 4]
+
+    # The rolling window holds even when the interval alone would not.
+    burst = _pacer(min_interval=0.0)
+    for _ in range(4):
+        assert burst.wait() == 0.0
+        burst.mark_sent()
+    assert burst.delay() == 60.0  # the 5th waits until the 1st is a minute old
+    burst.wait()
+    assert burst.mark_sent() == 1  # the burst sent at one instant is now a minute old
+
+    unguarded = Pacer(min_interval=0.0, clock=lambda: 0.0, sleep=lambda s: None)
+    for _ in range(4):
+        unguarded.mark_sent()
+    with pytest.raises(PacingError, match="5 requests"):
+        unguarded.mark_sent()  # sent without waiting: refused loudly
+
+
+def test_every_answer_records_its_pacing_and_http_facts(ready_run, monkeypatch):
+    store = ready_run
+    _fake_gateway(monkeypatch)
+    jev_eval.run(store, budget=BUDGET, pacer=_pacer())
+    records = sorted((store.read_json(f"responses/{p.name}") for p in (store.path / "responses").glob("*.json")
+                      if not p.name.endswith(".raw.json")), key=lambda r: r["pacing"]["requested_at"])
+    assert len(records) == 10
+    assert [r["pacing"]["waited_seconds"] for r in records] == [0.0] + [15.0] * 9
+    assert max(r["pacing"]["requests_in_rolling_60s"] for r in records) == 4
+    assert records[0]["pacing"]["previous_success_at"] is None
+    assert records[1]["pacing"]["previous_success_at"] == records[0]["pacing"]["requested_at"]
+    assert all(r["http"]["status"] == 200 and r["http"]["retry_after"] is None for r in records)
+    assert store.read_json("stage-run.json")["max_requests_in_rolling_60s"] == 4
+
+
+def test_a_429_is_recorded_with_its_headers_and_stops_the_run(ready_run, monkeypatch):
+    store = ready_run
+
+    def rate_limited(raw, n):
+        if n < 3:
+            return raw
+        return {"startedAt": "2026-09-18T10:00:30.000Z", "latencyMs": 900, "error": {
+            "name": "GatewayRateLimitError", "type": "rate_limit_exceeded", "statusCode": 429,
+            "message": "Free tier requests on this model are rate-limited.",
+            "responseHeaders": {"Retry-After": "30", "x-vercel-id": "hnd1::test"}}}
+
+    sent = _fake_gateway(monkeypatch, answer=rate_limited)
+    summary = jev_eval.run(store, budget=BUDGET, pacer=_pacer())
+    assert len(sent) == 3 and "Gateway error" in summary["stopped"]
+    stop = store.read_json("run-stopped-1.json")
+    last = stop["last_request"]
+    assert last["http"] == {"status": 429, "error_name": "GatewayRateLimitError", "error_type": "rate_limit_exceeded",
+                            "retry_after": "30", "response_headers": {"Retry-After": "30", "x-vercel-id": "hnd1::test"}}
+    assert last["pacing"]["requests_in_rolling_60s"] == 3
+    assert last["pacing"]["previous_success_at"] is not None
+    assert last["pacing"]["runner_started_at"] == "2026-09-18T10:00:30.000Z"
+    assert "REQUEST" not in json.dumps(stop)  # nothing of the request body
+
+
+def test_a_429_without_retry_after_records_null():
+    facts = jev_eval.http_facts({"error": {"statusCode": 429, "type": "rate_limit_exceeded",
+                                           "responseHeaders": {"x-vercel-id": "x"}}})
+    assert facts["status"] == 429 and facts["retry_after"] is None
+    assert jev_eval.http_facts({"error": {"statusCode": None, "responseHeaders": None}})["response_headers"] is None
+
+
 @pytest.fixture()
 def ready_run(planned_run, monkeypatch):
     """Built, frozen and preflighted with a (fake) credit balance: ready to send."""
@@ -839,7 +931,7 @@ def test_run_and_report_offline_inside_the_budget(ready_run, monkeypatch):
         jev_eval.run(store, budget=Budget(Decimal("0.06"), 10))
 
     sent = _fake_gateway(monkeypatch)
-    summary = jev_eval.run(store, budget=BUDGET)
+    summary = jev_eval.run(store, budget=BUDGET, pacer=_pacer())
     assert summary["stopped"] is None and summary["requests_answered"] == 10 and len(sent) == 10
     assert summary["credits_after"] == {"balance": "4.99", "total_used": "0.01"}
     assert store.exists("predictions.parquet") and store.exists("paired_anonymized.parquet")
@@ -887,7 +979,7 @@ def _incomplete(raw):
 def test_one_bad_answer_stops_the_run_and_the_run_is_not_resumed(ready_run, monkeypatch, alter, reason):
     store = ready_run
     sent = _fake_gateway(monkeypatch, answer=lambda raw, n: alter(raw) if n == 2 else raw)
-    summary = jev_eval.run(store, budget=BUDGET)
+    summary = jev_eval.run(store, budget=BUDGET, pacer=_pacer())
     assert len(sent) == 2 and summary["requests_answered"] == 2 and reason in summary["stopped"]
     assert store.exists("run-stopped-1.json")
     assert not store.exists("stage-run.json") and not store.exists("predictions.parquet")
@@ -901,5 +993,5 @@ def test_a_request_file_changed_after_preflight_is_never_sent(ready_run, monkeyp
     (store.path / request["file"]).write_bytes(b"{}")
     sent = _fake_gateway(monkeypatch)
     with pytest.raises(StoreError, match="does not match"):
-        jev_eval.run(store, budget=BUDGET)
+        jev_eval.run(store, budget=BUDGET, pacer=_pacer())
     assert sent == []

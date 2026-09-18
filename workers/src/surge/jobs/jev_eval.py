@@ -52,6 +52,7 @@ from surge.evaluation.cost import (
 from surge.evaluation.leakage import check_sample
 from surge.evaluation.method import REPO_ROOT, load_method
 from surge.evaluation.outcome import OUTCOME_DEFINITION, OUTCOME_VERSION, compute_outcome
+from surge.evaluation.pacing import Pacer
 from surge.evaluation.population import (
     MIN_SPACING_SESSIONS,
     SCREENER_DEFINITION,
@@ -118,6 +119,7 @@ CODE_FILES = [
     "workers/src/surge/evaluation/leakage.py",
     "workers/src/surge/evaluation/method.py",
     "workers/src/surge/evaluation/outcome.py",
+    "workers/src/surge/evaluation/pacing.py",
     "workers/src/surge/evaluation/population.py",
     "workers/src/surge/evaluation/prices.py",
     "workers/src/surge/evaluation/report.py",
@@ -136,6 +138,7 @@ CODE_FILES = [
     "workers/src/surge/features/indicators.py",
     "workers/src/surge/routes/engine.py",
     "ops/jev-gateway-runner/runner.mjs",
+    "ops/jev-gateway-runner/describe-error.mjs",
     "ops/jev-gateway-runner/package.json",
     "ops/jev-gateway-runner/package-lock.json",
 ]
@@ -645,6 +648,24 @@ def response_problems(record: dict, row: dict) -> list[str]:
     return problems
 
 
+def http_facts(result: dict) -> dict:
+    """The HTTP side of one call as the runner saw it (D-273): status, error type, Retry-After, headers.
+
+    A success is a 200 (the SDK raises on anything else). ``retry_after`` is
+    the Retry-After header when the response carried one, else None. Nothing
+    here comes from the request.
+    """
+
+    error = result.get("error")
+    if not error:
+        return {"status": 200, "error_name": None, "error_type": None, "retry_after": None,
+                "response_headers": (result.get("response") or {}).get("headers")}
+    headers = error.get("responseHeaders") or {}
+    retry_after = next((str(v) for k, v in headers.items() if k.lower() == "retry-after"), None)
+    return {"status": error.get("statusCode"), "error_name": error.get("name"), "error_type": error.get("type"),
+            "retry_after": retry_after, "response_headers": headers or None}
+
+
 def _prediction_rows(store: RunStore) -> list[dict]:
     manifest = store.read_json("manifest.json")
     samples = {r["sample_id"]: r for r in store.read_jsonl("population.jsonl")}
@@ -659,10 +680,18 @@ def _prediction_rows(store: RunStore) -> list[dict]:
     return rows
 
 
-def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER) -> dict:
-    """Send the planned requests - main, then anonymized, then drift - inside the hard budget."""
+def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER, pacer: Pacer | None = None) -> dict:
+    """Send the planned requests - main, then anonymized, then drift - inside the hard budget.
+
+    Paced for the Gateway's free tier (D-273): one request at least every 15
+    seconds, at most four in any rolling 60 seconds. Every answer records when
+    it was requested, the previous successful request and the rolling count,
+    and the HTTP facts of a failure.
+    """
 
     from surge.jobs.jev_smoke import gateway_record
+
+    pacer = pacer or Pacer()
 
     for stage in ("plan", "build", "outcomes"):
         _verify_stage(store, stage)
@@ -695,7 +724,9 @@ def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER) -> dict:
     if problems:
         raise EvaluationError(f"not sending: {problems}")
 
-    stopped = None
+    stopped, last = None, None
+    previous_success_at = None
+    max_in_window = 0
     asked = questions()
     for count, row in enumerate(pending, start=1):
         label = f"{row['sample_id']}.{row['variant']}"
@@ -711,25 +742,42 @@ def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER) -> dict:
         if raw_out.exists():
             raise StoreError(f"{raw_out} exists without its record; look at it before sending again")
         raw_out.parent.mkdir(parents=True, exist_ok=True)
+        waited = pacer.wait()
+        requested_at = datetime.now(UTC).isoformat()
+        in_window = pacer.mark_sent()
+        max_in_window = max(max_in_window, in_window)
         subprocess.run(["node", str(runner), str(store.path / row["file"]), str(raw_out)], check=False,
                        timeout=300, cwd=str(runner.parent), capture_output=True, text=True)
         result = (json.loads(raw_out.read_text(encoding="utf-8")) if raw_out.exists()
                   else {"error": {"message": "the runner wrote nothing"}, "latencyMs": 0})
         record = gateway_record(result, asked=asked, label=label, request_sha256=row["sha256"])
+        record["pacing"] = {
+            "requested_at": requested_at,
+            "runner_started_at": result.get("startedAt"),
+            "previous_success_at": previous_success_at,
+            "requests_in_rolling_60s": in_window,
+            "waited_seconds": round(waited, 3),
+            "policy": {"min_interval_seconds": pacer.min_interval, "window_seconds": pacer.window,
+                       "max_in_window": pacer.max_in_window},
+        }
+        record["http"] = http_facts(result)
         store.write_json(_response_name(row), record)
         ledger.record(record, estimate=estimate)
+        last = {"label": label, "pacing": record["pacing"], "http": record["http"]}
         problems = response_problems(record, row)
         if problems:
             stopped = f"{label}: {problems}"
             break
+        previous_success_at = requested_at
         if count % 10 == 0:
             _progress(f"sent {count}/{len(pending)}, ${ledger.spent_usd}")
 
     summary = {"sent_this_time": ledger.requests - (len(requests) - len(pending)), "requests_answered":
                ledger.requests, "spent_usd": str(ledger.spent_usd), "stopped": stopped,
-               "estimated_charges": ledger.estimated_charges, "credits_before": credits}
+               "estimated_charges": ledger.estimated_charges, "credits_before": credits,
+               "max_requests_in_rolling_60s": max_in_window}
     if stopped is not None:
-        store.write_json(_next_name(store, "run-stopped"), summary)
+        store.write_json(_next_name(store, "run-stopped"), {**summary, "last_request": last})
     elif ledger.requests == len(requests):
         summary["credits_after"] = read_credits(runner, store.path / _next_name(store, "credits"))
         rows = _prediction_rows(store)

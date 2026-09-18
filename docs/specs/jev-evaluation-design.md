@@ -133,6 +133,7 @@ API を送る直前まで（`preflight`）を実装・テストし、そこで�
 - **outcome の固定**: `freeze-outcomes` は応答が 1 件でもあれば拒否する。`run` は freeze と、同じ予算で `ready_to_send` になった最新の preflight が無ければ拒否する。preflight は各 outcome を再計算して固定値と一致することも確かめる。
 - **1 件でも次のどれかが出たら `run` はその時点で止まる**（ユーザー指示 2026-09-18、再試行しない）: Gateway error / schema incomplete / 予算の異常（報告されない cost、見積もりを超える cost、見積もりを超える input tokens、予算・件数の上限）/ request の hash 不一致（送る直前にファイルを照合）/ 想定外の model（`typesafe-ai/jev` 以外）・provider（`typesafe-ai` 以外）/ integrity violation（stage ファイルの照合失敗）。止まった run は `run-stopped-<n>.json` を残し、**再開しない**（見直してから新しい run にする）。
 - 全件の後に Gateway の残高をもう一度読み、`stage-run.json` に送信前後の残高を残す。
+- **送信の間隔（D-273）**: Gateway の free tier は `typesafe-ai/jev` を rate limit する（`-03` で 5 件成功後の 6 件目が 429）。送信は**最短 15 秒間隔かつ任意の 60 秒に最大 4 件**（`surge.evaluation.pacing.Pacer`、rolling window の guard。超えそうなら待ち、超えたら例外）。各応答に `pacing`（request 時刻・runner 側の開始時刻・直前の成功時刻・rolling 60 秒の件数・待った秒数・方針）と `http`（status・error 名と type・Retry-After（無ければ null）・応答 header）を残す。runner は Gateway の error から応答側だけを写し、request 本文（`cause.requestBodyValues`）と API key は記録しない（`ops/jev-gateway-runner/describe-error.mjs`、`node check-describe.mjs` で offline に確認できる）。
 
 ### 9-3c. run ディレクトリ
 

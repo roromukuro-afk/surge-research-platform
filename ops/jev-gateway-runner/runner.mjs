@@ -4,18 +4,13 @@
 //        node runner.mjs --credits <output.json>
 //   the team's Gateway credit balance and total used; no model request.
 // Records only what is safe to keep: answers, usage, provider metadata, the
-// response id/model/headers and the latency. Never the request - it carries the
-// state, and so the canonical text. The API key comes from AI_GATEWAY_API_KEY
-// in this process's environment and is never read here.
+// response id/model/headers, when the request started and the latency. Never
+// the request - it carries the state, and so the canonical text. The API key
+// comes from AI_GATEWAY_API_KEY in this process's environment and is never
+// read here.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { experimental_evaluate as evaluate, gateway } from 'ai';
-
-const describe = (e) => ({
-  name: e?.name,
-  message: String(e?.message ?? e).slice(0, 400),
-  statusCode: e?.statusCode,
-  responseBody: typeof e?.responseBody === 'string' ? e.responseBody.slice(0, 400) : undefined,
-});
+import { describe } from './describe-error.mjs';
 
 async function credits(outputPath) {
   let out;
@@ -31,6 +26,7 @@ async function credits(outputPath) {
 
 async function evaluateOnce(inputPath, outputPath) {
   const input = JSON.parse(readFileSync(inputPath, 'utf8'));
+  const startedAt = new Date().toISOString();
   const started = performance.now();
   let result;
   let error;
@@ -42,8 +38,9 @@ async function evaluateOnce(inputPath, outputPath) {
   const latencyMs = Math.round(performance.now() - started);
 
   const out = error
-    ? { latencyMs, error }
+    ? { startedAt, latencyMs, error }
     : {
+        startedAt,
         latencyMs,
         answers: result.answers,
         usage: result.usage,
