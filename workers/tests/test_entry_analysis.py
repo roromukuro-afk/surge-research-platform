@@ -22,6 +22,7 @@ from decimal import Decimal
 
 import pytest
 
+from surge.analysis.bundle import sha256_text  # noqa: E402
 from surge.analysis.entry_analysis import (
     DeterministicIntradayStandIn,
     EntryAnalysisResponse,
@@ -50,7 +51,8 @@ from surge.jobs.entry_analysis_job import WATCH_AFTER, EntryAnalysisJob
 CUTOFF = datetime(2026, 9, 17, 2, 15, tzinfo=UTC)
 COMPLETED = datetime(2026, 9, 17, 2, 16, tzinfo=UTC)
 LATER = datetime(2026, 9, 17, 2, 17, tzinfo=UTC)
-CANONICAL = "0" * 64
+CANONICAL_TEXT = "CANONICAL"
+CANONICAL = sha256_text(CANONICAL_TEXT)
 
 
 def _bundle(**sections) -> IntradayBundle:

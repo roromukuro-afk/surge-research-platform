@@ -24,6 +24,7 @@ import pytest
 
 psycopg2 = pytest.importorskip("psycopg2")
 
+from surge.analysis.bundle import sha256_text  # noqa: E402
 from surge.analysis.entry_analysis import (  # noqa: E402
     EntryAnalysisResponse,
     EntryAnalysisState,
@@ -71,19 +72,33 @@ LATER = datetime(2026, 9, 17, 2, 17, tzinfo=UTC)
 #: When the runner accepts the answer. After the cutoff and after LATER, so
 #: an entry price observed afterwards is unambiguously afterwards.
 DECIDED_AT = datetime(2026, 9, 17, 2, 18, tzinfo=UTC)
-CANONICAL = "c" * 64
+CANONICAL = sha256_text("CANONICAL")
+
+
+#: Set on the database by whatever created it for testing - the CI job and the
+#: local mirror of it - and never on anything real.
+DISPOSABLE_MARKER = "surge.disposable_test_database"
 
 
 def _assert_disposable(conn) -> None:
-    """Refuse to commit into a database that holds anything real.
+    """Refuse to commit into a database that has not said it is disposable.
 
-    The teacher tables start at zero and stay there until a real episode
-    resolves (D-163). A committing test against production would put rows in
-    that population which are indistinguishable from real ones afterwards -
-    there is no undo for that, so the check is before rather than after.
+    This used to decide from the teacher tables being empty, reasoning that a
+    real database would hold teacher rows. The production database does not: it
+    starts at zero by rule (D-163) and stays there until a real episode resolves.
+    So the old check could not tell the cloud from a throwaway, and pointing
+    SURGE_TEST_DATABASE_URL at the wrong place would have committed synthetic
+    watches, executions and predictions into production - rows indistinguishable
+    from real ones afterwards, with no undo.
+
+    Now the database has to *say* it is disposable, with a setting only a test
+    harness puts there. Absence is not evidence either way, so absence skips.
+    The teacher-row check stays as a second, independent reason to refuse.
     """
 
     with conn.cursor() as cur:
+        cur.execute("select current_setting(%s, true)", (DISPOSABLE_MARKER,))
+        marker = cur.fetchone()[0]
         cur.execute(
             """
             select (select count(*) from labels.objective_labels)
@@ -92,6 +107,13 @@ def _assert_disposable(conn) -> None:
             """
         )
         teacher = cur.fetchone()[0]
+    conn.rollback()
+
+    if marker != "on":
+        pytest.skip(
+            f"this database does not declare {DISPOSABLE_MARKER} = on, so it is not known to be "
+            "disposable and these committing tests will not run against it"
+        )
     if teacher:
         pytest.skip(
             f"this database holds {teacher} teacher row(s), so it is not disposable and these "
@@ -118,13 +140,39 @@ def conn():
         # These tests commit, so they clean up after themselves. Predictions and
         # episodes are append-only for the worker; the test runs as owner.
         try:
+            connection.rollback()
             with connection.cursor() as cur:
+                # The append-only guards refuse DELETE from everyone, owner
+                # included - that is the point of them - so cleanup has always
+                # failed here, and the old code swallowed the failure. In a
+                # database that has declared itself disposable, triggers are
+                # switched off for this one transaction instead. This needs a
+                # superuser, which the test harness is and a runtime role never
+                # is.
+                cur.execute("set local session_replication_role = replica")
                 for watch_id in created:
+                    cur.execute(
+                        "select p.episode_id from prod.predictions p "
+                        "join prod.entry_attempts a on a.attempt_id = p.attempt_id "
+                        "where a.watch_id = %s",
+                        (watch_id,),
+                    )
+                    episodes = [row[0] for row in cur.fetchall()]
                     cur.execute(
                         "delete from prod.predictions where attempt_id in "
                         "(select attempt_id from prod.entry_attempts where watch_id = %s)",
                         (watch_id,),
                     )
+                    for episode_id in episodes:
+                        cur.execute(
+                            "delete from prod.state_transitions where episode_id = %s",
+                            (episode_id,),
+                        )
+                        cur.execute(
+                            "delete from prod.risk_line_updates where episode_id = %s",
+                            (episode_id,),
+                        )
+                        cur.execute("delete from prod.episodes where episode_id = %s", (episode_id,))
                     cur.execute(
                         "delete from prod.entry_analysis_executions where watch_id = %s",
                         (watch_id,),
@@ -168,7 +216,6 @@ def _bundle(security_id: str) -> IntradayBundle:
         session_date=date(2026, 9, 17),
         decision_cutoff_at=CUTOFF,
         canonical_prompt_sha256=CANONICAL,
-        answered_at=LATER,
         sections={
             "live_price": {"price": "1000"},
             "stage3_setup": {"state": "WATCH_BREAKOUT"},
@@ -189,6 +236,19 @@ def _facts(**overrides) -> EntryGuardFacts:
     }
     base.update(overrides)
     return EntryGuardFacts(**base)
+
+
+
+def _stored_input(security_id: str):
+    """What TX1 writes, built from the real bundle and facts."""
+
+    stored, _prompt = build_stored_input(
+        bundle=_bundle(security_id),
+        facts=_facts(),
+        canonical_text="CANONICAL",
+        thesis_key="WATCH_BREAKOUT|R_A",
+    )
+    return stored
 
 
 def _answer(**overrides) -> EntryAnalysisResponse:
@@ -438,33 +498,51 @@ def test_an_analysis_that_ran_past_its_deadline_is_not_retried_again(conn):
     assert watch_state == "REARMED"
 
 
-def test_recovery_reports_what_it_could_not_resume(conn):
-    """A sweep that cannot resume an execution leaves a watch at IN_REANALYSIS,
-    and nothing else moves one. Skipping it silently made "nothing was stuck"
-    and "several things were stuck and I walked past them" look identical."""
+def test_every_analysis_the_runner_starts_can_be_resumed(conn):
+    """The unresumable case - an open execution with no record of what it was
+    asked - can no longer be produced: begin_entry_analysis refuses to start one
+    without its input. So the property worth asserting against the database is
+    the positive one. The reporting path for rows that predate the stored input
+    is covered in the unit tests, where such a row can still be constructed."""
 
     watch_id, security_id, trigger_id = _triggered(conn)
     runner = _runner(conn, _Provider(raises=TimeoutError("connection timed out")))
     started = _run(runner, watch_id, security_id, trigger_id)
     assert started.retried
 
-    recovery = resume_all(
-        runner,
-        bundles={},
-        facts_for=lambda _e: _facts(),
-        now=LATER,
-        thesis_for=lambda _e: "WATCH_BREAKOUT|R_A",
+    reloaded = DatabaseExecutionStore(conn).find(
+        ExecutionKey(
+            watch_id=watch_id,
+            trigger_transition_id=trigger_id,
+            analysis_kind=AnalysisKind.REANALYSIS,
+        )
     )
+    assert reloaded.can_be_resumed
 
-    assert recovery.resumed == []
-    # Scoped to this test's own watch. in_flight() is a question about the whole
-    # database, and an assertion on its total would be an assertion about every
-    # other test that happened to leave a row behind.
-    mine = [u for u in recovery.unresumable if u["watch_id"] == watch_id]
-    assert len(mine) == 1
-    assert mine[0]["analysis_execution_id"] == started.analysis_execution_id
-    assert "IN_REANALYSIS" in mine[0]["why"]
-    assert started.analysis_execution_id in recovery.summary["stuck"]
+    recovery = resume_all(runner, now=LATER)
+    assert not [u for u in recovery.unresumable if u["watch_id"] == watch_id]
+
+
+def test_the_database_refuses_to_start_an_analysis_without_its_input(conn):
+    """The Python store will not build a request without its hashes, so the
+    database guard is asserted by calling it directly - a guarantee that rests
+    on one caller getting it right is not one."""
+
+    watch_id, security_id, trigger_id = _triggered(conn)
+
+    with conn.cursor() as cur:
+        with pytest.raises(psycopg2.errors.RaiseException, match="started from a stored input"):
+            cur.execute(
+                """
+                select * from prod.begin_entry_analysis(
+                  %s, %s, 'REANALYSIS'::prod.analysis_kind, %s, 'groq_hosted',
+                  'HOSTED_LLM'::analysis.provider_kind, 'v1',
+                  null, null, null, null
+                )
+                """,
+                (watch_id, trigger_id, CUTOFF),
+            )
+    conn.rollback()
 
 
 # ------------------------------------------- 2. crash after TX2 commits
@@ -488,6 +566,7 @@ def test_a_crash_after_tx2_resumes_from_the_stored_answer(conn):
             trigger_transition_id=trigger_id,
             analysis_kind=AnalysisKind.REANALYSIS,
         ),
+        stored_input=_stored_input(security_id),
         decision_cutoff_at=CUTOFF,
         provider_id="groq_hosted",
         provider_kind="HOSTED_LLM",
@@ -498,9 +577,11 @@ def test_a_crash_after_tx2_resumes_from_the_stored_answer(conn):
     store.record_answer(
         begun.execution.analysis_execution_id,
         _answer(),
-        prompt_sha256="p" * 64,
-        bundle_sha256="b" * 64,
-        canonical_prompt_sha256=CANONICAL,
+        # The hashes TX1 recorded. The database checks an answer against them
+        # rather than taking new ones, so invented digests are refused.
+        prompt_sha256=begun.execution.stored_input.prompt_sha256,
+        bundle_sha256=begun.execution.stored_input.bundle_sha256,
+        canonical_prompt_sha256=begun.execution.stored_input.canonical_prompt_sha256,
         answered_at=LATER,
     )
     conn.commit()
@@ -529,6 +610,7 @@ def test_the_stored_answer_round_trips_without_losing_the_zone_basis(conn):
             trigger_transition_id=trigger_id,
             analysis_kind=AnalysisKind.REANALYSIS,
         ),
+        stored_input=_stored_input(security_id),
         decision_cutoff_at=CUTOFF,
         provider_id="groq_hosted",
         provider_kind="HOSTED_LLM",
@@ -539,9 +621,11 @@ def test_the_stored_answer_round_trips_without_losing_the_zone_basis(conn):
     store.record_answer(
         begun.execution.analysis_execution_id,
         original,
-        prompt_sha256="p" * 64,
-        bundle_sha256="b" * 64,
-        canonical_prompt_sha256=CANONICAL,
+        # The hashes TX1 recorded. The database checks an answer against them
+        # rather than taking new ones, so invented digests are refused.
+        prompt_sha256=begun.execution.stored_input.prompt_sha256,
+        bundle_sha256=begun.execution.stored_input.bundle_sha256,
+        canonical_prompt_sha256=begun.execution.stored_input.canonical_prompt_sha256,
         answered_at=LATER,
     )
     conn.commit()
@@ -564,8 +648,8 @@ def test_the_stored_answer_round_trips_without_losing_the_zone_basis(conn):
     assert answer.reachable_zone_basis == original.reachable_zone_basis
     assert answer.concepts_considered == original.concepts_considered
     assert answer.raw_text == original.raw_text
-    assert reloaded.prompt_sha256 == "p" * 64
-    assert reloaded.bundle_sha256 == "b" * 64
+    assert reloaded.prompt_sha256 == begun.execution.stored_input.prompt_sha256
+    assert reloaded.bundle_sha256 == begun.execution.stored_input.bundle_sha256
     assert reloaded.canonical_prompt_sha256 == CANONICAL
 
 
@@ -695,6 +779,7 @@ def test_the_database_refuses_to_strand_a_watch(conn):
             trigger_transition_id=trigger_id,
             analysis_kind=AnalysisKind.REANALYSIS,
         ),
+        stored_input=_stored_input(security_id),
         decision_cutoff_at=CUTOFF,
         provider_id="groq_hosted",
         provider_kind="HOSTED_LLM",
@@ -743,6 +828,7 @@ def test_another_watchs_trigger_cannot_start_this_analysis(conn):
                 trigger_transition_id=other_trigger,
                 analysis_kind=AnalysisKind.REANALYSIS,
             ),
+            stored_input=_stored_input(security_id),
             decision_cutoff_at=CUTOFF,
             provider_id="groq_hosted",
             provider_kind="HOSTED_LLM",
@@ -773,6 +859,7 @@ def test_a_superseded_trigger_cannot_be_answered(conn):
                 trigger_transition_id=first_trigger,
                 analysis_kind=AnalysisKind.REANALYSIS,
             ),
+            stored_input=_stored_input(security_id),
             decision_cutoff_at=CUTOFF,
             provider_id="groq_hosted",
             provider_kind="HOSTED_LLM",
@@ -793,6 +880,7 @@ def test_the_security_comes_from_the_watch_not_the_caller(conn):
         store.begin(
             key,
             security_id=str(uuid.uuid4()),
+            stored_input=_stored_input(security_id),
             decision_cutoff_at=CUTOFF,
             provider_id="groq_hosted",
             provider_kind="HOSTED_LLM",
@@ -803,6 +891,7 @@ def test_the_security_comes_from_the_watch_not_the_caller(conn):
 
     begun = store.begin(
         key,
+        stored_input=_stored_input(security_id),
         decision_cutoff_at=CUTOFF,
         provider_id="groq_hosted",
         provider_kind="HOSTED_LLM",
@@ -816,33 +905,27 @@ def test_the_security_comes_from_the_watch_not_the_caller(conn):
 # -------------------------------------------------- hashes are not optional
 
 
-def test_completion_without_the_hashes_is_refused_for_a_hosted_model(conn):
-    from surge.analysis.entry_analysis import EntryValidation
-    from surge.analysis.execution import ExecutionKey
-    from surge.analysis.validate import ValidationStatus
-    from surge.entry.models import AnalysisKind
+def test_a_stored_bundle_about_another_security_is_refused(conn):
+    """Only the database knows which security the watch is on, so this half of
+    the input's consistency is checked there. An answer to a bundle about some
+    other security would be recorded against the wrong one."""
 
     watch_id, security_id, trigger_id = _triggered(conn)
     store = DatabaseExecutionStore(conn)
-    begun = store.begin(
-        ExecutionKey(
-            watch_id=watch_id,
-            trigger_transition_id=trigger_id,
-            analysis_kind=AnalysisKind.REANALYSIS,
-        ),
-        decision_cutoff_at=CUTOFF,
-        provider_id="groq_hosted",
-        provider_kind="HOSTED_LLM",
-        run_id=None,
-        now=LATER,
-    )
-    with conn.cursor() as cur:
-        _move(cur, watch_id, "IN_REANALYSIS", "REARMED", kind="REANALYSIS")
 
-    with pytest.raises(psycopg2.errors.RaiseException, match="without the prompt, bundle"):
-        store.complete(
-            begun.execution.analysis_execution_id,
-            validation=EntryValidation(status=ValidationStatus.PASSED),
+    with pytest.raises(psycopg2.errors.RaiseException, match="wrong security"):
+        store.begin(
+            ExecutionKey(
+                watch_id=watch_id,
+                trigger_transition_id=trigger_id,
+                analysis_kind=AnalysisKind.REANALYSIS,
+            ),
+            stored_input=_stored_input(str(uuid.uuid4())),
+            decision_cutoff_at=CUTOFF,
+            provider_id="groq_hosted",
+            provider_kind="HOSTED_LLM",
+            run_id=None,
+            now=LATER,
         )
     conn.rollback()
 

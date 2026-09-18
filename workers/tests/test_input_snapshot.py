@@ -19,9 +19,11 @@ from decimal import Decimal
 
 import pytest
 
+from surge.analysis.bundle import sha256_text  # noqa: E402
 from surge.analysis.entry_analysis import EntryGuardFacts, IntradayBundle
 from surge.analysis.execution import StoredInput
 from surge.analysis.input_snapshot import (
+    InputInconsistencyError,
     InputReconstructionError,
     build_stored_input,
     rebuild_bundle,
@@ -31,8 +33,8 @@ from surge.analysis.input_snapshot import (
 from surge.entry.models import EntryError, ObservedPrice, UniverseVerdict
 
 CUTOFF = datetime(2026, 9, 17, 2, 15, tzinfo=UTC)
-CANONICAL = "c" * 64
 CANONICAL_TEXT = "the canonical method, in full"
+CANONICAL = sha256_text(CANONICAL_TEXT)
 ADDENDA = ("a later decision",)
 
 
@@ -43,7 +45,7 @@ def _bundle(**overrides) -> IntradayBundle:
         "session_date": date(2026, 9, 17),
         "decision_cutoff_at": CUTOFF,
         "canonical_prompt_sha256": CANONICAL,
-        "addenda_sha256": ["a" * 64],
+        "addenda_sha256": [sha256_text(text) for text in ADDENDA],
         "sections": {
             "live_price": {"price": "1000"},
             "stage3_setup": {"state": "WATCH_BREAKOUT"},
@@ -185,7 +187,7 @@ def test_a_canonical_file_that_changed_fails_the_reconstruction():
 
     stored, _ = _built()
 
-    with pytest.raises(InputReconstructionError, match="prompt that was sent"):
+    with pytest.raises(InputReconstructionError, match="canonical text has changed"):
         reconstruct(
             stored,
             canonical_text=CANONICAL_TEXT + " with a paragraph added since",
@@ -223,7 +225,7 @@ def test_reordered_addenda_fail_the_reconstruction():
     """Order is meaning here: a newer addendum overrides an older one."""
 
     stored, _ = build_stored_input(
-        bundle=_bundle(),
+        bundle=_bundle(addenda_sha256=[sha256_text("first"), sha256_text("second")]),
         facts=_facts(),
         canonical_text=CANONICAL_TEXT,
         addenda_texts=("first", "second"),
@@ -231,3 +233,97 @@ def test_reordered_addenda_fail_the_reconstruction():
 
     with pytest.raises(InputReconstructionError):
         reconstruct(stored, canonical_text=CANONICAL_TEXT, addenda_texts=("second", "first"))
+
+
+# ------------------ the bundle's claims, checked before anything is sent (I)
+#
+# The prompt hash cannot catch these on a fresh run: it is computed from the
+# same caller-supplied bundle, so it trivially matches itself. Only comparing
+# each declaration with the thing it declares does.
+
+
+def test_a_canonical_hash_that_is_not_the_texts_hash_is_refused():
+    """The bundle would record one method as sent while another one was."""
+
+    with pytest.raises(InputInconsistencyError, match="declares canonical"):
+        build_stored_input(
+            bundle=_bundle(canonical_prompt_sha256="c" * 64),
+            facts=_facts(),
+            canonical_text=CANONICAL_TEXT,
+            addenda_texts=ADDENDA,
+        )
+
+
+def test_addenda_hashes_that_are_not_the_texts_hashes_are_refused():
+    with pytest.raises(InputInconsistencyError, match="declares addenda"):
+        build_stored_input(
+            bundle=_bundle(addenda_sha256=["a" * 64]),
+            facts=_facts(),
+            canonical_text=CANONICAL_TEXT,
+            addenda_texts=ADDENDA,
+        )
+
+
+def test_addenda_in_a_different_order_are_refused():
+    """Order is meaning: the newer addendum overrides the older, and the prompt
+    renders them in the order given."""
+
+    with pytest.raises(InputInconsistencyError, match="declares addenda"):
+        build_stored_input(
+            bundle=_bundle(addenda_sha256=[sha256_text("second"), sha256_text("first")]),
+            facts=_facts(),
+            canonical_text=CANONICAL_TEXT,
+            addenda_texts=("first", "second"),
+        )
+
+
+def test_a_bundle_for_a_different_cutoff_than_the_facts_is_refused():
+    later = datetime(2026, 9, 17, 2, 45, tzinfo=UTC)
+
+    with pytest.raises(InputInconsistencyError, match="assembled for cutoff"):
+        build_stored_input(
+            bundle=_bundle(),
+            facts=_facts(
+                decision_cutoff_at=later,
+                decision_price=ObservedPrice(
+                    amount=Decimal("1000"), currency="JPY", observed_at=later
+                ),
+            ),
+            canonical_text=CANONICAL_TEXT,
+            addenda_texts=ADDENDA,
+        )
+
+
+def test_a_decision_price_from_after_the_cutoff_is_refused():
+    """The model would be shown a price from after the moment it is deciding
+    at - leakage in its most direct form."""
+
+    with pytest.raises(InputInconsistencyError, match="after the cutoff"):
+        build_stored_input(
+            bundle=_bundle(),
+            facts=_facts(
+                decision_price=ObservedPrice(
+                    amount=Decimal("1000"),
+                    currency="JPY",
+                    observed_at=datetime(2026, 9, 17, 2, 16, tzinfo=UTC),
+                )
+            ),
+            canonical_text=CANONICAL_TEXT,
+            addenda_texts=ADDENDA,
+        )
+
+
+def test_every_problem_is_reported_not_just_the_first():
+    """Fixing one at a time, one run at a time, is how a half-understood input
+    ends up being sent."""
+
+    with pytest.raises(InputInconsistencyError) as caught:
+        build_stored_input(
+            bundle=_bundle(canonical_prompt_sha256="c" * 64, addenda_sha256=["a" * 64]),
+            facts=_facts(),
+            canonical_text=CANONICAL_TEXT,
+            addenda_texts=ADDENDA,
+        )
+
+    assert "declares canonical" in str(caught.value)
+    assert "declares addenda" in str(caught.value)

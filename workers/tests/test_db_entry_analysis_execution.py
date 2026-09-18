@@ -15,7 +15,13 @@ import pytest
 
 psycopg2 = pytest.importorskip("psycopg2")
 
-from surge.analysis.entry_analysis import EntryAnalysisResponse, EntryAnalysisState  # noqa: E402
+from surge.analysis.bundle import sha256_text  # noqa: E402
+from surge.analysis.entry_analysis import (  # noqa: E402
+    EntryAnalysisResponse,
+    EntryAnalysisState,
+    EntryGuardFacts,
+    IntradayBundle,
+)
 from surge.analysis.execution import (  # noqa: E402
     ExecutionKey,
     ExecutionStatus,
@@ -23,8 +29,9 @@ from surge.analysis.execution import (  # noqa: E402
     plan_recovery,
 )
 from surge.analysis.execution_db import DatabaseExecutionStore  # noqa: E402
+from surge.analysis.input_snapshot import build_stored_input  # noqa: E402
 from surge.analysis.llm import ProviderKind  # noqa: E402
-from surge.entry.models import AnalysisKind  # noqa: E402
+from surge.entry.models import AnalysisKind, ObservedPrice, UniverseVerdict  # noqa: E402
 
 # One definition of what a well-formed watch looks like, shared with the
 # lifecycle tests. A second copy here would drift from the real one.
@@ -39,6 +46,43 @@ pytestmark = [
 
 CUTOFF = datetime(2026, 9, 17, 2, 15, tzinfo=UTC)
 LATER = datetime(2026, 9, 17, 2, 17, tzinfo=UTC)
+CANONICAL_TEXT = "CANONICAL"
+
+
+def _stored_input(security_id: str):
+    """What TX1 writes: a bundle about this watch's security, at this cutoff.
+
+    Built through the same function production uses, so the database is shown a
+    stored input the runner could actually have written - including the
+    canonical hash being the hash of the text it would send.
+    """
+
+    stored, _prompt = build_stored_input(
+        bundle=IntradayBundle(
+            security_id=security_id,
+            market_code="JP",
+            session_date=CUTOFF.date(),
+            decision_cutoff_at=CUTOFF,
+            canonical_prompt_sha256=sha256_text(CANONICAL_TEXT),
+            sections={
+                "live_price": {"price": "1000"},
+                "stage3_setup": {"state": "WATCH_BREAKOUT"},
+                "coverage": {"materials": 1.0},
+            },
+        ),
+        facts=EntryGuardFacts(
+            universe=UniverseVerdict(decision="INCLUDED"),
+            decision_price=ObservedPrice(
+                amount=Decimal("1000"), currency="JPY", observed_at=CUTOFF
+            ),
+            decision_cutoff_at=CUTOFF,
+            coverage_meets_requirements=True,
+            coverage_detail="all collectors reported",
+        ),
+        canonical_text=CANONICAL_TEXT,
+        thesis_key="WATCH_BREAKOUT|R_A",
+    )
+    return stored
 
 
 @pytest.fixture()
@@ -70,6 +114,7 @@ def _begin(store, watch_id, security_id, trigger_id, kind=AnalysisKind.REANALYSI
         ExecutionKey(
             watch_id=watch_id, trigger_transition_id=trigger_id, analysis_kind=kind
         ),
+        stored_input=_stored_input(security_id),
         security_id=security_id,
         decision_cutoff_at=CUTOFF,
         provider_id="groq_hosted",
@@ -168,9 +213,9 @@ def test_a_stored_answer_leaves_the_analysis_started_and_findable(conn):
         store.record_answer(
             begun.execution.analysis_execution_id,
             _answer(),
-            prompt_sha256="p" * 64,
-            bundle_sha256="b" * 64,
-            canonical_prompt_sha256="c" * 64,
+            prompt_sha256=begun.execution.stored_input.prompt_sha256,
+            bundle_sha256=begun.execution.stored_input.bundle_sha256,
+            canonical_prompt_sha256=begun.execution.stored_input.canonical_prompt_sha256,
             answered_at=LATER,
         )
 
@@ -200,9 +245,9 @@ def test_the_in_flight_view_shows_whether_the_model_was_already_paid_for(conn):
         store.record_answer(
             begun.execution.analysis_execution_id,
             _answer(),
-            prompt_sha256="p" * 64,
-            bundle_sha256="b" * 64,
-            canonical_prompt_sha256="c" * 64,
+            prompt_sha256=begun.execution.stored_input.prompt_sha256,
+            bundle_sha256=begun.execution.stored_input.bundle_sha256,
+            canonical_prompt_sha256=begun.execution.stored_input.canonical_prompt_sha256,
             answered_at=LATER,
         )
         cur.execute(
@@ -230,9 +275,9 @@ def test_a_completed_analysis_cannot_be_changed_again(conn):
         store.record_answer(
             begun.execution.analysis_execution_id,
             _answer(),
-            prompt_sha256="p" * 64,
-            bundle_sha256="b" * 64,
-            canonical_prompt_sha256="c" * 64,
+            prompt_sha256=begun.execution.stored_input.prompt_sha256,
+            bundle_sha256=begun.execution.stored_input.bundle_sha256,
+            canonical_prompt_sha256=begun.execution.stored_input.canonical_prompt_sha256,
             answered_at=LATER,
         )
         _move(cur, watch_id, "IN_REANALYSIS", "REARMED", kind="REANALYSIS")

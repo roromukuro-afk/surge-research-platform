@@ -78,6 +78,11 @@ jobs:
             echo "applying $file"
             psql -v ON_ERROR_STOP=1 -f "$file"
           done
+      # The committing tests refuse any database that has not declared itself
+      # disposable. The cloud never carries this setting; a teacher-row count
+      # could not tell the two apart, because production starts at zero too.
+      - name: Declare the database disposable
+        run: psql -v ON_ERROR_STOP=1 -c "alter database surge_ci set surge.disposable_test_database = 'on';"
       # The runtime principal is created by a migration only where Vault exists,
       # so the throwaway database gets its own. The password is generated here
       # and masked: no credential, not even a disposable one, lives in the repo.

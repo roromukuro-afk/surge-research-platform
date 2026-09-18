@@ -18,6 +18,7 @@ from decimal import Decimal
 
 import pytest
 
+from surge.analysis.bundle import sha256_text  # noqa: E402
 from surge.analysis.entry_analysis import (
     DeterministicIntradayStandIn,
     EntryAnalysisResponse,
@@ -49,7 +50,8 @@ from surge.jobs.entry_analysis_job import EntryAnalysisJob
 CUTOFF = datetime(2026, 9, 17, 2, 15, tzinfo=UTC)
 COMPLETED = datetime(2026, 9, 17, 2, 16, tzinfo=UTC)
 LATER = datetime(2026, 9, 17, 2, 17, tzinfo=UTC)
-CANONICAL = "0" * 64
+CANONICAL_TEXT = "CANONICAL"
+CANONICAL = sha256_text(CANONICAL_TEXT)
 TRIGGER = 4242
 
 
@@ -204,7 +206,7 @@ def test_an_execution_store_needs_the_trigger_it_is_answering():
 def test_without_a_store_the_job_says_the_move_is_not_durable():
     """The claim that was false is now a note rather than a docstring."""
 
-    decision = _run(EntryAnalysisJob(provider=_Provider(), canonical_text="C"), _watch())
+    decision = _run(EntryAnalysisJob(provider=_Provider(), canonical_text="CANONICAL"), _watch())
 
     assert any("in memory only" in note for note in decision.notes)
     assert decision.analysis_execution_id is None
@@ -397,7 +399,7 @@ def test_a_stand_in_records_a_failed_execution_and_no_attempt():
     store = InMemoryExecutionStore()
     watch = _watch()
     job = EntryAnalysisJob(
-        provider=DeterministicIntradayStandIn(), canonical_text="C", executions=store
+        provider=DeterministicIntradayStandIn(), canonical_text="CANONICAL", executions=store
     )
 
     decision = _run(job, watch)

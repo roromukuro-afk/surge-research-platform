@@ -286,6 +286,22 @@ class EntryAnalysisProvider(Protocol):
 # --------------------------------------------------------------- the prompt
 
 
+def canonical_decimal(value: Decimal) -> str:
+    """A number as the prompt shows it, independent of the Decimal's scale.
+
+    ``Decimal("3000")`` and ``Decimal("3000.000000")`` are the same limit, and a
+    number that has been through ``numeric(18, 6)`` comes back as the second.
+    Interpolated as-is, the two render differently - so a prompt rebuilt from a
+    stored input would never hash to the prompt that was sent, and every resumed
+    analysis would fail its reconstruction check for a reason that has nothing
+    to do with its input having changed. The reconstruction check is what found
+    this.
+    """
+
+    text = format(value.normalize(), "f")
+    return "0" if text in ("-0", "") else text
+
+
 def render_entry_prompt(
     bundle: IntradayBundle,
     canonical_text: str,
@@ -325,7 +341,8 @@ def render_entry_prompt(
             "If you return ENTRY you must also return proposed_initial_failure_line: the price at "
             "which this entry's thesis is wrong. It is fixed permanently at prediction time and "
             "must be below the price you judged against.",
-            f"A security whose price is above {price_limit_jpy} JPY is out of scope. You are not "
+            f"A security whose price is above {canonical_decimal(price_limit_jpy)} JPY is out of "
+            "scope. You are not "
             "the authority on this: the system re-checks it and will refuse the entry regardless "
             "of what you return.",
             "The +20% threshold is arithmetic on the entry price. It is not a target you choose "

@@ -28,6 +28,7 @@ from datetime import date, datetime
 from surge.analysis.bundle import sha256_text
 from surge.analysis.entry_analysis import (
     PRICE_LIMIT_JPY,
+    EntryContractError,
     EntryGuardFacts,
     IntradayBundle,
     render_entry_prompt,
@@ -38,6 +39,75 @@ from surge.entry.models import ObservedPrice, UniverseVerdict
 
 class InputReconstructionError(RuntimeError):
     """The stored input no longer rebuilds into the prompt that was sent."""
+
+
+class InputInconsistencyError(EntryContractError):
+    """The input disagrees with itself, so it may not be sent or stored.
+
+    Raised before TX1, so nothing is written and the trigger stays unanswered.
+    That is the right outcome for what is a caller's fault: an execution row
+    whose stored input contradicts itself would be a durable record of a request
+    nobody could have meant.
+    """
+
+
+def assert_input_is_consistent(
+    *,
+    bundle: IntradayBundle,
+    facts: EntryGuardFacts,
+    canonical_text: str,
+    addenda_texts: tuple[str, ...] = (),
+) -> None:
+    """The bundle's claims about itself, checked against what will be sent.
+
+    The bundle carries the canonical and addenda hashes as *declarations*. The
+    prompt is rendered from the texts the runner holds. If the two disagree, the
+    stored record would say one method was sent while another one was - and the
+    prompt hash cannot catch it on a fresh run, because it is computed from the
+    same caller-supplied bundle and so trivially matches itself. Only comparing
+    the declaration with the thing declared does.
+
+    What only the database can check - that the bundle is about the watch's own
+    security - is checked there, in ``prod.begin_entry_analysis``.
+    """
+
+    problems: list[str] = []
+
+    if bundle.decision_cutoff_at != facts.decision_cutoff_at:
+        problems.append(
+            f"the bundle was assembled for cutoff {bundle.decision_cutoff_at.isoformat()} and the "
+            f"guard facts are for {facts.decision_cutoff_at.isoformat()}"
+        )
+
+    actual_canonical = sha256_text(canonical_text)
+    if actual_canonical != bundle.canonical_prompt_sha256:
+        problems.append(
+            f"the bundle declares canonical {bundle.canonical_prompt_sha256} and the text that "
+            f"would be sent hashes to {actual_canonical}"
+        )
+
+    # Ordered, because order is meaning here: a newer addendum overrides an
+    # older one, and the prompt renders them in exactly this order.
+    actual_addenda = [sha256_text(text) for text in addenda_texts]
+    if actual_addenda != list(bundle.addenda_sha256):
+        problems.append(
+            f"the bundle declares addenda {list(bundle.addenda_sha256)} and the texts that would "
+            f"be sent hash to {actual_addenda}"
+        )
+
+    price = facts.decision_price
+    if price is not None and price.observed_at > facts.decision_cutoff_at:
+        problems.append(
+            f"the decision price was observed at {price.observed_at.isoformat()}, after the cutoff "
+            f"{facts.decision_cutoff_at.isoformat()}; the model would be shown a price from after "
+            "the moment it is deciding at"
+        )
+
+    if problems:
+        raise InputInconsistencyError(
+            "the input to this analysis contradicts itself, so it is neither sent nor recorded: "
+            + "; ".join(problems)
+        )
 
 
 def build_stored_input(
@@ -60,6 +130,12 @@ def build_stored_input(
     could re-examine.
     """
 
+    assert_input_is_consistent(
+        bundle=bundle,
+        facts=facts,
+        canonical_text=canonical_text,
+        addenda_texts=tuple(addenda_texts),
+    )
     prompt = render_entry_prompt(
         bundle, canonical_text, addenda_texts, price_limit_jpy=facts.price_limit_jpy
     )
@@ -166,6 +242,24 @@ def reconstruct(
 
     bundle = rebuild_bundle(stored)
     facts = rebuild_facts(stored)
+
+    # Named separately from the prompt hash so that the commonest cause - the
+    # canonical file or an addendum changed since the analysis started - says
+    # so, instead of surfacing as an opaque digest mismatch.
+    actual_canonical = sha256_text(canonical_text)
+    if actual_canonical != stored.canonical_prompt_sha256:
+        raise InputReconstructionError(
+            f"the canonical text has changed since this analysis started: it was "
+            f"{stored.canonical_prompt_sha256} and is now {actual_canonical}. Resuming would "
+            "answer under a method the analysis was never given"
+        )
+    actual_addenda = tuple(sha256_text(text) for text in addenda_texts)
+    if actual_addenda != tuple(stored.addenda_sha256):
+        raise InputReconstructionError(
+            f"the addenda have changed since this analysis started: they were "
+            f"{list(stored.addenda_sha256)} and are now {list(actual_addenda)}"
+        )
+
     prompt = render_entry_prompt(
         bundle, canonical_text, addenda_texts, price_limit_jpy=facts.price_limit_jpy
     )
@@ -190,7 +284,9 @@ def reconstruct(
 
 
 __all__ = [
+    "InputInconsistencyError",
     "InputReconstructionError",
+    "assert_input_is_consistent",
     "Reconstruction",
     "build_stored_input",
     "rebuild_bundle",

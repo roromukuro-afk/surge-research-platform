@@ -397,6 +397,10 @@ class ProductionEntryAnalysis:
                 prompt_sha256=request.prompt_sha256,
                 bundle_sha256=bundle.bundle_sha256,
                 canonical_prompt_sha256=bundle.canonical_prompt_sha256,
+                # When the model replied, by this runner's clock. Separate from
+                # decision_completed_at on purpose: this is the reply arriving,
+                # not the system accepting it.
+                answered_at=self._now(),
             )
             self.conn.commit()
         except Exception:
