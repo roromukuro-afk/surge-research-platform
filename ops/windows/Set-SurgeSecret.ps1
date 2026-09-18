@@ -41,8 +41,8 @@
 param(
     [Parameter(Mandatory)]
     [ValidateSet(
-        "GROQ_API_KEY", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY",
-        "GROQ_MODEL", "GROQ_ZDR_CONFIRMED_ON"
+        "GROQ_API_KEY", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "TYPESAFE_API_KEY",
+        "AI_GATEWAY_API_KEY", "GROQ_MODEL", "GROQ_ZDR_CONFIRMED_ON"
     )]
     [string] $Name,
 
@@ -53,7 +53,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Secrets = @("GROQ_API_KEY", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY")
+$Secrets = @("GROQ_API_KEY", "APCA_API_KEY_ID", "APCA_API_SECRET_KEY", "TYPESAFE_API_KEY", "AI_GATEWAY_API_KEY")
 
 # The shape each value is documented to have. Checked so that pasting the wrong
 # thing - a model id, an old key, half a key - fails now instead of at the first
@@ -62,6 +62,11 @@ $Shapes = @{
     "GROQ_API_KEY"          = '^gsk_[A-Za-z0-9]{20,}$'
     "APCA_API_KEY_ID"       = '^[A-Z0-9]{16,}$'
     "APCA_API_SECRET_KEY"   = '^[A-Za-z0-9/+]{30,}$'
+    # TypeSafe does not document a key format; this only refuses the obvious
+    # wrong pastes (whitespace, a URL, half a sentence).
+    "TYPESAFE_API_KEY"      = '^[A-Za-z0-9_.\-]{20,200}$'
+    # Vercel AI Gateway does not document a key format either; same minimal check.
+    "AI_GATEWAY_API_KEY"    = '^[A-Za-z0-9_.\-]{20,200}$'
     "GROQ_MODEL"            = '^[a-z0-9][a-z0-9._/-]{2,80}$'
     "GROQ_ZDR_CONFIRMED_ON" = '^\d{4}-\d{2}-\d{2}$'
 }

@@ -1,0 +1,8 @@
+{
+  "name": "jev-gateway-runner",
+  "private": true,
+  "type": "module",
+  "description": "One Jev evaluation through Vercel AI Gateway (experimental_evaluate). Used by python -m surge.jobs.jev_smoke gateway-send.",
+  "engines": { "node": ">=22.18" },
+  "dependencies": { "ai": "7.0.106" }
+}
