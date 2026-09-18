@@ -1,6 +1,6 @@
 # Jev 予測性能評価 設計
 
-状態: **v1.0（ユーザー確定 2026-09-18）** — Phase A は preflight まで実装・実行済み、**Jev への送信は未実行**（ユーザー承認待ち）
+状態: **v1.1（ユーザー確定 2026-09-18、Phase A の規模と送信間隔は D-274 で変更）** — Phase A は縮小 run（24 request、5 分間隔）で end-to-end 検証中
 前提: [D-267](../unresolved-decisions.md) EOD Prediction 規則（S0 確定終値・目標 ×1.20・S1 から評価・T+1/3/5/10/20・期限 T+20）/ D-269（Vercel AI Gateway 経由の Jev は技術的に適合、production default ではない）/ D-268（+20% 到達の判定基準は未決）/ D-270（本設計の確定）
 
 ## 0. 目的と範囲
@@ -16,7 +16,7 @@ Jev の training cutoff を信頼できる形で確定できず、過去の outc
 | | Phase A: retrospective pilot | Phase B: prospective evaluation |
 |---|---|---|
 | S0 | 2025-01-01〜2026-06-30 から point-in-time に抽出 | **2026-09-21 以降**に新しく発生する候補（shadow prediction） |
-| 件数 | **100 件まで** | **1,500〜2,000 件** |
+| 件数 | **main 20（Primary 15 / Control 5）+ 匿名化 2 + drift 2 = 24 request**（正式な母集団 75 / 25 から固定 seed で縮小、D-274。当初は 100 件） | **1,500〜2,000 件** |
 | 目的 | state 再構築・screening replay・Jev request・outcome 計算・report 生成・schema / hash / provenance・API cost accounting の検証**だけ** | **Jev の正式な性能判断** |
 | 成績の扱い | **採用判断に使わない** | T+20 まで追跡して評価 |
 
@@ -77,7 +77,7 @@ Jev の training cutoff を信頼できる形で確定できず、過去の outc
 
 ## 8. API 予算
 
-- **Phase A**: 予測 100 件まで（+ 匿名化 約 10 件・drift 約 5 件）。
+- **Phase A**: 24 request（main 20 + 匿名化 2 + drift 2、D-274）、hard budget **$0.05**、5 分間隔。（当初は 100 件 + 匿名化 約 10 件・drift 約 5 件、hard budget $0.20）
 - **Phase B**: 1,500〜2,000 件。
 - 現在の実測 Gateway cost（1 件 ≈ $0.00092、D-269）を基準に、**run ごとに hard budget**（金額と件数）を設定し、超える前に止める。
 - **Vercel AI Gateway の無料 $5 credit を超える実行はしない。** paid credit の購入・auto-reload はしない（Auto-reload は Off を確認済み）。実行前に Gateway の残高を確認する。
@@ -127,13 +127,14 @@ API を送る直前まで（`preflight`）を実装・テストし、そこで�
 - **Canonical / addenda** は `docs/prompts/MANIFEST.md` と SHA-256 を照合し、addenda は**登録順**（古い → 新しい）で送る。ファイル名順だと `v5.1-addendum-2026-09-15.md` が、後から登録されそれを改める phase0.x の後ろに来る。登録されていない addendum があれば止める。plan の後に Canonical / addenda が変わった run は build / preflight / run を拒否する。
 - **S0** は月 2 日（seed 付き）。取引暦は、抽出した銘柄の 30% 以上に足がある日（暦を推測しない、D-142）。S0 の後に 20 セッションが既にある日だけ。
 - **Control** は、同じ S0 の非通過銘柄から、価格帯（0–500 / 500–1000 / 1000–2000 / 2000–3000 円）→ 流動性帯（その S0 の適格銘柄の 20 日平均売買代金の四分位）の順に近いもの。
+- **Phase A の縮小（D-274）**: 正式な母集団（Primary 75 / Control 25 と匿名化 10・drift 5 の指定）を従来どおり引いて `population_full.jsonl` に残し、そこから `reduce_population` で Primary 15 / Control 5 を cohort ごとに固定 seed （`<seed>/phase-a-evaluated`）で選ぶ。読むのは cohort と sample id だけで、outcome・価格・回答は読まない。匿名化 2・drift 2 も同じ seed で選んだ 20 件から、互いに重ならないよう選び直す。評価するのは `population.jsonl` の 20 件。
 - **開示タイトル**は Yanoshin の銘柄別 index（その銘柄の行だけ）から、cutoff（S0 の翌日 0:00 JST）の **30 分以上前**に公表された、60 日以内のもの。index の行は TDnet の公表時刻であって、システムが知り得た時刻ではない（CLAUDE.md 1-7）ので余裕を取る。
 - **匿名化**: `security.code` / `security.name` を `[CODE]` / `[COMPANY]` に置き換え、タイトル中の企業名（株式会社・ホールディングス等を除いた形も含む）と、単独のトークンとしてのコード（半角・全角）を置き換える。数値の中の同じ数字列（例: 13,015 百万円の 1301）は置き換えない。
 - **予算**: 1 件の見積もり = o200k tokens × 1.35（smoke の実測比は 1.23）× $0.042/M。支出は Gateway が報告した `cost`、報告の無い request（エラー等）は見積もり額で計上する。送る前に毎回「支出 + 次の見積もり ≤ 予算」と件数上限を確認する。予算は $5 以下かつ Gateway の残高以下。Jev の 32K context を見積もりで超える request は送らない。
 - **outcome の固定**: `freeze-outcomes` は応答が 1 件でもあれば拒否する。`run` は freeze と、同じ予算で `ready_to_send` になった最新の preflight が無ければ拒否する。preflight は各 outcome を再計算して固定値と一致することも確かめる。
 - **1 件でも次のどれかが出たら `run` はその時点で止まる**（ユーザー指示 2026-09-18、再試行しない）: Gateway error / schema incomplete / 予算の異常（報告されない cost、見積もりを超える cost、見積もりを超える input tokens、予算・件数の上限）/ request の hash 不一致（送る直前にファイルを照合）/ 想定外の model（`typesafe-ai/jev` 以外）・provider（`typesafe-ai` 以外）/ integrity violation（stage ファイルの照合失敗）。止まった run は `run-stopped-<n>.json` を残し、**再開しない**（見直してから新しい run にする）。
 - 全件の後に Gateway の残高をもう一度読み、`stage-run.json` に送信前後の残高を残す。
-- **送信の間隔（D-273）**: Gateway の free tier は `typesafe-ai/jev` を rate limit する（`-03` で 5 件成功後の 6 件目が 429）。送信は**最短 15 秒間隔かつ任意の 60 秒に最大 4 件**（`surge.evaluation.pacing.Pacer`、rolling window の guard。超えそうなら待ち、超えたら例外）。各応答に `pacing`（request 時刻・runner 側の開始時刻・直前の成功時刻・rolling 60 秒の件数・待った秒数・方針）と `http`（status・error 名と type・Retry-After（無ければ null）・応答 header）を残す。runner は Gateway の error から応答側だけを写し、request 本文（`cause.requestBodyValues`）と API key は記録しない（`ops/jev-gateway-runner/describe-error.mjs`、`node check-describe.mjs` で offline に確認できる）。
+- **送信の間隔（D-273 → D-274）**: Gateway の free tier は `typesafe-ai/jev` を rate limit する。5 件連続の後の 6 件目で 429 を 2 回再現し（約 2.2 秒間隔の `-03`、15 秒間隔かつ 60 秒に最大 4 件の `-04`）、窓の大きさは docs からも応答 header からも分からない。Phase A は**5 分間隔**で送り、guard は任意の 20 分に最大 4 件（`surge.evaluation.pacing.Pacer`。超えそうなら待ち、超えたら例外）。各応答に `pacing`（request 時刻・runner 側の開始時刻・直前の成功時刻・rolling 60 秒の件数・方針の窓の件数・待った秒数・方針）と `http`（status・error 名と type・Retry-After（無ければ null）・応答 header）を残す。runner は Gateway の error から応答側だけを写し、request 本文（`cause.requestBodyValues`）と API key は記録しない（`ops/jev-gateway-runner/describe-error.mjs`、`node check-describe.mjs` で offline に確認できる）。rate limit の境界はこれ以上探索しない。
 
 ### 9-3c. run ディレクトリ
 

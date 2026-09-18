@@ -335,9 +335,31 @@ def pipeline_summary(predictions: list[dict], outcomes: list[dict], *, planned: 
     }
 
 
+def answers_summary(rows: list[dict]) -> dict:
+    """What the answers look like, per cohort - counts and ranges, not a performance figure."""
+
+    def spread(key: str) -> dict:
+        values = sorted(r[key] for r in rows if r[key] is not None)
+        return {"n": len(values), "min": values[0] if values else None, "median": _median(values),
+                "max": values[-1] if values else None}
+
+    return {
+        "n": len(rows),
+        "decision_counts": {choice: sum(r["decision"] == choice for r in rows) for choice in DECISIONS},
+        "reaches_target": spread("reaches_target"),
+        "upside_score": spread("upside_score"),
+        "decision_confidence": spread("decision_confidence"),
+    }
+
+
 def build_report(manifest: dict, predictions: list[dict], outcomes: list[dict], *, planned: int,
                  budget: dict) -> dict:
-    """``predictions``: every variant. The evaluation reads main answers joined to RESOLVED outcomes only."""
+    """``predictions``: every variant. The evaluation reads main answers joined to RESOLVED outcomes only.
+
+    With few samples some numbers are undefined - no positives leave PR-AUC and
+    Brier skill undefined, fewer than three pairs leave a rank correlation
+    undefined - and they are reported as null, never filled in.
+    """
 
     by_sample = {o["sample_id"]: o for o in outcomes}
     main = [p for p in predictions if p["variant"] == "main"]
@@ -350,6 +372,16 @@ def build_report(manifest: dict, predictions: list[dict], outcomes: list[dict], 
     control = [r for r in joined if r["cohort"] == "CONTROL"]
     anonymized = paired_rows(main, [p for p in predictions if p["variant"] == "anonymized"])
     drift = paired_rows(main, [p for p in predictions if p["variant"] == "drift"])
+    pipeline = pipeline_summary(predictions, outcomes, planned=planned, budget=budget)
+    pipeline["outcome_join"] = {
+        "main_predictions": len(main),
+        "complete": sum(p["complete"] for p in main),
+        "joined_to_resolved_outcome": len(joined),
+        "without_outcome": sorted(p["sample_id"] for p in main if p["sample_id"] not in by_sample),
+        "outcome_not_resolved": sorted(p["sample_id"] for p in main if p["sample_id"] in by_sample
+                                       and by_sample[p["sample_id"]]["resolution"] != "RESOLVED"),
+        "by_cohort": {"PRIMARY": len(primary), "CONTROL": len(control)},
+    }
     return {
         "report_version": REPORT_VERSION,
         "run_id": manifest["run_id"],
@@ -357,7 +389,9 @@ def build_report(manifest: dict, predictions: list[dict], outcomes: list[dict], 
         "banner": PHASE_A_BANNER if manifest["phase"] == "A" else None,
         "model": manifest["model"],
         "outcome_label_status": "neither +20% definition is the label (D-268); not merged with success_label",
-        "pipeline": pipeline_summary(predictions, outcomes, planned=planned, budget=budget),
+        "undefined_values": "null (in markdown '-') where a statistic is undefined for these samples",
+        "pipeline": pipeline,
+        "answers": {"PRIMARY": answers_summary(primary), "CONTROL": answers_summary(control)},
         "primary": primary_metrics(primary),
         "control_benchmark": control_benchmark(control, primary),
         "anonymized_sensitivity": paired_summary(anonymized),
@@ -397,8 +431,21 @@ def render_markdown(report: dict) -> str:
         f"- latency: p50 {_fmt(lat['p50'])} s, p90 {_fmt(lat['p90'])} s, max {_fmt(lat['max'])} s",
         f"- served: {', '.join(pipe['served_models']) or '-'} via {', '.join(pipe['resolved_providers']) or '-'}",
         f"- outcomes: {json.dumps(pipe['outcomes'])}",
+        f"- outcome join: {json.dumps(pipe['outcome_join'])}",
         "",
+        "Values that are undefined for these samples are shown as '-'.",
+        "",
+        "## Answers (distribution only)",
+        "",
+        "| cohort | n | decisions | reaches_target min / median / max | upside score min / median / max |",
+        "|---|---|---|---|---|",
     ]
+    for cohort, a in report["answers"].items():
+        rt, us = a["reaches_target"], a["upside_score"]
+        decisions = ", ".join(f"{k} {v}" for k, v in a["decision_counts"].items() if v)
+        lines.append(f"| {cohort} | {a['n']} | {decisions or '-'} | {_fmt(rt['min'])} / {_fmt(rt['median'])} / "
+                     f"{_fmt(rt['max'])} | {_fmt(us['min'])} / {_fmt(us['median'])} / {_fmt(us['max'])} |")
+    lines.append("")
     primary = report["primary"]
     lines += ["## Primary", "", f"n = {primary['n']}", ""]
     if primary["n"]:
@@ -436,6 +483,7 @@ def render_markdown(report: dict) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["BASIS_KEYS", "HIT_DEFINITIONS", "PHASE_A_BANNER", "REPORT_VERSION", "average_precision", "brier",
-           "build_report", "by_decision", "calibration", "control_benchmark", "paired_rows", "paired_summary",
-           "pipeline_summary", "prediction_row", "primary_metrics", "render_markdown", "spearman"]
+__all__ = ["BASIS_KEYS", "HIT_DEFINITIONS", "PHASE_A_BANNER", "REPORT_VERSION", "answers_summary",
+           "average_precision", "brier", "build_report", "by_decision", "calibration", "control_benchmark",
+           "paired_rows", "paired_summary", "pipeline_summary", "prediction_row", "primary_metrics", "render_markdown",
+           "spearman"]

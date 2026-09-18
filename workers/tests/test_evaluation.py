@@ -32,6 +32,7 @@ from surge.evaluation.population import (
     draw_population,
     liquidity_bands,
     price_band,
+    reduce_population,
     screen,
 )
 from surge.evaluation.prices import PriceHistoryError, history_from_chart, trading_sessions
@@ -288,6 +289,26 @@ def _population_inputs():
     }
     issues = {c: ListedIssue(c, f"会社{c}", "PRIME", "情報・通信業", "TOPIX Small 1") for c in closes}
     return screens, issues, sessions
+
+
+def test_the_evaluated_subset_is_seeded_by_cohort_and_id_only():
+    screens, issues, sessions = _population_inputs()
+    full = draw_population(screens, issues, sessions, primary=12, control=4, anonymized=2, drift=1, seed=9)
+    small = reduce_population(full, primary=5, control=2, anonymized=2, drift=2, seed="9/phase-a-evaluated")
+    assert (sum(s.cohort == "PRIMARY" for s in small), sum(s.cohort == "CONTROL" for s in small)) == (5, 2)
+    by_id = {s.sample_id: s for s in full}
+    for s in small:  # the same samples, only the sensitivity flags drawn again
+        assert replace(s, anonymized_pair=False, drift_repeat=False) == replace(
+            by_id[s.sample_id], anonymized_pair=False, drift_repeat=False)
+    anonymized = {s.sample_id for s in small if s.anonymized_pair}
+    drift = {s.sample_id for s in small if s.drift_repeat}
+    assert len(anonymized) == 2 and len(drift) == 2 and not anonymized & drift
+    order = [s.sample_id for s in full]
+    assert [s.sample_id for s in small] == [i for i in order if i in {s.sample_id for s in small}]
+    assert reduce_population(full, primary=5, control=2, anonymized=2, drift=2,
+                             seed="9/phase-a-evaluated") == small  # deterministic
+    with pytest.raises(ValueError, match="CONTROL"):
+        reduce_population(full, primary=5, control=5, anonymized=0, drift=0, seed="x")
 
 
 def test_the_population_is_primary_and_matched_control_spaced_and_seeded():
@@ -635,6 +656,25 @@ def _outcome_row(sample_id, hit_high, hit_close, resolution="RESOLVED", upside=0
             "max_drawdown_low": -0.05}
 
 
+def test_undefined_statistics_stay_null_with_few_samples():
+    predictions = [_row("p1", "PRIMARY", "main", _gateway_raw("REJECT", 0.1, 0.5)),
+                   _row("p2", "PRIMARY", "main", _gateway_raw("WATCH_BREAKOUT", 0.3, 1.0)),
+                   _row("c1", "CONTROL", "main", _gateway_raw("REJECT", 0.2, 0.8))]
+    outcomes = [_outcome_row("p1", False, False), _outcome_row("p2", False, False), _outcome_row("c1", False, False)]
+    result = report.build_report({"run_id": "t", "phase": "A", "model": "typesafe-ai/jev"}, predictions, outcomes,
+                                 planned=3, budget={"max_usd": "0.05", "max_requests": 3})
+    high = result["primary"]["hit_20_high"]
+    assert high["positives"] == 0 and high["pr_auc_average_precision"] is None and high["brier_skill"] is None
+    assert result["primary"]["score_vs_future_return_spearman"]["upside_score_vs_ret_t20"] is None  # n < 3
+    assert result["primary"]["by_decision"]["ENTRY"] == {
+        "n": 0, "hit_20_high_rate": None, "hit_20_close_rate": None, "mean_ret_t20": None,
+        "median_max_upside_high": None, "median_max_drawdown_low": None}
+    assert result["anonymized_sensitivity"]["n"] == 0 and result["anonymized_sensitivity"]["decision_change_rate"] is None
+    assert result["pipeline"]["outcome_join"]["joined_to_resolved_outcome"] == 3
+    json.dumps(result)
+    assert "| hit_20_high | 0 | 0.000 |" in report.render_markdown(result)
+
+
 def test_the_report_keeps_the_cohorts_apart_and_says_phase_a_is_not_for_adoption():
     predictions = [
         _row("p1", "PRIMARY", "main", _gateway_raw("ENTRY", 0.8, 3.0)),
@@ -751,13 +791,17 @@ def planned_run(tmp_path, monkeypatch):
         return replace(verdict, passed=False, routes=[], route_evidence={})
 
     monkeypatch.setattr(jev_eval, "screen", screen_with_known_passes)
+    # An official population of 8, of which a seeded 4 are evaluated (the Phase A shape, D-274).
     monkeypatch.setitem(jev_eval.PHASES, "A", {**jev_eval.PHASES["A"], "primary": 6, "control": 2,
-                                                "anonymized": 1, "drift": 1})
+                                                "anonymized": 1, "drift": 1,
+                                                "evaluated": {"primary": 3, "control": 1, "anonymized": 1,
+                                                              "drift": 1}})
     monkeypatch.setattr(jev_eval, "_o200k", lambda text: len(text) // 3)
     store = RunStore(tmp_path, "t1")
     summary = jev_eval.plan(store, seed=7, symbols=8, now=NOW, yahoo=_FakeYahoo(charts),
                             fetch_issues=lambda: (issues, "f" * 64), sleep=lambda _s: None)
-    assert summary["samples"] == {"PRIMARY": 6, "CONTROL": 2}
+    assert summary["official_samples"] == {"PRIMARY": 6, "CONTROL": 2}
+    assert summary["samples"] == {"PRIMARY": 3, "CONTROL": 1}
     return store
 
 
@@ -770,9 +814,14 @@ def test_plan_build_freeze_and_preflight_offline(planned_run):
         assert manifest[key], key
     assert manifest["storage"] == {"database_writes": "none", "teacher_admissible": False}
     assert manifest["population_definition"]["cohorts_pooled"] is False
+    full = store.read_jsonl("population_full.jsonl")
+    evaluated = store.read_jsonl("population.jsonl")
+    assert (len(full), len(evaluated)) == (8, 4)
+    assert {r["sample_id"] for r in evaluated} <= {r["sample_id"] for r in full}
+    assert manifest["population_definition"]["evaluated"]["seed"] == "7/phase-a-evaluated"
 
     built = jev_eval.build(store, yanoshin=_FakeYanoshin())
-    assert built["by_variant"] == {"main": 8, "anonymized": 1, "drift": 1}
+    assert built["by_variant"] == {"main": 4, "anonymized": 1, "drift": 1}
     requests = store.read_jsonl("requests.jsonl")
     for row in requests:
         body = json.loads((store.path / row["file"]).read_bytes())
@@ -783,21 +832,21 @@ def test_plan_build_freeze_and_preflight_offline(planned_run):
                                    if r["sample_id"] == drift["sample_id"] and r["variant"] == "main")
 
     frozen = jev_eval.freeze_outcomes(store)
-    assert frozen["resolution"]["RESOLVED"] == 8
+    assert frozen["resolution"]["RESOLVED"] == 4
     assert all(row["teacher_admissible"] is False for row in store.read_jsonl("outcomes.jsonl"))
     with pytest.raises(StoreError):
         jev_eval.freeze_outcomes(store)
 
     checked = jev_eval.preflight(store, budget=Budget(Decimal("0.05"), 10), runner=None)
     assert checked["leakage_and_integrity"]["violations"] == {}
-    assert checked["requests_total"] == 10
+    assert checked["requests_total"] == 6
     assert checked["budget_problems"] == ["the Gateway credit balance has not been read"]
     assert checked["ready_to_send"] is False
     with pytest.raises(jev_eval.EvaluationError, match="not ready"):
         jev_eval.run(store, budget=Budget(Decimal("0.05"), 10), runner=Path("runner.mjs"))
 
 
-BUDGET = Budget(Decimal("0.05"), 10)
+BUDGET = Budget(Decimal("0.05"), 6)
 
 
 class _FakeTime:
@@ -826,7 +875,7 @@ def test_the_pacer_keeps_15_seconds_apart_and_4_per_rolling_minute():
     for _ in range(10):
         waits.append(pacer.wait())
         counts.append(pacer.mark_sent())
-    assert waits == [0.0] + [15.0] * 9
+    assert waits == [0.0] + [300.0] * 9  # one request every 5 minutes
     assert max(counts) == 4 and counts[:4] == [1, 2, 3, 4]
 
     # The rolling window holds even when the interval alone would not.
@@ -834,9 +883,9 @@ def test_the_pacer_keeps_15_seconds_apart_and_4_per_rolling_minute():
     for _ in range(4):
         assert burst.wait() == 0.0
         burst.mark_sent()
-    assert burst.delay() == 60.0  # the 5th waits until the 1st is a minute old
+    assert burst.delay() == 1200.0  # the 5th waits until the 1st is 20 minutes old
     burst.wait()
-    assert burst.mark_sent() == 1  # the burst sent at one instant is now a minute old
+    assert burst.mark_sent() == 1  # the burst sent at one instant is now 20 minutes old
 
     unguarded = Pacer(min_interval=0.0, clock=lambda: 0.0, sleep=lambda s: None)
     for _ in range(4):
@@ -851,13 +900,14 @@ def test_every_answer_records_its_pacing_and_http_facts(ready_run, monkeypatch):
     jev_eval.run(store, budget=BUDGET, pacer=_pacer())
     records = sorted((store.read_json(f"responses/{p.name}") for p in (store.path / "responses").glob("*.json")
                       if not p.name.endswith(".raw.json")), key=lambda r: r["pacing"]["requested_at"])
-    assert len(records) == 10
-    assert [r["pacing"]["waited_seconds"] for r in records] == [0.0] + [15.0] * 9
-    assert max(r["pacing"]["requests_in_rolling_60s"] for r in records) == 4
+    assert len(records) == 6
+    assert [r["pacing"]["waited_seconds"] for r in records] == [0.0] + [300.0] * 5
+    assert max(r["pacing"]["requests_in_policy_window"] for r in records) == 4
+    assert all(r["pacing"]["requests_in_rolling_60s"] == 1 for r in records)
     assert records[0]["pacing"]["previous_success_at"] is None
     assert records[1]["pacing"]["previous_success_at"] == records[0]["pacing"]["requested_at"]
     assert all(r["http"]["status"] == 200 and r["http"]["retry_after"] is None for r in records)
-    assert store.read_json("stage-run.json")["max_requests_in_rolling_60s"] == 4
+    assert store.read_json("stage-run.json")["max_requests_in_policy_window"] == 4
 
 
 def test_a_429_is_recorded_with_its_headers_and_stops_the_run(ready_run, monkeypatch):
@@ -878,7 +928,8 @@ def test_a_429_is_recorded_with_its_headers_and_stops_the_run(ready_run, monkeyp
     last = stop["last_request"]
     assert last["http"] == {"status": 429, "error_name": "GatewayRateLimitError", "error_type": "rate_limit_exceeded",
                             "retry_after": "30", "response_headers": {"Retry-After": "30", "x-vercel-id": "hnd1::test"}}
-    assert last["pacing"]["requests_in_rolling_60s"] == 3
+    assert last["pacing"]["requests_in_policy_window"] == 3
+    assert last["pacing"]["requests_in_rolling_60s"] == 1
     assert last["pacing"]["previous_success_at"] is not None
     assert last["pacing"]["runner_started_at"] == "2026-09-18T10:00:30.000Z"
     assert "REQUEST" not in json.dumps(stop)  # nothing of the request body
@@ -932,17 +983,19 @@ def test_run_and_report_offline_inside_the_budget(ready_run, monkeypatch):
 
     sent = _fake_gateway(monkeypatch)
     summary = jev_eval.run(store, budget=BUDGET, pacer=_pacer())
-    assert summary["stopped"] is None and summary["requests_answered"] == 10 and len(sent) == 10
+    assert summary["stopped"] is None and summary["requests_answered"] == 6 and len(sent) == 6
     assert summary["credits_after"] == {"balance": "4.99", "total_used": "0.01"}
     assert store.exists("predictions.parquet") and store.exists("paired_anonymized.parquet")
     assert store.exists("drift.parquet")
-    assert len(store.read_jsonl("predictions.jsonl")) == 8
+    assert len(store.read_jsonl("predictions.jsonl")) == 4
 
     result = jev_eval.report(store)
     assert result["banner"] == report.PHASE_A_BANNER
-    assert result["pipeline"]["requests"]["sent"] == 10
+    assert result["pipeline"]["requests"]["sent"] == 6
     assert result["pipeline"]["tokens"]["input_p50"] is not None
-    assert result["primary"]["n"] == 6 and result["control_benchmark"]["n"] == 2
+    assert result["primary"]["n"] == 3 and result["control_benchmark"]["n"] == 1
+    assert result["pipeline"]["outcome_join"]["joined_to_resolved_outcome"] == 4
+    assert result["answers"]["PRIMARY"]["n"] == 3 and result["answers"]["CONTROL"]["n"] == 1
     assert result["report_code"]["code_sha256"]
     assert store.exists("report.md")
     for row in store.read_jsonl("predictions.jsonl"):

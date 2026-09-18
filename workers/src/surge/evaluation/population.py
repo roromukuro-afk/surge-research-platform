@@ -221,5 +221,32 @@ def draw_population(
     ]
 
 
+def reduce_population(samples: list[Sample], *, primary: int, control: int, anonymized: int, drift: int,
+                      seed: str) -> list[Sample]:
+    """A seeded subset of a drawn population (D-274): ``primary`` and ``control`` samples, each cohort sampled apart.
+
+    The choice reads nothing but the cohort and the sample id - never an
+    outcome, a price or an answer - so it cannot favour a result. The
+    anonymized and drift subsets are drawn again, disjoint, from the chosen
+    samples; the original flags are cleared. The original order is kept.
+    """
+
+    rng = random.Random(seed)
+    chosen = []
+    for cohort, count in (("PRIMARY", primary), ("CONTROL", control)):
+        pool = sorted((s for s in samples if s.cohort == cohort), key=lambda s: s.sample_id)
+        if len(pool) < count:
+            raise ValueError(f"{len(pool)} {cohort} samples, {count} wanted")
+        chosen += rng.sample(pool, count)
+    ids = sorted(s.sample_id for s in chosen)
+    rng.shuffle(ids)
+    anon_ids, drift_ids = set(ids[:anonymized]), set(ids[anonymized:anonymized + drift])
+    keep = {s.sample_id for s in chosen}
+    return [
+        Sample(**{**asdict(s), "anonymized_pair": s.sample_id in anon_ids, "drift_repeat": s.sample_id in drift_ids})
+        for s in samples if s.sample_id in keep
+    ]
+
+
 __all__ = ["MIN_SPACING_SESSIONS", "PRICE_LIMIT_JPY", "SCREENER_DEFINITION", "Sample", "Screen", "choose_s0_dates",
-           "draw_population", "liquidity_bands", "price_band", "sample_id", "screen"]
+           "draw_population", "liquidity_bands", "price_band", "reduce_population", "sample_id", "screen"]

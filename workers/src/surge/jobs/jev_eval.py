@@ -59,6 +59,7 @@ from surge.evaluation.population import (
     Sample,
     choose_s0_dates,
     draw_population,
+    reduce_population,
     screen,
 )
 from surge.evaluation.prices import (
@@ -97,8 +98,12 @@ EXPECTED_PROVIDER = "typesafe-ai"
 #: 60-session highs need that much behind the earliest S0.
 HISTORY_START = date(2024, 6, 1)
 PHASES = {
+    # The official population is drawn as designed (75 / 25, D-270); Phase A
+    # then evaluates a seeded subset of it (D-274): end-to-end pipeline
+    # verification needs 24 requests, not 115, under the free tier's limit.
     "A": {"s0_start": date(2025, 1, 1), "s0_end": date(2026, 6, 30),
-          "primary": 75, "control": 25, "anonymized": 10, "drift": 5},
+          "primary": 75, "control": 25, "anonymized": 10, "drift": 5,
+          "evaluated": {"primary": 15, "control": 5, "anonymized": 2, "drift": 2}},
 }
 PHASE_A_LIMITATIONS = [
     "screener = Routes A-H (route-1.0.0 on features-1.0.0) replayed point-in-time; material routes M1-M6 and "
@@ -329,10 +334,15 @@ def plan(store: RunStore, *, phase: str = "A", seed: int, symbols: int, per_mont
         screens_by_date, {i.code: i for i in chosen}, sessions, primary=params["primary"],
         control=params["control"], anonymized=params["anonymized"], drift=params["drift"], seed=seed,
     )
+    official = {c: sum(s.cohort == c for s in samples) for c in ("PRIMARY", "CONTROL")}
+    if official["PRIMARY"] < params["primary"] or official["CONTROL"] < params["control"]:
+        raise EvaluationError(f"the population is short: {official} against {params['primary']} / "
+                              f"{params['control']}; plan again with more symbols")
+    full_population = samples
+    reduction_seed = f"{seed}/phase-{phase.lower()}-evaluated"
+    if "evaluated" in params:
+        samples = reduce_population(full_population, seed=reduction_seed, **params["evaluated"])
     counts = {c: sum(s.cohort == c for s in samples) for c in ("PRIMARY", "CONTROL")}
-    if counts["PRIMARY"] < params["primary"] or counts["CONTROL"] < params["control"]:
-        raise EvaluationError(f"the population is short: {counts} against {params['primary']} / {params['control']}; "
-                              "plan again with more symbols")
 
     files: dict[str, str] = {}
     for code, chart in sorted(charts.items()):
@@ -346,6 +356,11 @@ def plan(store: RunStore, *, phase: str = "A", seed: int, symbols: int, per_mont
         "sessions": [d.isoformat() for d in sessions],
     })
     files["screening.parquet"] = store.write_parquet("screening.parquet", screening_rows)
+    if samples is not full_population:
+        # The official population the evaluated subset was drawn from, kept so
+        # the reduction can be checked against it.
+        files["population_full.jsonl"] = store.write_jsonl("population_full.jsonl",
+                                                           [s.row() for s in full_population])
     rows = [s.row() for s in samples]
     files["population.jsonl"] = store.write_jsonl("population.jsonl", rows)
     files["population.parquet"] = store.write_parquet("population.parquet", rows)
@@ -385,6 +400,14 @@ def plan(store: RunStore, *, phase: str = "A", seed: int, symbols: int, per_mont
                        "liquidity band (quartile of 20-day turnover among that S0's eligible)",
             "counts": {"primary": params["primary"], "control": params["control"],
                        "anonymized": params["anonymized"], "drift": params["drift"]},
+            "evaluated": None if samples is full_population else {
+                **params["evaluated"],
+                "rule": "a seeded subset of the official population, each cohort sampled apart by sample id only "
+                        "(no outcome, price or answer is read); anonymized and drift drawn again, disjoint, from "
+                        "the evaluated samples (D-274)",
+                "seed": reduction_seed,
+                "official_population_file": "population_full.jsonl",
+            },
             "min_spacing_sessions": MIN_SPACING_SESSIONS,
             "seed": seed,
             "cohorts_pooled": False,
@@ -398,7 +421,7 @@ def plan(store: RunStore, *, phase: str = "A", seed: int, symbols: int, per_mont
         "symbols": len(chosen), "histories": len(histories), "history_failures": len(failures),
         "sessions": len(sessions), "s0_dates": len(s0_dates), "screens": len(screening_rows),
         "eligible": sum(r["eligible"] for r in screening_rows), "passed": sum(r["passed"] for r in screening_rows),
-        "samples": counts, "anonymized": sum(s.anonymized_pair for s in samples),
+        "official_samples": official, "samples": counts, "anonymized": sum(s.anonymized_pair for s in samples),
         "drift": sum(s.drift_repeat for s in samples),
     }
     _stage(store, "plan", summary, files)
@@ -683,8 +706,8 @@ def _prediction_rows(store: RunStore) -> list[dict]:
 def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER, pacer: Pacer | None = None) -> dict:
     """Send the planned requests - main, then anonymized, then drift - inside the hard budget.
 
-    Paced for the Gateway's free tier (D-273): one request at least every 15
-    seconds, at most four in any rolling 60 seconds. Every answer records when
+    Paced for the Gateway's free tier (D-273, D-274): one request every 5
+    minutes, at most four in any rolling 20 minutes. Every answer records when
     it was requested, the previous successful request and the rolling count,
     and the HTTP facts of a failure.
     """
@@ -745,6 +768,7 @@ def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER, pacer: Pacer 
         waited = pacer.wait()
         requested_at = datetime.now(UTC).isoformat()
         in_window = pacer.mark_sent()
+        in_last_60s = pacer.count_within(60.0)
         max_in_window = max(max_in_window, in_window)
         subprocess.run(["node", str(runner), str(store.path / row["file"]), str(raw_out)], check=False,
                        timeout=300, cwd=str(runner.parent), capture_output=True, text=True)
@@ -755,7 +779,8 @@ def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER, pacer: Pacer 
             "requested_at": requested_at,
             "runner_started_at": result.get("startedAt"),
             "previous_success_at": previous_success_at,
-            "requests_in_rolling_60s": in_window,
+            "requests_in_rolling_60s": in_last_60s,
+            "requests_in_policy_window": in_window,
             "waited_seconds": round(waited, 3),
             "policy": {"min_interval_seconds": pacer.min_interval, "window_seconds": pacer.window,
                        "max_in_window": pacer.max_in_window},
@@ -775,7 +800,7 @@ def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER, pacer: Pacer 
     summary = {"sent_this_time": ledger.requests - (len(requests) - len(pending)), "requests_answered":
                ledger.requests, "spent_usd": str(ledger.spent_usd), "stopped": stopped,
                "estimated_charges": ledger.estimated_charges, "credits_before": credits,
-               "max_requests_in_rolling_60s": max_in_window}
+               "max_requests_in_policy_window": max_in_window}
     if stopped is not None:
         store.write_json(_next_name(store, "run-stopped"), {**summary, "last_request": last})
     elif ledger.requests == len(requests):
