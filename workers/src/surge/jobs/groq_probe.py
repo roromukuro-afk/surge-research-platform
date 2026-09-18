@@ -157,7 +157,7 @@ def probe_model(model: str, *, env=None) -> dict:
 SMOKE_SECURITY = "SYNTHETIC-CONTRACT-SMOKE"
 
 
-def contract_smoke(model: str, *, env=None) -> dict:
+def contract_smoke(model: str, *, env=None, single_attempt: bool = False) -> dict:
     """One real Entry request, end to end, against a synthetic bundle.
 
     The quota probe proves the account answers; it says nothing about whether
@@ -166,23 +166,32 @@ def contract_smoke(model: str, *, env=None) -> dict:
     through the production privacy gate, parsed and schema-checked with the
     bounded retry the JSON_OBJECT path relies on.
 
+    ``single_attempt`` sends the Entry request exactly once: no schema retry and
+    no transport retry on 429/5xx. For a model whose daily token budget is the
+    question, where a retry would spend the budget the answer is about.
+
     The bundle is synthetic and says so, and the answer is used for nothing: it
     is not stored as a prediction, not written to the database, and not a
     teacher input. What is recorded is only whether the contract held.
     """
 
     from datetime import date
+    from functools import partial
 
     from surge.analysis.bundle import sha256_text
     from surge.analysis.entry_analysis import IntradayBundle, render_entry_prompt
     from surge.analysis.llm import LLMRequest
+    from surge.http_fetch import fetch
     from surge.jobs.analysis_feasibility import CANONICAL_PATH, _addenda_texts
 
     source = dict(env if env is not None else os.environ)
     source["GROQ_MODEL"] = model
+    overrides = (
+        {"max_json_object_attempts": 1, "transport": partial(fetch, retries=1)} if single_attempt else {}
+    )
     # PRODUCTION mode, deliberately: this sends the canonical method, so it has
     # to pass the gate a production request passes - ZDR confirmed on.
-    provider = GroqHostedProvider.from_env(source)
+    provider = GroqHostedProvider.from_env(source, **overrides)
     provider.quota_probe()
 
     canonical = CANONICAL_PATH.read_text(encoding="utf-8")
@@ -210,6 +219,7 @@ def contract_smoke(model: str, *, env=None) -> dict:
     return {
         "contract_smoke_passed": True,
         "contract_smoke_at": started.isoformat(),
+        "contract_smoke_single_attempt": single_attempt,
         "contract_smoke_returned_state": response.state.value,
         "contract_smoke_output_mode": provider.output_mode.value,
         "contract_smoke_security": SMOKE_SECURITY,
@@ -236,6 +246,11 @@ def main(argv: list[str] | None = None) -> int:
             "also send one real Entry request with a synthetic bundle, through the production "
             "privacy gate, to check the output contract holds end to end"
         ),
+    )
+    parser.add_argument(
+        "--single-attempt",
+        action="store_true",
+        help="send the Entry request exactly once: no schema retry, no transport retry",
     )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
@@ -272,10 +287,11 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 try:
-                    result.update(contract_smoke(model))
+                    result.update(contract_smoke(model, single_attempt=args.single_attempt))
                 except Exception as exc:  # noqa: BLE001 - recorded, not swallowed
                     failed = True
                     result["contract_smoke_passed"] = False
+                    result["contract_smoke_single_attempt"] = args.single_attempt
                     result["contract_smoke_error"] = describe_failure(exc)
         path = record_path(Path(args.state_dir), model)
         path.parent.mkdir(parents=True, exist_ok=True)

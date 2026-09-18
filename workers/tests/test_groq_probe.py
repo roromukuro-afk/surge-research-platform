@@ -42,3 +42,28 @@ def test_a_single_model_fit_carries_no_compound_caveat(generous_headers):
 
     assert record["entry_request_fits"] is True
     assert "compound" not in record["entry_request_reason"]
+
+
+def test_a_single_attempt_smoke_sends_the_entry_request_once(monkeypatch, generous_headers):
+    """No schema retry and no transport retry: when the daily budget is the
+    question, a retry spends the budget the answer is about."""
+
+    captured = {}
+    real_from_env = GroqHostedProvider.from_env.__func__
+
+    def from_env(cls, env=None, **overrides):
+        captured.update(overrides)
+        return real_from_env(cls, env, **overrides)
+
+    class _Answer:
+        class state:  # noqa: N801 - mimics the enum member's .value
+            value = "REJECT"
+
+    monkeypatch.setattr(GroqHostedProvider, "from_env", classmethod(from_env))
+    monkeypatch.setattr(GroqHostedProvider, "analyse_entry", lambda self, request: _Answer())
+
+    result = groq_probe.contract_smoke("meta-llama/llama-4-scout-17b-16e-instruct", env=ENV, single_attempt=True)
+
+    assert captured["max_json_object_attempts"] == 1
+    assert captured["transport"].keywords == {"retries": 1}
+    assert result["contract_smoke_single_attempt"] is True

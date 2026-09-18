@@ -105,7 +105,11 @@ compound の 200 応答の `usage_breakdown`（割合 0.25、`max_completion_tok
 
 不変部分が 94.7%。project 側の文言を**全部**消しても ~13.3K tokens で、gpt-oss-120b の 8,000 を超える。**正規化で収める余地は無い。** canonical を短くすることは禁止（別の method への答えになる）。
 
-## 8. 言えないこと
+## 8. 直接の llama-4-scout（同日、最後の候補）
+
+`groq_probe --model meta-llama/llama-4-scout-17b-16e-instruct --contract-smoke --single-attempt` で、Entry request を1回だけ送る設定で試した。事前の小さな quota probe が **HTTP 404 `model_not_found`** で、Entry request は送られていない。`/v1/models`（metadata のみ）でこのアカウントが直接呼べる chat モデルは compound / compound-mini / gpt-oss-120b / gpt-oss-20b / gpt-oss-safeguard-20b / qwen3.8-27b / allam-2-7b。llama-4-scout は compound の内部でのみ使われている。→ 無料 Groq で約 14K tokens の Entry request を送れるモデルは無い（D-266）。
+
+## 9. 言えないこと
 
 - Free と Developer で**最大 body size が違う**という公式記述は見つからない（rate limit の表の違いのみ）。
 - Dev Tier での gpt-oss-120b / compound 内部モデルの TPM 値は未確認。**「有料化で 413 が解消する」とは記録しない。**
