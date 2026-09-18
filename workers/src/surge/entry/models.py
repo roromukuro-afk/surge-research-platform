@@ -342,6 +342,13 @@ class Episode:
     closed_at: datetime | None = None
     close_reason: EpisodeCloseReason | None = None
     horizon_sessions: int = PRIMARY_HORIZON_SESSIONS
+    #: The same value the attempt and the prediction carry, not a constant.
+    #: It used to be hard-coded at the point of writing, which meant a
+    #: LIVE_VERIFIED prediction could sit inside an episode nobody had verified
+    #: - and the episode is the unit scoring counts, so the whole claim would
+    #: have been counted as unverified evidence or as verified, depending on
+    #: which row anyone happened to read.
+    verification: VerificationStatus = VerificationStatus.IMPLEMENTED_NOT_LIVE_VERIFIED
     transitions: list[tuple[TransitionKind, datetime, str | None]] = field(default_factory=list)
 
     def record(self, kind: TransitionKind, at: datetime, note: str | None = None) -> None:

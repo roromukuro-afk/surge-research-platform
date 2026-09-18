@@ -216,12 +216,19 @@ class EntryGuardFacts:
     the same things, and where the two disagree the model is wrong by
     construction - which is the only arrangement under which a language model can
     be allowed near a 3,000 yen rule at all.
+
+    ``decision_completed_at`` is deliberately *not* here. It used to be, which
+    meant a caller declared when the decision finished before the decision had
+    started - and since an entry price is only usable if it was observed after
+    that moment, a caller could have moved the line that decides which prices
+    count. It is now the runner's own clock, taken when the answer has arrived
+    and passed validation, and it is recorded on the execution rather than
+    supplied to it.
     """
 
     universe: UniverseVerdict
     decision_price: ObservedPrice | None
     decision_cutoff_at: datetime
-    decision_completed_at: datetime
     coverage_meets_requirements: bool = False
     coverage_detail: str = "coverage was not assessed"
     open_episode_thesis_key: str | None = None
@@ -496,6 +503,7 @@ def to_entry_request(
     thesis_key: str,
     bundle: IntradayBundle,
     analysis_kind: AnalysisKind = AnalysisKind.REANALYSIS,
+    decision_completed_at: datetime,
     entry_price: ObservedPrice | None = None,
     entry_price_method: str | None = None,
     setup_ids: tuple[str, ...] = (),
@@ -543,7 +551,7 @@ def to_entry_request(
         ),
         universe=facts.universe,
         decision_cutoff_at=facts.decision_cutoff_at,
-        decision_completed_at=facts.decision_completed_at,
+        decision_completed_at=decision_completed_at,
         decision_price=facts.decision_price,
         entry_price=entry_price,
         entry_price_method=entry_price_method,

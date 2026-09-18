@@ -32,7 +32,7 @@ from enum import StrEnum
 
 from surge.runtime.schema_drift import compare
 
-READINESS_VERSION = "readiness-1.6.0"
+READINESS_VERSION = "readiness-1.7.0"
 
 
 class Verdict(StrEnum):
@@ -330,6 +330,69 @@ def check_provider(
     )
 
 
+#: The five, in the order they have to be answered. Each is a different thing to
+#: go and do, which is why they are not collapsed into one boolean.
+ANALYSIS_PROVIDER_STEPS: tuple[tuple[str, str, str], ...] = (
+    (
+        "analysis_credential_configured",
+        "a credential for the analysis provider is present",
+        "no credential; the adapter is written and has never spoken to the provider",
+    ),
+    (
+        "analysis_quota_measured",
+        "the account's rate limits have been measured",
+        "the account's limits have not been measured, so what it allows is unknown and no "
+        "canonical request may be sent (quota_probe has not run)",
+    ),
+    (
+        "analysis_output_mode_usable",
+        "the model's output mode can carry the contract",
+        "no usable output mode: the model family either has no documented JSON schema support or "
+        "has not been shown to hold the contract through a bounded retry",
+    ),
+    (
+        "analysis_zdr_confirmed",
+        "Zero Data Retention is confirmed switched on for this account",
+        "Zero Data Retention is not confirmed on for this account. Every production request "
+        "carries Canonical v5.1 in full, so this gates production traffic rather than experiments "
+        "(ANALYSIS_PRIVACY_GATE_BLOCKED)",
+    ),
+    (
+        "analysis_live_smoke_passed",
+        "a live smoke against the real provider has passed",
+        "nothing has ever been sent to the real provider, so every claim about it is about the "
+        "adapter rather than about the provider",
+    ),
+)
+
+
+def check_analysis_provider_readiness(inputs: MarketInputs) -> list[Check]:
+    """The analysis provider, broken into the five facts it actually is.
+
+    A provider name is a decision; the other four are states of the world. An
+    earlier version reported all of it as one check, so a market with a chosen
+    provider, no credential, an unmeasured quota and unconfirmed retention
+    reported the same way as one that was working - and the thing to do next was
+    different in every case.
+
+    All five gate predictions, because a formal prediction cannot come from a
+    provider that any one of them is false about.
+    """
+
+    checks: list[Check] = []
+    for name, passing_detail, failing_detail in ANALYSIS_PROVIDER_STEPS:
+        ok = bool(getattr(inputs, name))
+        checks.append(
+            Check(
+                name=name,
+                status=CheckStatus.PASS if ok else CheckStatus.FAIL,
+                detail=passing_detail if ok else failing_detail,
+                blocker_id="D-190",
+            )
+        )
+    return checks
+
+
 def check_nothing_stuck_in_reanalysis(
     in_flight: int, stuck: int, oldest_cutoff: str | None
 ) -> Check:
@@ -502,6 +565,14 @@ class MarketInputs:
     now: datetime | None = None
     material_sources_live: int = 0
     #: Stage 3. Produces setups and watches, never an entry.
+    #: An analysis provider is five separate facts, and "a name is configured"
+    #: is only the first. Reporting them as one made "we chose Groq" look like
+    #: "Groq is working", which are different states with different next steps.
+    analysis_credential_configured: bool = False
+    analysis_quota_measured: bool = False
+    analysis_output_mode_usable: bool = False
+    analysis_zdr_confirmed: bool = False
+    analysis_live_smoke_passed: bool = False
     eod_analysis_provider: str | None = None
     eod_analysis_is_a_stand_in: bool = True
     #: The intraday contract. This is the one a formal prediction comes from, so
@@ -635,6 +706,7 @@ def assess(inputs: MarketInputs) -> MarketReadiness:
             ),
             blocker_id="D-190",
         ),
+        *check_analysis_provider_readiness(inputs),
         check_provider(
             "scheduler",
             configured=inputs.scheduler_configured,
@@ -871,6 +943,8 @@ __all__ = [
     "Verdict",
     "assess",
     "assess_all",
+    "ANALYSIS_PROVIDER_STEPS",
+    "check_analysis_provider_readiness",
     "check_capability",
     "check_nothing_stuck_in_reanalysis",
     "collect",

@@ -32,15 +32,17 @@ from surge.analysis.entry_analysis import (
 )
 from surge.analysis.execution import (
     EXECUTION_VERSION,
+    INPUT_VERSION,
     AnalysisExecution,
     BeginResult,
     ExecutionError,
     ExecutionKey,
     ExecutionStatus,
     FailureClass,
+    StoredInput,
 )
 from surge.analysis.llm import ProviderKind, ZoneBasisKind
-from surge.entry.models import AnalysisKind
+from surge.entry.models import AnalysisKind, ObservedPrice
 
 #: Every column the loader reads, in one place so the tuple indices below cannot
 #: drift apart from the query.
@@ -54,6 +56,11 @@ _COLUMNS = (
     "reject_reason", "raw_response", "entry_attempt_id", "prediction_id", "completed_at",
     "failure_class", "failure_detail", "request_version", "prompt_sha256",
     "bundle_sha256", "canonical_prompt_sha256", "attempt_count", "last_transient_error",
+    "bundle_serialized", "addenda_sha256", "thesis_key", "setup_ids", "decision_price",
+    "decision_price_currency", "decision_price_observed_at", "fx_rate", "fx_observed_at",
+    "price_limit_jpy", "universe_decision", "universe_reason_code",
+    "coverage_meets_requirements", "coverage_detail", "input_version",
+    "analysis_answered_at", "decision_completed_at", "entry_price_observed_at",
 )
 
 
@@ -73,6 +80,7 @@ class DatabaseExecutionStore:
         self,
         key: ExecutionKey,
         *,
+        stored_input: StoredInput,
         security_id: str | None = None,
         decision_cutoff_at: datetime,
         provider_id: str,
@@ -82,11 +90,15 @@ class DatabaseExecutionStore:
         now: datetime,
         request_version: str = EXECUTION_VERSION,
     ) -> BeginResult:
-        """Move the watch and record the analysis, in one statement.
+        """Move the watch, record the analysis *and its input*, in one statement.
 
         ``security_id`` is optional and is only ever a cross-check: the database
         derives it from the watch. Passing a different one is an error rather
         than an override, because the caller's copy is the one that can be stale.
+
+        ``stored_input`` is not optional. It is what makes the row resumable: a
+        crash between this call and the answer leaves behind everything needed
+        to finish the analysis, rather than a note that one had begun.
         """
 
         with self._conn.cursor() as cur:
@@ -98,6 +110,14 @@ class DatabaseExecutionStore:
                     %(analysis_kind)s::prod.analysis_kind,
                     %(decision_cutoff_at)s, %(provider_id)s,
                     %(provider_kind)s::analysis.provider_kind, %(request_version)s,
+                    %(prompt_sha256)s, %(bundle_sha256)s, %(canonical_prompt_sha256)s,
+                    %(bundle_serialized)s, %(addenda_sha256)s,
+                    %(thesis_key)s, %(setup_ids)s,
+                    %(decision_price)s, %(decision_price_currency)s,
+                    %(decision_price_observed_at)s, %(fx_rate)s, %(fx_observed_at)s,
+                    %(price_limit_jpy)s,
+                    %(universe_decision)s, %(universe_reason_code)s,
+                    %(coverage_meets_requirements)s, %(coverage_detail)s, %(input_version)s,
                     %(security_id)s, %(model_id)s, %(run_id)s, %(occurred_at)s
                   )
                 """,
@@ -109,6 +129,24 @@ class DatabaseExecutionStore:
                     "provider_id": provider_id,
                     "provider_kind": provider_kind,
                     "request_version": request_version,
+                    "prompt_sha256": stored_input.prompt_sha256,
+                    "bundle_sha256": stored_input.bundle_sha256,
+                    "canonical_prompt_sha256": stored_input.canonical_prompt_sha256,
+                    "bundle_serialized": stored_input.bundle_serialized,
+                    "addenda_sha256": list(stored_input.addenda_sha256),
+                    "thesis_key": stored_input.thesis_key,
+                    "setup_ids": list(stored_input.setup_ids),
+                    "decision_price": stored_input.decision_price,
+                    "decision_price_currency": stored_input.decision_price_currency,
+                    "decision_price_observed_at": stored_input.decision_price_observed_at,
+                    "fx_rate": stored_input.fx_rate,
+                    "fx_observed_at": stored_input.fx_observed_at,
+                    "price_limit_jpy": stored_input.price_limit_jpy,
+                    "universe_decision": stored_input.universe_decision,
+                    "universe_reason_code": stored_input.universe_reason_code,
+                    "coverage_meets_requirements": stored_input.coverage_meets_requirements,
+                    "coverage_detail": stored_input.coverage_detail,
+                    "input_version": stored_input.input_version,
                     "security_id": security_id,
                     "model_id": model_id,
                     "run_id": run_id,
@@ -132,13 +170,19 @@ class DatabaseExecutionStore:
         prompt_sha256: str,
         bundle_sha256: str,
         canonical_prompt_sha256: str,
+        answered_at: datetime,
         raw_response_ref: str | None = None,
     ) -> None:
-        """Store the answer and the hashes of what produced it.
+        """Store the answer, when it arrived, and the hashes it belongs to.
 
-        The hashes are not optional. Which prompt and which bundle an answer
-        belongs to is the whole of reproducibility (CLAUDE.md 1-18), and the
-        database refuses the call without them.
+        The hashes are passed and *checked* rather than written: they were fixed
+        when the request was recorded, so a runner that rendered a different
+        prompt in between would otherwise overwrite the record of what it
+        started with. The database raises on a mismatch.
+
+        ``answered_at`` is the runner's clock, and it is separate from
+        ``decision_completed_at`` on purpose: this is when the model replied, not
+        when the system accepted the reply.
         """
 
         with self._conn.cursor() as cur:
@@ -147,10 +191,10 @@ class DatabaseExecutionStore:
                 select prod.record_entry_analysis_answer(
                   %(id)s, %(state)s::prod.decision_state, %(rationale)s,
                   %(response_sha256)s, %(prompt_sha256)s, %(bundle_sha256)s,
-                  %(canonical_sha256)s, %(raw_response)s, %(raw_ref)s,
+                  %(canonical_sha256)s, %(answered_at)s, %(raw_response)s, %(raw_ref)s,
                   %(decision_price_used)s, %(initial_failure_line)s,
                   %(zone_low)s, %(zone_high)s, %(zone_basis_kinds)s, %(zone_basis)s,
-                  %(concepts)s, %(trigger_description)s, %(reject_reason)s, null
+                  %(concepts)s, %(trigger_description)s, %(reject_reason)s
                 )
                 """,
                 {
@@ -161,6 +205,7 @@ class DatabaseExecutionStore:
                     "prompt_sha256": prompt_sha256,
                     "bundle_sha256": bundle_sha256,
                     "canonical_sha256": canonical_prompt_sha256,
+                    "answered_at": answered_at,
                     "raw_response": response.raw_text or None,
                     "raw_ref": raw_response_ref,
                     "decision_price_used": response.decision_price_used,
@@ -185,6 +230,10 @@ class DatabaseExecutionStore:
         entry_attempt_id: str | None = None,
         prediction_id: str | None = None,
         now: datetime | None = None,
+        decision_completed_at: datetime | None = None,
+        entry_price: ObservedPrice | None = None,
+        entry_price_method: str | None = None,
+        entry_price_evidence: tuple[str, ...] = (),
     ) -> None:
         """Close the analysis with what it actually produced.
 
@@ -200,7 +249,9 @@ class DatabaseExecutionStore:
                 """
                 select prod.complete_entry_analysis(
                   %(id)s, %(validation_status)s::analysis.validation_status,
-                  %(errors)s, %(refusals)s, %(warnings)s, %(attempt_id)s, %(prediction_id)s
+                  %(errors)s, %(refusals)s, %(warnings)s, %(attempt_id)s, %(prediction_id)s,
+                  %(decision_completed_at)s, %(entry_price)s, %(entry_currency)s,
+                  %(entry_observed_at)s, %(entry_method)s, %(entry_evidence)s
                 )
                 """,
                 {
@@ -211,6 +262,12 @@ class DatabaseExecutionStore:
                     "warnings": list(validation.warnings),
                     "attempt_id": entry_attempt_id,
                     "prediction_id": prediction_id,
+                    "decision_completed_at": decision_completed_at,
+                    "entry_price": entry_price.amount if entry_price else None,
+                    "entry_currency": entry_price.currency if entry_price else None,
+                    "entry_observed_at": entry_price.observed_at if entry_price else None,
+                    "entry_method": entry_price_method,
+                    "entry_evidence": list(entry_price_evidence),
                 },
             )
 
@@ -280,6 +337,24 @@ class DatabaseExecutionStore:
             ids = [str(row[0]) for row in cur.fetchall()]
         return [e for e in (self._load(i) for i in ids) if e is not None]
 
+    def find(self, key: ExecutionKey) -> AnalysisExecution | None:
+        """The execution for this trigger, if one was ever started.
+
+        A plain read, with no side effects: ``begin`` is what creates and locks.
+        This exists so a runner can discover that it is resuming *before* it
+        builds a bundle, and use the stored one instead.
+        """
+
+        with self._conn.cursor() as cur:
+            cur.execute(
+                "select analysis_execution_id from prod.entry_analysis_executions "
+                "where watch_id = %s and trigger_transition_id = %s "
+                "and analysis_kind = %s::prod.analysis_kind",
+                (key.watch_id, key.trigger_transition_id, key.analysis_kind.value),
+            )
+            row = cur.fetchone()
+        return self._load(str(row[0])) if row else None
+
     # --------------------------------------------------------------- read
 
     def _load(self, execution_id: str) -> AnalysisExecution | None:
@@ -320,6 +395,33 @@ class DatabaseExecutionStore:
                 raw_text=r["raw_response"] or "",
             )
 
+        stored_input = None
+        if r["bundle_serialized"]:
+            # Rebuilt in full, including the hashes it is proved against. A
+            # partial one would let a resumed analysis look resumable and then
+            # fail the reconstruction check for a reason that has nothing to do
+            # with the input having changed.
+            stored_input = StoredInput(
+                bundle_serialized=r["bundle_serialized"],
+                prompt_sha256=r["prompt_sha256"],
+                bundle_sha256=r["bundle_sha256"],
+                canonical_prompt_sha256=r["canonical_prompt_sha256"],
+                addenda_sha256=tuple(r["addenda_sha256"] or ()),
+                thesis_key=r["thesis_key"],
+                setup_ids=tuple(r["setup_ids"] or ()),
+                decision_price=_decimal(r["decision_price"]),
+                decision_price_currency=r["decision_price_currency"],
+                decision_price_observed_at=r["decision_price_observed_at"],
+                fx_rate=_decimal(r["fx_rate"]),
+                fx_observed_at=r["fx_observed_at"],
+                price_limit_jpy=_decimal(r["price_limit_jpy"]),
+                universe_decision=r["universe_decision"],
+                universe_reason_code=r["universe_reason_code"],
+                coverage_meets_requirements=r["coverage_meets_requirements"],
+                coverage_detail=r["coverage_detail"],
+                input_version=r["input_version"] or INPUT_VERSION,
+            )
+
         return AnalysisExecution(
             analysis_execution_id=str(r["analysis_execution_id"]),
             key=ExecutionKey(
@@ -347,6 +449,10 @@ class DatabaseExecutionStore:
             completed_at=r["completed_at"],
             failure_class=FailureClass(r["failure_class"]) if r["failure_class"] else None,
             failure_detail=r["failure_detail"],
+            stored_input=stored_input,
+            analysis_answered_at=r["analysis_answered_at"],
+            decision_completed_at=r["decision_completed_at"],
+            entry_price_observed_at=r["entry_price_observed_at"],
             attempt_count=int(r["attempt_count"] or 0),
             last_transient_error=r["last_transient_error"],
         )

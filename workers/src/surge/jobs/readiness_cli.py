@@ -49,6 +49,11 @@ def _overrides_for(market: str, args) -> dict:
         "eod_price_provider": getattr(args, f"{prefix}_eod", None),
         "intraday_price_provider": getattr(args, f"{prefix}_intraday", None),
         "fx_provider": args.fx,
+        "analysis_credential_configured": args.analysis_credential,
+        "analysis_quota_measured": args.analysis_quota_measured,
+        "analysis_output_mode_usable": args.analysis_output_mode_usable,
+        "analysis_zdr_confirmed": args.analysis_zdr_confirmed,
+        "analysis_live_smoke_passed": args.analysis_live_smoke_passed,
         "eod_analysis_provider": args.eod_analysis_provider,
         "eod_analysis_is_a_stand_in": not args.eod_analysis_is_real,
         "entry_analysis_provider": args.entry_analysis_provider,
@@ -66,6 +71,11 @@ def _inputs_for(market: str, args) -> MarketInputs:
         eod_price_provider=getattr(args, f"{prefix}_eod", None),
         intraday_price_provider=getattr(args, f"{prefix}_intraday", None),
         fx_provider=args.fx,
+        analysis_credential_configured=args.analysis_credential,
+        analysis_quota_measured=args.analysis_quota_measured,
+        analysis_output_mode_usable=args.analysis_output_mode_usable,
+        analysis_zdr_confirmed=args.analysis_zdr_confirmed,
+        analysis_live_smoke_passed=args.analysis_live_smoke_passed,
         eod_analysis_provider=args.eod_analysis_provider,
         eod_analysis_is_a_stand_in=not args.eod_analysis_is_real,
         entry_analysis_provider=args.entry_analysis_provider,
@@ -113,6 +123,35 @@ def main(argv: list[str] | None = None) -> int:
         "--entry-analysis-is-real",
         action="store_true",
         help="assert the intraday entry provider is not the deterministic stand-in",
+    )
+    # Five separate assertions rather than one, and every one of them defaults
+    # to false. Each is a different thing to go and do, and a single
+    # --analysis-ready would let the hardest of them be waved through with the
+    # easiest.
+    parser.add_argument(
+        "--analysis-credential",
+        action="store_true",
+        help="assert a credential for the analysis provider is present",
+    )
+    parser.add_argument(
+        "--analysis-quota-measured",
+        action="store_true",
+        help="assert quota_probe has run against the real account",
+    )
+    parser.add_argument(
+        "--analysis-output-mode-usable",
+        action="store_true",
+        help="assert the model's output mode can carry the contract",
+    )
+    parser.add_argument(
+        "--analysis-zdr-confirmed",
+        action="store_true",
+        help="assert Zero Data Retention is confirmed switched on for this account",
+    )
+    parser.add_argument(
+        "--analysis-live-smoke-passed",
+        action="store_true",
+        help="assert something has actually been sent to the real provider and came back",
     )
     parser.add_argument("--scheduler", action="store_true")
     parser.add_argument("--object-store", action="store_true")

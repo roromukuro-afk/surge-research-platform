@@ -171,6 +171,7 @@ def test_a_stored_answer_leaves_the_analysis_started_and_findable(conn):
             prompt_sha256="p" * 64,
             bundle_sha256="b" * 64,
             canonical_prompt_sha256="c" * 64,
+            answered_at=LATER,
         )
 
         plan = plan_recovery(store)
@@ -202,6 +203,7 @@ def test_the_in_flight_view_shows_whether_the_model_was_already_paid_for(conn):
             prompt_sha256="p" * 64,
             bundle_sha256="b" * 64,
             canonical_prompt_sha256="c" * 64,
+            answered_at=LATER,
         )
         cur.execute(
             "select has_a_stored_answer from ui.entry_analysis_in_flight "
@@ -231,6 +233,7 @@ def test_a_completed_analysis_cannot_be_changed_again(conn):
             prompt_sha256="p" * 64,
             bundle_sha256="b" * 64,
             canonical_prompt_sha256="c" * 64,
+            answered_at=LATER,
         )
         _move(cur, watch_id, "IN_REANALYSIS", "REARMED", kind="REANALYSIS")
         store.complete(

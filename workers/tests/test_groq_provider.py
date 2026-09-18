@@ -17,13 +17,14 @@ partial analysis, it is not an analysis.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 
 from surge.analysis.entry_analysis import EntryAnalysisState
-from surge.analysis.groq_provider import (
+from surge.analysis.groq_provider import (  # noqa: E402
     ANALYSIS_EXTERNAL_TOOL_USED,
     ANALYSIS_FREE_QUOTA_BLOCKED,
     DEFAULT_COMPLETION_RESERVE,
@@ -42,6 +43,7 @@ from surge.analysis.groq_provider import (
     OutputMode,
     Quota,
     QuotaUnknown,
+    RequestMode,
     Retention,
     StructuredOutputError,
     entry_analysis_schema,
@@ -91,6 +93,12 @@ def _completion(content: dict, *, refusal=None, finish_reason="stop") -> dict:
     }
 
 
+#: The same terms Groq publishes, read against an account where ZDR has been
+#: switched on and confirmed. Nothing in the repository asserts that about the
+#: real account, because nobody has looked at the real account.
+ZDR_CONFIRMED = replace(GROQ_POLICY, zero_data_retention_enabled=True)
+
+
 def _provider(payload, **overrides) -> GroqHostedProvider:
     sent: dict = {}
 
@@ -106,6 +114,13 @@ def _provider(payload, **overrides) -> GroqHostedProvider:
         model_id=overrides.pop("model_id", "openai/gpt-oss-120b"),
         api_key="gsk-not-a-real-key",
         transport=transport,
+        # An account whose Zero Data Retention has been confirmed on. The real
+        # policy records it as unconfirmed and the production gate refuses it -
+        # which is asserted on its own below. Tests about the request and the
+        # response shape have to get past the gate to reach what they are
+        # testing, so they say explicitly which account they are pretending to
+        # be rather than the gate being lenient by default.
+        policy=overrides.pop("policy", ZDR_CONFIRMED),
         **overrides,
     )
     provider._sent = sent  # type: ignore[attr-defined]
@@ -293,6 +308,7 @@ def test_an_unmeasured_quota_refuses_to_send_rather_than_sending_anyway():
     provider = GroqHostedProvider(
         model_id="openai/gpt-oss-120b",
         api_key="gsk-not-a-real-key",
+        policy=ZDR_CONFIRMED,
         transport=transport,
         quota=Quota(),
     )
@@ -317,6 +333,7 @@ def test_the_probe_sends_no_response_format_at_all():
     provider = GroqHostedProvider(
         model_id="groq/compound",
         api_key="gsk-not-a-real-key",
+        policy=ZDR_CONFIRMED,
         transport=transport,
         quota=Quota(),
     )
@@ -343,6 +360,7 @@ def test_the_probe_carries_no_canonical_prompt_and_no_market_data():
     provider = GroqHostedProvider(
         model_id="openai/gpt-oss-120b",
         api_key="gsk-not-a-real-key",
+        policy=ZDR_CONFIRMED,
         transport=transport,
         quota=Quota(),
     )
@@ -366,6 +384,7 @@ def test_a_probe_that_learns_nothing_says_so():
     provider = GroqHostedProvider(
         model_id="openai/gpt-oss-120b",
         api_key="gsk-not-a-real-key",
+        policy=ZDR_CONFIRMED,
         transport=transport,
         quota=Quota(),
     )
@@ -498,6 +517,7 @@ def test_a_json_object_answer_is_retried_a_bounded_number_of_times():
     provider = GroqHostedProvider(
         model_id="groq/compound",
         api_key="gsk-not-a-real-key",
+        policy=ZDR_CONFIRMED,
         transport=transport,
         quota=MEASURED,
     )
@@ -519,6 +539,7 @@ def test_retry_exhausted_fails_the_analysis_rather_than_proceeding():
     provider = GroqHostedProvider(
         model_id="groq/compound",
         api_key="gsk-not-a-real-key",
+        policy=ZDR_CONFIRMED,
         transport=transport,
         quota=MEASURED,
     )
@@ -541,6 +562,7 @@ def test_a_strict_answer_is_not_retried():
     provider = GroqHostedProvider(
         model_id="openai/gpt-oss-120b",
         api_key="gsk-not-a-real-key",
+        policy=ZDR_CONFIRMED,
         transport=transport,
         quota=MEASURED,
     )
@@ -790,6 +812,7 @@ def test_the_probe_is_also_refused_an_answer_that_used_tools():
     provider = GroqHostedProvider(
         model_id="groq/compound",
         api_key="gsk-not-a-real-key",
+        policy=ZDR_CONFIRMED,
         transport=transport,
         quota=Quota(),
     )
@@ -798,3 +821,90 @@ def test_the_probe_is_also_refused_an_answer_that_used_tools():
     # real. The tool check bites when an actual analysis is run.
     measured = provider.quota_probe()
     assert measured.max_tokens_per_minute == 8_000
+
+
+# ------------------------------- the production privacy gate (Audit 5 G)
+
+
+def test_the_real_account_cannot_receive_a_production_canonical_request():
+    """The gate is not decorative. Groq's published terms say inputs are not
+    trained on, which is what makes an experiment acceptable; routine production
+    traffic carries Canonical v5.1 in full, several times a day, for as long as
+    the system runs, and for that ZDR has to be confirmed *on this account*.
+
+    Nobody has looked at the account, so this refuses - and that is the correct
+    state today, not a bug to be worked around."""
+
+    provider = _provider(_completion(_full_stage3()), policy=GROQ_POLICY)
+
+    with pytest.raises(InputPolicyViolation, match="ANALYSIS_PRIVACY_GATE_BLOCKED"):
+        provider.analyse(LLMRequest(prompt="the canonical method", bundle=None))
+
+
+def test_unknown_zdr_is_refused_as_firmly_as_zdr_switched_off():
+    """Silence is not consent. "Nobody has checked" and "it is off" are
+    different facts about the world and the same fact about what may be sent."""
+
+    off = replace(GROQ_POLICY, zero_data_retention_enabled=False)
+    unknown = replace(GROQ_POLICY, zero_data_retention_enabled=None)
+
+    for policy in (off, unknown):
+        with pytest.raises(InputPolicyViolation, match="ANALYSIS_PRIVACY_GATE_BLOCKED"):
+            policy.assert_production_privacy_gate_passes()
+
+    replace(GROQ_POLICY, zero_data_retention_enabled=True).assert_production_privacy_gate_passes()
+
+
+def test_a_research_smoke_passes_the_weaker_gate_and_is_a_different_mode():
+    """A smoke sends a fixed harmless prompt and never the method, so the gate
+    it needs is the one about training rather than the one about retention. It
+    is a mode rather than a flag, because a relaxation nobody names is one
+    nobody notices."""
+
+    provider = _provider(
+        _completion(_full_stage3()), policy=GROQ_POLICY, mode=RequestMode.RESEARCH_SMOKE
+    )
+
+    provider.analyse(LLMRequest(prompt="a harmless probe", bundle=None))
+
+    assert provider._sent["body"]["model"]
+
+
+def test_production_is_the_default_mode():
+    """A smoke that forgot to say so would otherwise send the canonical method
+    under the weaker gate."""
+
+    assert GroqHostedProvider(model_id="openai/gpt-oss-120b", api_key="x").mode is (
+        RequestMode.PRODUCTION
+    )
+
+
+# --------------------------- the tool ban, on the probe too (Audit 5 F)
+
+
+def test_the_quota_probe_also_refuses_tools():
+    """Its answer is discarded, but a tool call would cost money, leave a trace
+    at a third party, and make the measured token count describe a request
+    nothing else will ever send."""
+
+    sent = {}
+
+    def transport(url, **kwargs):
+        import json as _json
+
+        sent["body"] = _json.loads(kwargs["data"])
+        return _Response(_completion({"ok": True}), headers={"x-ratelimit-limit-tokens": "8000"})
+
+    provider = GroqHostedProvider(
+        model_id="groq/compound",
+        api_key="gsk-not-a-real-key",
+        policy=ZDR_CONFIRMED,
+        transport=transport,
+        quota=Quota(),
+    )
+
+    provider.quota_probe()
+
+    body = sent["body"]
+    assert body["tool_choice"] == "none"
+    assert body["compound_custom"] == {"tools": {"enabled_tools": []}}

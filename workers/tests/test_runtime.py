@@ -262,6 +262,13 @@ def _market(code="JP", **overrides) -> MarketInputs:
         "mock_guard_constraints": 1,
         "migrations_in_sync": True,
         "ci_head_green": True,
+        # An analysis provider is five facts, not one. A fixture that set only
+        # a name would describe a market nothing could actually run.
+        "analysis_credential_configured": True,
+        "analysis_quota_measured": True,
+        "analysis_output_mode_usable": True,
+        "analysis_zdr_confirmed": True,
+        "analysis_live_smoke_passed": True,
         "scheduler_configured": True,
         "object_store_configured": True,
     }
@@ -799,3 +806,39 @@ def test_a_query_that_cannot_be_run_is_reported_as_a_failed_check():
     assert failed
     assert "fx_freshness" in failed[0].detail
     assert failed[0].blocks
+
+
+def test_a_provider_name_is_not_a_working_provider():
+    """Five facts, and choosing a vendor is only the first. Reported as one
+    check, "we chose Groq" and "Groq is working" looked the same - and the thing
+    to do next is different in every case."""
+
+    readiness = assess(
+        _market(
+            material_sources_live=1,
+            analysis_credential_configured=False,
+            analysis_quota_measured=False,
+            analysis_zdr_confirmed=False,
+            analysis_live_smoke_passed=False,
+        )
+    )
+    failing = {c.name for c in readiness.blockers}
+
+    assert "analysis_credential_configured" in failing
+    assert "analysis_quota_measured" in failing
+    assert "analysis_zdr_confirmed" in failing
+    assert "analysis_live_smoke_passed" in failing
+    assert readiness.verdict is not Verdict.LIVE_READY
+
+
+def test_unconfirmed_retention_alone_blocks_production():
+    """Everything else connected, and the account's retention unverified. Every
+    production request carries Canonical v5.1 in full, so this is the one that
+    decides whether routine traffic may be sent at all."""
+
+    readiness = assess(_market(analysis_zdr_confirmed=False))
+    check = next(c for c in readiness.checks if c.name == "analysis_zdr_confirmed")
+
+    assert check.blocks
+    assert "ANALYSIS_PRIVACY_GATE_BLOCKED" in check.detail
+    assert readiness.verdict is not Verdict.LIVE_READY

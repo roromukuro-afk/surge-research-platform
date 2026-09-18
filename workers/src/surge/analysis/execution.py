@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol
 
@@ -79,6 +80,11 @@ class FailureClass(StrEnum):
     #: Terminal. The adapter is written and has never had a credential, which is
     #: a configuration fact rather than a fact about the security.
     PROVIDER_NOT_CONFIGURED = "PROVIDER_NOT_CONFIGURED"
+
+    #: Terminal. The stored input no longer rebuilds into the prompt that was
+    #: sent, so this analysis cannot be resumed as itself. Continuing would
+    #: attach an answer to a request nothing recorded.
+    INPUT_RECONSTRUCTION_MISMATCH = "INPUT_RECONSTRUCTION_MISMATCH"
 
     #: Terminal, and reached from a transient failure rather than declared. A
     #: provider that is down for an afternoon is transient on every single
@@ -195,6 +201,65 @@ class ExecutionKey:
             )
 
 
+#: Bumped when the shape of the stored input changes, so a row written by an
+#: older runner is recognisable rather than silently misread.
+INPUT_VERSION = "entry-input-1.0.0"
+
+
+@dataclass(frozen=True)
+class StoredInput:
+    """Exactly what an analysis was asked, written at TX1 before anything is sent.
+
+    The reason this exists: without it, "the record survives a crash" was true
+    of the *fact* that an analysis started and false of everything needed to
+    finish one. The bundle, the guard facts and the thesis lived in the caller's
+    memory, and the recovery pass took them back as arguments - so recovery
+    depended on the process that died still being alive.
+
+    A recovery pass that rebuilt the bundle instead would be building a
+    different one. Twenty minutes on, an intraday bundle is a different price, a
+    different tape and possibly a different universe verdict, and an answer to
+    it recorded against the original trigger would be a decision attributed to
+    inputs it never saw.
+
+    ``prompt_sha256`` is the proof. It is fixed here, before the call, and a
+    resumed analysis rebuilds the prompt and requires the hash to match.
+    """
+
+    bundle_serialized: str
+    prompt_sha256: str
+    bundle_sha256: str
+    canonical_prompt_sha256: str
+    addenda_sha256: tuple[str, ...] = ()
+    thesis_key: str | None = None
+    setup_ids: tuple[str, ...] = ()
+    decision_price: Decimal | None = None
+    decision_price_currency: str | None = None
+    decision_price_observed_at: datetime | None = None
+    fx_rate: Decimal | None = None
+    fx_observed_at: datetime | None = None
+    price_limit_jpy: Decimal | None = None
+    universe_decision: str | None = None
+    universe_reason_code: str | None = None
+    coverage_meets_requirements: bool | None = None
+    coverage_detail: str | None = None
+    input_version: str = INPUT_VERSION
+
+    def __post_init__(self) -> None:
+        for name in ("prompt_sha256", "bundle_sha256", "canonical_prompt_sha256"):
+            value = getattr(self, name)
+            if not value or len(value) != 64:
+                raise ExecutionError(
+                    f"{name} must be a full SHA-256 hex digest; an analysis whose input is only "
+                    "partly identified cannot be proved to be the same analysis later"
+                )
+        if not self.bundle_serialized:
+            raise ExecutionError(
+                "an analysis is started from a stored bundle; without it a crash leaves a row "
+                "nothing can resume, which is the failure this record exists to remove"
+            )
+
+
 @dataclass
 class AnalysisExecution:
     """One row of ``prod.entry_analysis_executions``, as the job sees it."""
@@ -226,6 +291,16 @@ class AnalysisExecution:
     failure_detail: str | None = None
     attempt_count: int = 0
     last_transient_error: str | None = None
+    #: What this analysis was asked. Present from TX1 for anything a production
+    #: runner started; absent only for the in-memory store's older callers.
+    stored_input: StoredInput | None = None
+    #: The runner's own clock, not a caller's opinion. ``analysis_answered_at``
+    #: is when the model replied; ``decision_completed_at`` is when this system
+    #: accepted the answer, after semantic validation - which is the moment an
+    #: entry price becomes observable.
+    analysis_answered_at: datetime | None = None
+    decision_completed_at: datetime | None = None
+    entry_price_observed_at: datetime | None = None
 
     @property
     def is_finished(self) -> bool:
@@ -259,6 +334,18 @@ class AnalysisExecution:
         """Whether recovery has to call the provider, or can resume from disk."""
 
         return self.status.is_open and not self.has_a_stored_answer
+
+    @property
+    def can_be_resumed(self) -> bool:
+        """Whether a recovery pass can act on this at all.
+
+        An open execution with no stored input holds its watch at IN_REANALYSIS
+        and cannot be finished by anybody, because nothing records what it was
+        asked. Reporting that is the point: it is a stuck security, not an
+        absence of work.
+        """
+
+        return self.stored_input is not None
 
     @property
     def summary(self) -> dict:
@@ -299,6 +386,7 @@ class ExecutionStore(Protocol):
         self,
         key: ExecutionKey,
         *,
+        stored_input: StoredInput,
         security_id: str,
         decision_cutoff_at: datetime,
         provider_id: str,
@@ -316,6 +404,7 @@ class ExecutionStore(Protocol):
         prompt_sha256: str,
         bundle_sha256: str,
         canonical_prompt_sha256: str,
+        answered_at: datetime,
         raw_response_ref: str | None = None,
     ) -> None: ...
 
@@ -331,6 +420,10 @@ class ExecutionStore(Protocol):
         entry_attempt_id: str | None,
         prediction_id: str | None,
         now: datetime,
+        decision_completed_at: datetime | None = None,
+        entry_price: object | None = None,
+        entry_price_method: str | None = None,
+        entry_price_evidence: tuple[str, ...] = (),
     ) -> None: ...
 
     def fail(
@@ -344,6 +437,8 @@ class ExecutionStore(Protocol):
     ) -> None: ...
 
     def in_flight(self) -> list[AnalysisExecution]: ...
+
+    def find(self, key: ExecutionKey) -> AnalysisExecution | None: ...
 
 
 class InMemoryExecutionStore:
@@ -363,6 +458,7 @@ class InMemoryExecutionStore:
         self,
         key: ExecutionKey,
         *,
+        stored_input: StoredInput,
         security_id: str,
         decision_cutoff_at: datetime,
         provider_id: str,
@@ -388,6 +484,13 @@ class InMemoryExecutionStore:
             started_at=now,
             model_id=model_id,
             run_id=run_id,
+            stored_input=stored_input,
+            #: Fixed here, with the request, rather than when the answer comes
+            #: back. That is what lets a recovery pass rebuild the prompt and
+            #: prove it is rebuilding the same one.
+            prompt_sha256=stored_input.prompt_sha256,
+            bundle_sha256=stored_input.bundle_sha256,
+            canonical_prompt_sha256=stored_input.canonical_prompt_sha256,
         )
         self._rows[execution_id] = execution
         self._by_key[key] = execution_id
@@ -412,6 +515,7 @@ class InMemoryExecutionStore:
         prompt_sha256: str,
         bundle_sha256: str,
         canonical_prompt_sha256: str,
+        answered_at: datetime,
         raw_response_ref: str | None = None,
     ) -> None:
         if not (prompt_sha256 and bundle_sha256 and canonical_prompt_sha256):
@@ -420,12 +524,28 @@ class InMemoryExecutionStore:
                 "stored answer belongs to no particular request (CLAUDE.md 1-18)"
             )
         execution = self._started(execution_id)
+        # Checked, not written. The hashes were fixed when the request was
+        # recorded; a runner that rendered a different prompt in between would
+        # otherwise overwrite the record of what it started with, leaving the
+        # stored input describing a request that produced no answer.
+        for name, given in (
+            ("prompt_sha256", prompt_sha256),
+            ("bundle_sha256", bundle_sha256),
+            ("canonical_prompt_sha256", canonical_prompt_sha256),
+        ):
+            stored = getattr(execution, name)
+            if stored is not None and stored != given:
+                raise ExecutionError(
+                    f"the answer to {execution_id} was produced from a different request than the "
+                    f"one recorded at its start: {name} was {stored} and is now {given}"
+                )
         execution.stored_answer = response
         execution.response_sha256 = response.response_sha256
         execution.prompt_sha256 = prompt_sha256
         execution.bundle_sha256 = bundle_sha256
         execution.canonical_prompt_sha256 = canonical_prompt_sha256
         execution.raw_response_ref = raw_response_ref
+        execution.analysis_answered_at = answered_at
         execution.status = ExecutionStatus.STARTED
         execution.last_transient_error = None
 
@@ -452,6 +572,10 @@ class InMemoryExecutionStore:
         entry_attempt_id: str | None = None,
         prediction_id: str | None = None,
         now: datetime,
+        decision_completed_at: datetime | None = None,
+        entry_price: object | None = None,
+        entry_price_method: str | None = None,
+        entry_price_evidence: tuple[str, ...] = (),
     ) -> None:
         execution = self._started(execution_id)
         if prediction_id is not None and entry_attempt_id is None:
@@ -463,6 +587,10 @@ class InMemoryExecutionStore:
         execution.entry_attempt_id = entry_attempt_id
         execution.prediction_id = prediction_id
         execution.completed_at = now
+        execution.decision_completed_at = decision_completed_at or execution.decision_completed_at
+        if entry_price is not None:
+            execution.entry_price_observed_at = entry_price.observed_at
+        del entry_price_method, entry_price_evidence  # recorded by the database store
 
     def fail(
         self,
@@ -485,6 +613,17 @@ class InMemoryExecutionStore:
 
     def get(self, execution_id: str) -> AnalysisExecution | None:
         return self._rows.get(execution_id)
+
+    def find(self, key: ExecutionKey) -> AnalysisExecution | None:
+        """The execution for this trigger, if one was ever started.
+
+        Asked before anything is built, so that a resumed analysis uses the
+        input it was started with rather than one assembled from the session as
+        it is now.
+        """
+
+        execution_id = self._by_key.get(key)
+        return self._rows.get(execution_id) if execution_id else None
 
 
 @dataclass
@@ -541,7 +680,9 @@ __all__ = [
     "ExecutionStore",
     "TRANSIENT_FAILURES",
     "FailureClass",
+    "INPUT_VERSION",
     "InMemoryExecutionStore",
+    "StoredInput",
     "ProviderFailure",
     "classify_provider_failure",
     "RecoveryPlan",

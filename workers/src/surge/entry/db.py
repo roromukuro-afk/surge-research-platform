@@ -230,7 +230,10 @@ def episode_params(episode: Episode) -> dict:
         "opened_at": episode.opened_at,
         "entry_price_observed_at": episode.entry_price_observed_at,
         "horizon_sessions": episode.horizon_sessions,
-        "verification": "IMPLEMENTED_NOT_LIVE_VERIFIED",
+        # Carried, not asserted. Hard-coding this was how an episode could
+        # disagree with the prediction inside it; the database now refuses the
+        # pair when they differ.
+        "verification": episode.verification.value,
     }
 
 

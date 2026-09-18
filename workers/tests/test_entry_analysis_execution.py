@@ -12,6 +12,7 @@ Each test below kills the process at a different point and restarts.
 
 from __future__ import annotations
 
+from dataclasses import replace  # noqa: E402
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
@@ -35,9 +36,11 @@ from surge.analysis.execution import (
     FailureClass,
     InMemoryExecutionStore,
     ProviderFailure,
+    StoredInput,
     classify_provider_failure,
     plan_recovery,
 )
+from surge.analysis.input_snapshot import build_stored_input  # noqa: E402
 from surge.analysis.llm import ProviderKind
 from surge.entry.models import AnalysisKind, EntryAttemptStatus, ObservedPrice, UniverseVerdict, WatchState
 from surge.entry.watch import Watch
@@ -73,7 +76,6 @@ def _facts(**overrides) -> EntryGuardFacts:
             amount=Decimal("1000"), currency="JPY", observed_at=CUTOFF
         ),
         "decision_cutoff_at": CUTOFF,
-        "decision_completed_at": COMPLETED,
         "coverage_meets_requirements": True,
         "coverage_detail": "all required collectors reported",
     }
@@ -102,6 +104,23 @@ def _entry(**overrides) -> EntryAnalysisResponse:
     if not base["reachable_zone_basis_kinds"]:
         base["reachable_zone_basis_kinds"] = (ZoneBasisKind.VOLUME_STRUCTURE,)
     return EntryAnalysisResponse(**base)
+
+
+
+def _stored_input(**overrides) -> StoredInput:
+    """The record of what an analysis was asked, as TX1 writes it.
+
+    Built from the real bundle and facts rather than hand-filled, so a test that
+    resumes one is resuming something the production path could have written.
+    """
+
+    stored, _prompt = build_stored_input(
+        bundle=_bundle(),
+        facts=_facts(),
+        canonical_text="CANONICAL",
+        thesis_key="WATCH_BREAKOUT|R_A",
+    )
+    return replace(stored, **overrides) if overrides else stored
 
 
 def _watch() -> Watch:
@@ -227,6 +246,7 @@ def test_a_process_that_simply_died_is_still_in_flight_and_needs_the_model():
                        analysis_kind=AnalysisKind.REANALYSIS)
     store.begin(
         key,
+        stored_input=_stored_input(),
         security_id="JP:LOCAL:1234",
         decision_cutoff_at=CUTOFF,
         provider_id="groq_hosted",
@@ -260,6 +280,7 @@ def test_a_stored_answer_is_resumed_rather_than_asked_for_again():
                        analysis_kind=AnalysisKind.REANALYSIS)
     begun = store.begin(
         key,
+        stored_input=_stored_input(),
         security_id="JP:LOCAL:1234",
         decision_cutoff_at=CUTOFF,
         provider_id="groq_hosted",
@@ -269,12 +290,17 @@ def test_a_stored_answer_is_resumed_rather_than_asked_for_again():
         now=LATER,
     )
     watch.begin_reanalysis(at=LATER)
+    # The hashes recorded at the start, not invented here: the store checks the
+    # answer against them, which is what stops a runner that rendered a
+    # different prompt in between from overwriting what it started with.
+    stored = begun.execution.stored_input
     store.record_answer(
         begun.execution.analysis_execution_id,
         _entry(),
-        prompt_sha256="p" * 64,
-        bundle_sha256="b" * 64,
-        canonical_prompt_sha256=CANONICAL,
+        prompt_sha256=stored.prompt_sha256,
+        bundle_sha256=stored.bundle_sha256,
+        canonical_prompt_sha256=stored.canonical_prompt_sha256,
+        answered_at=LATER,
     )
 
     plan = plan_recovery(store)
@@ -413,6 +439,7 @@ def test_a_prediction_cannot_be_recorded_without_its_attempt():
                        analysis_kind=AnalysisKind.ENTRY_DECISION)
     begun = store.begin(
         key,
+        stored_input=_stored_input(),
         security_id="s",
         decision_cutoff_at=CUTOFF,
         provider_id="p",

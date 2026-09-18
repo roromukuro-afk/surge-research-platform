@@ -72,6 +72,21 @@ DOCUMENTED_STRICT_MODELS = frozenset({"openai/gpt-oss-120b", "openai/gpt-oss-20b
 #: whatever the account is actually allowed.
 ANALYSIS_FREE_QUOTA_BLOCKED = "ANALYSIS_FREE_QUOTA_BLOCKED"
 
+class RequestMode(StrEnum):
+    """What a request is for, which decides which privacy gate applies.
+
+    Kept explicit rather than inferred from a flag, because the two differ in
+    what they are allowed to send and an inferred mode is one nobody reads.
+    """
+
+    #: Carries Canonical v5.1, the addenda and a real bundle. Needs the
+    #: production gate: not trained on *and* ZDR confirmed on for the account.
+    PRODUCTION = "PRODUCTION"
+    #: Carries a fixed harmless prompt and no method, no security, no price.
+    #: Used to find out whether the adapter can talk to the provider at all.
+    RESEARCH_SMOKE = "RESEARCH_SMOKE"
+
+
 class OutputMode(StrEnum):
     """What a model can be asked to return, as its vendor documents it today.
 
@@ -209,6 +224,10 @@ class ExternalToolUsed(GroqError):
     failure_class = FailureClass.EXTERNAL_TOOL_USED
 
 
+#: Reported when a provider may not receive production canonical traffic. Not a
+#: quality problem and not a quota problem: an exposure the terms do not cover.
+ANALYSIS_PRIVACY_GATE_BLOCKED = "ANALYSIS_PRIVACY_GATE_BLOCKED"
+
 #: Reported when a response says a built-in tool ran. Not a quality problem - a
 #: provenance one, and it disqualifies the output completely.
 ANALYSIS_EXTERNAL_TOOL_USED = "ANALYSIS_EXTERNAL_TOOL_USED"
@@ -333,6 +352,30 @@ class DataPolicy:
         return (
             "ZDR is available and nobody has confirmed it is switched on for this account. "
             "Whether it is on is a fact about the account, and this code has never seen the account"
+        )
+
+    def assert_production_privacy_gate_passes(self) -> None:
+        """The gate for production traffic, which is stricter than the other one.
+
+        Not training on inputs is what makes a one-off experiment acceptable.
+        Routine production traffic is a different exposure: every request
+        carries Canonical v5.1 in full, several times a day, for as long as the
+        system runs. For that, Zero Data Retention has to be *confirmed switched
+        on for this account* - not merely offered by the product.
+
+        UNKNOWN is refused as firmly as FALSE. Whether ZDR is on is a fact about
+        an account this code has never seen, and silence is not consent
+        (CLAUDE.md, the quad-state licence vocabulary). Treating "nobody has
+        checked" as a pass is exactly the reading that makes the check
+        decorative.
+        """
+
+        if self.privacy_gate_passes:
+            return
+        raise InputPolicyViolation(
+            f"{ANALYSIS_PRIVACY_GATE_BLOCKED}: {self.provider_id} may not receive production "
+            f"canonical requests - {self.privacy_gate_detail}. The canonical prompt, the addenda "
+            f"and the bundle are not sent. See {self.terms_url}"
         )
 
     def assert_may_receive_the_canonical_method(self) -> None:
@@ -854,6 +897,11 @@ class GroqHostedProvider:
     #: Overrides the derived mode when a family is known to accept a best-effort
     #: schema. Left unset, an undocumented model gets json_object.
     forced_output_mode: OutputMode | None = None
+    #: PRODUCTION by default, because the default has to be the strict one. A
+    #: smoke that forgot to say so would otherwise send the canonical method
+    #: under the weaker gate, which is the failure the two modes exist to
+    #: separate.
+    mode: RequestMode = RequestMode.PRODUCTION
     max_json_object_attempts: int = MAX_JSON_OBJECT_ATTEMPTS
     last_usage: GroqUsage | None = field(default=None, repr=False)
     last_preflight: Preflight | None = field(default=None, repr=False)
@@ -927,10 +975,24 @@ class GroqHostedProvider:
         if fmt is not None:
             payload["response_format"] = fmt
         if uses_built_in_tools(self.model_id):
-            # Asked for, not relied on. Groq documents neither of these for the
-            # compound systems, so they may be ignored entirely; the response
-            # check is what enforces the rule. Sending them anyway costs nothing
-            # and states the intent in the request itself.
+            # Two guards, and they are not the same strength.
+            #
+            # `tool_choice` is documented in the Groq API reference: "none means
+            # the model will not call any tool and instead generates a message",
+            # and `disable_tool_validation` says "tool_choice=required/none will
+            # still be enforced". So this is a request the API undertakes to
+            # honour, not a hint, and it is required here rather than optional.
+            #
+            # `compound_custom.tools.enabled_tools` is documented too - "a list
+            # of tool names that are enabled for the request" - but what an
+            # *empty* list means is not stated anywhere. It could plausibly read
+            # as "none" or as "unset, use the defaults", and the defaults are
+            # every built-in tool switched on. So it is sent as defence in depth
+            # and nothing depends on it alone.
+            #
+            # The response check is the third layer and the only unconditional
+            # one: whatever the request said, an answer that used a tool is
+            # refused.
             payload["tool_choice"] = "none"
             payload["compound_custom"] = {"tools": {"enabled_tools": []}}
         return json.dumps(payload).encode("utf-8")
@@ -975,7 +1037,18 @@ class GroqHostedProvider:
         return content
 
     def _call(self, prompt: str, *, schema_name: str, schema: dict) -> dict:
-        self.policy.assert_may_receive_the_canonical_method()
+        # The production gate, not the weaker one. This is the path every
+        # canonical request takes, and it carries the method in full: the
+        # requirement is not just "will not train on it" but "will not retain
+        # it, confirmed for this account".
+        #
+        # RESEARCH_SMOKE is the deliberate exception and it is a mode, not a
+        # relaxation - it sends a fixed harmless prompt, never the canonical
+        # method, so the gate it needs is the weaker one.
+        if self.mode is RequestMode.RESEARCH_SMOKE:
+            self.policy.assert_may_receive_the_canonical_method()
+        else:
+            self.policy.assert_production_privacy_gate_passes()
 
         check = preflight(
             prompt, quota=self.quota, reserved_output_tokens=self.max_completion_tokens
@@ -1108,14 +1181,20 @@ class GroqHostedProvider:
         # asking for structured output would make it depend on the very
         # capability it is being run to find out about - a probe that fails on
         # an undocumented model teaches nothing about that model's limits.
-        body = json.dumps(
-            {
-                "model": self.model_id,
-                "messages": [{"role": "user", "content": PROBE_PROMPT}],
-                "temperature": 0.0,
-                "max_completion_tokens": 16,
-            }
-        ).encode("utf-8")
+        probe = {
+            "model": self.model_id,
+            "messages": [{"role": "user", "content": PROBE_PROMPT}],
+            "temperature": 0.0,
+            "max_completion_tokens": 16,
+        }
+        if uses_built_in_tools(self.model_id):
+            # A probe has no reason to search the web either. Its answer is
+            # discarded, but a tool call would cost money, leave a trace at a
+            # third party and make the measured token count describe a request
+            # nothing else will ever send.
+            probe["tool_choice"] = "none"
+            probe["compound_custom"] = {"tools": {"enabled_tools": []}}
+        body = json.dumps(probe).encode("utf-8")
 
         response = self.transport(
             f"{self.base_url}/chat/completions",
@@ -1178,6 +1257,7 @@ def _decimal(value) -> Decimal | None:
 
 __all__ = [
     "ANALYSIS_EXTERNAL_TOOL_USED",
+    "ANALYSIS_PRIVACY_GATE_BLOCKED",
     "ANALYSIS_FREE_QUOTA_BLOCKED",
     "COMPOUND_MODEL_PREFIXES",
     "ExternalToolUsed",
@@ -1211,6 +1291,7 @@ __all__ = [
     "JSON_SCHEMA_UNSUPPORTED_BY_CURRENT_DOCS",
     "MAX_JSON_OBJECT_ATTEMPTS",
     "OutputMode",
+    "RequestMode",
     "entry_analysis_schema",
     "json_object_format",
     "schema_violations",

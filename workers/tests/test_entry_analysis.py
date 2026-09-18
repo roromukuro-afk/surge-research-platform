@@ -82,7 +82,6 @@ def _facts(**overrides) -> EntryGuardFacts:
         "universe": UniverseVerdict(decision="INCLUDED"),
         "decision_price": _price(),
         "decision_cutoff_at": CUTOFF,
-        "decision_completed_at": COMPLETED,
         "coverage_meets_requirements": True,
         "coverage_detail": "all required collectors reported",
     }
@@ -301,6 +300,7 @@ def test_the_decision_is_what_actually_refuses_an_over_limit_entry():
         security_id="JP:LOCAL:1234",
         thesis_key="t",
         bundle=_bundle(),
+        decision_completed_at=COMPLETED,
         entry_price=_price("3500"),
     )
     outcome = decide(request)
@@ -317,6 +317,7 @@ def test_a_failed_validation_has_no_path_into_the_decision():
             security_id="JP:LOCAL:1234",
             thesis_key="t",
             bundle=_bundle(),
+            decision_completed_at=COMPLETED,
         )
 
 
@@ -575,5 +576,6 @@ def test_the_analysis_kind_must_be_an_intraday_one():
             security_id="JP:LOCAL:1234",
             thesis_key="t",
             bundle=_bundle(),
+            decision_completed_at=COMPLETED,
             analysis_kind=AnalysisKind.EOD,
         )

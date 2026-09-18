@@ -25,7 +25,11 @@ import pytest
 
 psycopg2 = pytest.importorskip("psycopg2")
 
-from surge.runtime.schema_drift import compare  # noqa: E402
+from surge.runtime.schema_drift import (  # noqa: E402
+    PROJECT_SCHEMAS,
+    assert_scope_matches_the_database,
+    compare,
+)
 
 DSN = os.environ.get("SURGE_TEST_DATABASE_URL")
 
@@ -76,3 +80,25 @@ def test_the_comparison_examined_something(conn):
 
     assert report.examined > 60
     assert report.in_sync
+
+
+def test_this_module_and_the_database_agree_on_what_the_project_is(conn):
+    """Everything else here is scoped by PROJECT_SCHEMAS, so a schema missing
+    from it is a schema nothing checks - and the failure is silent, because a
+    narrower scope produces a shorter list of problems rather than an error.
+
+    A hand-kept copy of the list left out screening, material and chart. Four
+    live functions were never compared with anything and one of them had
+    drifted."""
+
+    assert_scope_matches_the_database(conn)
+
+
+def test_the_schemas_that_were_missing_are_in_scope(conn):
+    """Named rather than implied, so removing one fails here and not silently."""
+
+    assert {"screening", "material", "chart"} <= set(PROJECT_SCHEMAS)
+    assert "storage" not in PROJECT_SCHEMAS  # Supabase's, not the project's
+
+    report = compare(conn)
+    assert report.examined > 80

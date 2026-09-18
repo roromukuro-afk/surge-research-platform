@@ -28,14 +28,14 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 
 from surge.analysis.entry_analysis import (
     EntryAnalysisResponse,
+    EntryAnalysisState,
     EntryContractError,
     EntryGuardFacts,
     IntradayBundle,
-    render_entry_prompt,
     to_entry_request,
     validate_entry_analysis,
 )
@@ -45,6 +45,11 @@ from surge.analysis.execution import (
     FailureClass,
     classify_provider_failure,
 )
+from surge.analysis.input_snapshot import (
+    InputReconstructionError,
+    build_stored_input,
+    reconstruct,
+)
 from surge.analysis.llm import LLMRequest
 from surge.entry import db as entry_db
 from surge.entry.decision import decide
@@ -52,11 +57,17 @@ from surge.entry.models import (
     AnalysisKind,
     EntryAttemptStatus,
     Episode,
-    ObservedPrice,
     OpenEpisode,
     TransitionKind,
     VerificationStatus,
     WatchState,
+)
+from surge.entry.price_observer import (
+    ENTRY_PRICE_RECOVERY_DELAYED,
+    EntryPriceObservation,
+    EntryPriceUnavailable,
+    NoEntryPriceSource,
+    assert_observation_is_usable,
 )
 from surge.jobs.entry_analysis_job import WATCH_AFTER
 
@@ -80,6 +91,9 @@ class RunResult:
     episode_id: str | None = None
     already_decided: bool = False
     resumed: bool = False
+    #: When this system accepted the answer, by the runner's own clock. Every
+    #: entry price is required to have been observed after it.
+    decision_completed_at: datetime | None = None
     retried: bool = False
     failure_class: FailureClass | None = None
     notes: list[str] = field(default_factory=list)
@@ -102,6 +116,9 @@ class RunResult:
             ),
             "already_decided": self.already_decided,
             "resumed": self.resumed,
+            "decision_completed_at": (
+                self.decision_completed_at.isoformat() if self.decision_completed_at else None
+            ),
             "retried": self.retried,
             "failure_class": self.failure_class.value if self.failure_class else None,
             "notes": list(self.notes),
@@ -117,7 +134,18 @@ class ProductionEntryAnalysis:
     provider: object
     canonical_text: str
     addenda_texts: tuple[str, ...] = ()
+    #: Where the entry reference price comes from, asked only after a decision
+    #: exists. The default refuses, because no intraday source is bound (D-06b /
+    #: D-103-LIVE) and a runner that invented one would produce predictions
+    #: scored against a price nothing observed.
+    price_observer: object = field(default_factory=NoEntryPriceSource)
+    #: The runner's own clock. Injectable for tests and for nothing else: a
+    #: caller supplying decision_completed_at is the thing this replaced.
+    clock: object = None
     version: str = RUNNER_VERSION
+
+    def _now(self) -> datetime:
+        return self.clock() if self.clock is not None else datetime.now(UTC)
 
     # ------------------------------------------------------------------ run
 
@@ -126,23 +154,67 @@ class ProductionEntryAnalysis:
         *,
         watch_id: str,
         trigger_transition_id: int,
-        bundle: IntradayBundle,
-        facts: EntryGuardFacts,
-        thesis_key: str,
+        bundle: IntradayBundle | None = None,
+        facts: EntryGuardFacts | None = None,
+        thesis_key: str | None = None,
         now: datetime,
-        entry_price: ObservedPrice | None = None,
-        entry_price_method: str | None = None,
         setup_ids: tuple[str, ...] = (),
         run_id: str | None = None,
         analysis_kind: AnalysisKind = AnalysisKind.REANALYSIS,
         verification: VerificationStatus = VerificationStatus.IMPLEMENTED_NOT_LIVE_VERIFIED,
     ) -> RunResult:
         result = RunResult()
+
+        # This entrance belongs to the watch machine, so the kind is fixed. An
+        # ENTRY_DECISION recorded against a trigger would put an attempt saying
+        # "entered directly" beside a watch transition saying "reanalysis" - one
+        # event described two incompatible ways. A direct-entry path, when there
+        # is one, gets its own entrance rather than borrowing this one.
+        if analysis_kind is not AnalysisKind.REANALYSIS:
+            raise EntryContractError(
+                f"a watch trigger is answered by a REANALYSIS, not by {analysis_kind.value}; "
+                "this runner is the watch path and a direct entry needs its own"
+            )
+
         key = ExecutionKey(
             watch_id=watch_id,
             trigger_transition_id=trigger_transition_id,
             analysis_kind=analysis_kind,
         )
+
+        # A resumed analysis brings its own inputs back from disk. Building new
+        # ones would be answering a different question: twenty minutes on, an
+        # intraday bundle is a different price and a different tape.
+        existing = self.store.find(key) if hasattr(self.store, "find") else None
+        if existing is not None and existing.stored_input is not None and bundle is None:
+            try:
+                rebuilt = reconstruct(
+                    existing.stored_input,
+                    canonical_text=self.canonical_text,
+                    addenda_texts=self.addenda_texts,
+                )
+            except InputReconstructionError as exc:
+                return self._fail_terminally(
+                    existing,
+                    result,
+                    failure=FailureClass.INPUT_RECONSTRUCTION_MISMATCH,
+                    detail=str(exc),
+                    now=now,
+                )
+            bundle = rebuilt.bundle
+            facts = rebuilt.facts
+            thesis_key = rebuilt.thesis_key or thesis_key
+            setup_ids = tuple(existing.stored_input.setup_ids) or setup_ids
+            result.notes.append(
+                "the inputs came from the stored snapshot, not from the current session: a bundle "
+                "assembled now would be a different price and a different tape"
+            )
+
+        if bundle is None or facts is None:
+            raise EntryContractError(
+                "an analysis needs its bundle and its guard facts, either supplied or recovered "
+                "from the stored input of an execution already under way"
+            )
 
         # Coverage is a precondition of running at all, and it is checked before
         # TX1 so that a pass which cannot legitimately proceed leaves no trace of
@@ -157,7 +229,21 @@ class ProductionEntryAnalysis:
             return result
 
         # ---------------------------------------------------------- TX1
-        begun = self._tx1(key, facts=facts, now=now, run_id=run_id)
+        # The prompt is rendered here, before anything is sent, and the record
+        # of what was asked is committed with its hash. The same prompt object
+        # is the one that goes out: rendering a second one to send would usually
+        # produce identical text, and "usually" is the failure.
+        stored_input, prompt = build_stored_input(
+            bundle=bundle,
+            facts=facts,
+            canonical_text=self.canonical_text,
+            addenda_texts=self.addenda_texts,
+            thesis_key=thesis_key,
+            setup_ids=setup_ids,
+        )
+        begun = self._tx1(
+            key, facts=facts, now=now, run_id=run_id, stored_input=stored_input
+        )
         execution = begun.execution
         result.analysis_execution_id = execution.analysis_execution_id
         result.security_id = execution.security_id
@@ -175,7 +261,6 @@ class ProductionEntryAnalysis:
         # ---------------------------------------------------------- TX2
         response = execution.stored_answer
         if response is None:
-            prompt = render_entry_prompt(bundle, self.canonical_text, self.addenda_texts)
             request = LLMRequest(prompt=prompt, bundle=bundle)
             answer = self._tx2(execution, request, bundle, now=now, result=result)
             if answer is None:
@@ -201,10 +286,8 @@ class ProductionEntryAnalysis:
             response=response,
             bundle=bundle,
             facts=facts,
-            thesis_key=thesis_key,
+            thesis_key=thesis_key or "",
             now=now,
-            entry_price=entry_price,
-            entry_price_method=entry_price_method,
             setup_ids=setup_ids,
             run_id=run_id,
             analysis_kind=analysis_kind,
@@ -213,12 +296,13 @@ class ProductionEntryAnalysis:
 
     # ----------------------------------------------------------------- TX1
 
-    def _tx1(self, key: ExecutionKey, *, facts, now, run_id):
-        """Move the watch and record the analysis. Commit before the model."""
+    def _tx1(self, key: ExecutionKey, *, facts, now, run_id, stored_input):
+        """Move the watch, record the analysis and its input. Commit, then call."""
 
         try:
             begun = self.store.begin(
                 key,
+                stored_input=stored_input,
                 decision_cutoff_at=facts.decision_cutoff_at,
                 provider_id=getattr(self.provider, "provider_id", "?"),
                 provider_kind=getattr(
@@ -332,14 +416,12 @@ class ProductionEntryAnalysis:
         facts,
         thesis_key,
         now,
-        entry_price,
-        entry_price_method,
         setup_ids,
         run_id,
         analysis_kind,
         verification,
     ) -> RunResult:
-        """Validate, decide, write everything, move the watch, complete. Once."""
+        """Validate, fix the clock, price it, decide, write it all. Once."""
 
         watch_id = execution.key.watch_id
         try:
@@ -385,6 +467,20 @@ class ProductionEntryAnalysis:
                 return result
 
             # --- a real verdict ----------------------------------------------
+            # The decision is complete *here*: the model answered and the answer
+            # met the contract. This is the runner's clock, not a caller's
+            # declaration, because it is the line that decides which prices count
+            # as having been available afterwards.
+            decision_completed_at = execution.decision_completed_at or self._now()
+            result.decision_completed_at = decision_completed_at
+
+            entry_price, entry_price_method, price_evidence = self._observe_entry_price(
+                execution,
+                response,
+                result,
+                decision_completed_at=decision_completed_at,
+            )
+
             open_episode = self._open_episode(execution.security_id, thesis_key)
             request_for_decision = to_entry_request(
                 response,
@@ -399,6 +495,7 @@ class ProductionEntryAnalysis:
                 watch_id=watch_id,
                 open_episode=open_episode,
                 run_id=run_id,
+                decision_completed_at=decision_completed_at,
                 prompt_sha256=execution.prompt_sha256,
                 verification=verification,
                 validation=validation,
@@ -420,6 +517,11 @@ class ProductionEntryAnalysis:
                     thesis_key=thesis_key,
                     entry_price_observed_at=outcome.prediction.entry_price_observed_at,
                     opened_at=now,
+                    # The same value the attempt and the prediction carry. A
+                    # LIVE_VERIFIED prediction inside an unverified episode would
+                    # be scored as real evidence, and the episode is the unit
+                    # scoring counts.
+                    verification=verification,
                 )
                 episode_id = entry_db.write_episode(self.conn, episode)
                 prediction_id = entry_db.write_prediction(
@@ -469,6 +571,10 @@ class ProductionEntryAnalysis:
                 validation=validation,
                 entry_attempt_id=attempt_id,
                 prediction_id=prediction_id,
+                decision_completed_at=decision_completed_at,
+                entry_price=entry_price,
+                entry_price_method=entry_price_method,
+                entry_price_evidence=price_evidence,
             )
             self.conn.commit()
             return result
@@ -480,6 +586,101 @@ class ProductionEntryAnalysis:
             raise
 
     # ------------------------------------------------------------- helpers
+
+    def _observe_entry_price(self, execution, response, result, *, decision_completed_at):
+        """The price the entry would have been made at, fetched after the fact.
+
+        Only an ENTRY asks. A REJECT, a WATCH or a reaffirmation does not need a
+        price, and observing one spends a provider call on a number nothing
+        uses.
+
+        Failure here is a finding, not a fault: the attempt is still written,
+        with status NO_ENTRY_REFERENCE_PRICE. A decision that happened and could
+        not be priced is a different fact from a decision that did not happen,
+        and collapsing the two would quietly remove the awkward ones from the
+        ledger.
+        """
+
+        if response.state is not EntryAnalysisState.ENTRY:
+            return None, None, ()
+
+        evidence: list[str] = []
+        # A price observed during recovery is late, and says so. The alternative
+        # is back-dating it to the decision, which would claim the system could
+        # have traded at a price it was not running to see.
+        if execution.decision_completed_at is not None and execution.decision_completed_at < (
+            decision_completed_at
+        ):
+            evidence.append(ENTRY_PRICE_RECOVERY_DELAYED)
+        if result.resumed:
+            evidence.append(ENTRY_PRICE_RECOVERY_DELAYED)
+
+        try:
+            observation: EntryPriceObservation = self.price_observer.observe(
+                security_id=execution.security_id,
+                market_code=execution.key.watch_id and self._market_code(execution),
+                not_before=decision_completed_at,
+            )
+            assert_observation_is_usable(
+                observation, decision_completed_at=decision_completed_at
+            )
+        except EntryPriceUnavailable as exc:
+            result.notes.append(
+                f"no entry reference price could be observed after "
+                f"{decision_completed_at.isoformat()}: {exc}. The decision is recorded and no "
+                "prediction is made - a prediction needs a price it could have been made at"
+            )
+            return None, None, tuple(dict.fromkeys(evidence))
+
+        evidence.extend(observation.evidence)
+        return (
+            observation.price,
+            observation.method,
+            tuple(dict.fromkeys(evidence)),
+        )
+
+    def _market_code(self, execution) -> str:
+        """The market the bundle was assembled for, from the stored input."""
+
+        stored = execution.stored_input
+        if stored is None:
+            return "JP"
+        from surge.analysis.input_snapshot import rebuild_bundle
+
+        return rebuild_bundle(stored).market_code
+
+    def _fail_terminally(self, execution, result, *, failure, detail, now):
+        """Move the watch out of IN_REANALYSIS, then fail. In that order.
+
+        The database refuses to fail an execution whose watch is still
+        IN_REANALYSIS, which is what makes this order impossible to forget.
+        """
+
+        try:
+            entry_db.write_watch_transition(
+                self.conn,
+                watch_id=execution.key.watch_id,
+                from_state=WatchState.IN_REANALYSIS,
+                to_state=WatchState.REARMED,
+                occurred_at=now,
+                analysis_kind=AnalysisKind.REANALYSIS,
+                note=f"{failure.value}: {detail}"[:200],
+            )
+            self.store.fail(
+                execution.analysis_execution_id,
+                failure_class=failure,
+                failure_detail=detail,
+            )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        result.analysis_execution_id = execution.analysis_execution_id
+        result.security_id = execution.security_id
+        result.failure_class = failure
+        result.watch_state_after = WatchState.REARMED
+        result.notes.append(detail)
+        return result
 
     def _open_episode(self, security_id: str, thesis_key: str) -> OpenEpisode | None:
         row = entry_db.read_open_episode(
@@ -519,8 +720,14 @@ class Recovery:
         }
 
 
-def resume_all(runner: ProductionEntryAnalysis, *, bundles, facts_for, now, thesis_for) -> Recovery:
+def resume_all(runner: ProductionEntryAnalysis, *, now: datetime) -> Recovery:
     """Pick up every analysis that was started and never finished.
+
+    It takes no bundles, no facts and no thesis keys any more, and that is the
+    point. Taking them meant recovery depended on the process that built them
+    still being alive - which is the one thing a crash rules out - and a caller
+    that supplied fresh ones would have been resuming a *different* analysis
+    under the original trigger's name.
 
     Reads the executions rather than the watches. By the time the model is
     called the watch has already moved to IN_REANALYSIS, so a sweep for
@@ -529,11 +736,11 @@ def resume_all(runner: ProductionEntryAnalysis, *, bundles, facts_for, now, thes
 
     recovery = Recovery()
     for execution in runner.store.in_flight():
-        bundle = bundles.get(execution.analysis_execution_id)
-        if bundle is None:
-            # Reported, not skipped. Without the bundle this pass cannot resume
-            # the analysis, and the watch stays where the crash left it - which
-            # is a finding, not a non-event.
+        if not execution.can_be_resumed:
+            # Reported, not skipped. This is a watch sitting at IN_REANALYSIS
+            # that nothing can move, because nothing recorded what it was asked.
+            # Skipping it silently made "nothing was stuck" and "several things
+            # were stuck and I walked past them" produce the same empty result.
             recovery.unresumable.append(
                 {
                     "analysis_execution_id": execution.analysis_execution_id,
@@ -541,8 +748,8 @@ def resume_all(runner: ProductionEntryAnalysis, *, bundles, facts_for, now, thes
                     "status": execution.status.value,
                     "started_at": execution.started_at.isoformat(),
                     "why": (
-                        "no intraday bundle was supplied for this execution, so the analysis "
-                        "cannot be resumed and the watch is still IN_REANALYSIS"
+                        "no stored input, so what this analysis was asked is not recorded "
+                        "anywhere; the watch is still IN_REANALYSIS and nothing can finish it"
                     ),
                 }
             )
@@ -551,9 +758,6 @@ def resume_all(runner: ProductionEntryAnalysis, *, bundles, facts_for, now, thes
             runner.run_for_trigger(
                 watch_id=execution.key.watch_id,
                 trigger_transition_id=execution.key.trigger_transition_id,
-                bundle=bundle,
-                facts=facts_for(execution),
-                thesis_key=thesis_for(execution),
                 now=now,
                 analysis_kind=execution.key.analysis_kind,
             )

@@ -34,19 +34,37 @@ import pathlib
 import re
 from dataclasses import dataclass, field
 
-#: The schemas this project owns. Everything else in the database belongs to an
-#: extension or to Supabase, and is none of this check's business.
+#: The schemas this project owns, in the order ``pipeline.project_schemas()``
+#: returns them. That function is the canonical list - it is what the event
+#: trigger uses to decide where PUBLIC EXECUTE must be revoked - and this is a
+#: copy of it, which is a thing worth being nervous about.
+#:
+#: The nervousness was warranted. A hand-kept copy of this list left out
+#: ``screening``, ``material`` and ``chart``, so four live functions were never
+#: compared with anything, and one of them (``material.stage2_candidates``) had
+#: drifted. A checker with a narrower idea of the project than the project has
+#: reports "in sync" about the part it cannot see.
+#:
+#: ``storage`` is Supabase's and is deliberately not here.
+#:
+#: :func:`assert_scope_matches_the_database` compares this against the database's
+#: own answer, and the integration suite calls it - so the next schema added to
+#: ``pipeline.project_schemas()`` fails a test rather than quietly falling
+#: outside the guard.
 PROJECT_SCHEMAS: tuple[str, ...] = (
-    "prod",
-    "labels",
-    "market",
-    "analysis",
     "ref",
     "pipeline",
     "universe",
-    "news",
+    "prod",
     "research",
+    "market",
+    "screening",
+    "news",
+    "material",
+    "chart",
+    "analysis",
     "ui",
+    "labels",
 )
 
 #: `create [or replace] function <schema>.<name>(...) ... as $tag$ <body> $tag$`.
@@ -131,6 +149,41 @@ class DriftReport:
         if self.unmanaged:
             parts.append("defined in no migration: " + ", ".join(self.unmanaged))
         return "; ".join(parts)
+
+
+class ScopeMismatch(AssertionError):
+    """This module and the database disagree about what the project is."""
+
+
+def assert_scope_matches_the_database(conn) -> None:
+    """The copy above has to equal ``pipeline.project_schemas()``.
+
+    Not a nicety. Every guarantee this module offers is scoped by that tuple, so
+    a schema missing from it is a schema nothing checks - and the failure is
+    silent, because a narrower scope produces a shorter list of problems rather
+    than an error.
+    """
+
+    with conn.cursor() as cur:
+        cur.execute("select pipeline.project_schemas()")
+        canonical = set(cur.fetchone()[0])
+
+    mine = set(PROJECT_SCHEMAS)
+    if mine == canonical:
+        return
+
+    missing = sorted(canonical - mine)
+    extra = sorted(mine - canonical)
+    parts = []
+    if missing:
+        parts.append(f"not checked by this module: {', '.join(missing)}")
+    if extra:
+        parts.append(f"checked but not project schemas: {', '.join(extra)}")
+    raise ScopeMismatch(
+        "PROJECT_SCHEMAS disagrees with pipeline.project_schemas(); "
+        + "; ".join(parts)
+        + ". The database's list is the canonical one"
+    )
 
 
 _LIVE_FUNCTIONS = """

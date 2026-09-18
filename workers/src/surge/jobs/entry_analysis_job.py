@@ -44,7 +44,6 @@ from surge.analysis.entry_analysis import (
     EntryGuardFacts,
     EntryValidation,
     IntradayBundle,
-    render_entry_prompt,
     to_entry_request,
     validate_entry_analysis,
 )
@@ -53,6 +52,7 @@ from surge.analysis.execution import (
     ExecutionStore,
     FailureClass,
 )
+from surge.analysis.input_snapshot import build_stored_input
 from surge.analysis.llm import LLMRequest
 from surge.entry.decision import decide
 from surge.entry.models import (
@@ -159,6 +159,21 @@ class EntryAnalysisJob:
     #: and a crash loses it; the job says so in its notes rather than letting a
     #: docstring imply otherwise.
     executions: ExecutionStore | None = None
+    #: The job's own clock, for the two times it measures rather than accepts:
+    #: when the answer arrived and when the decision was complete. Injectable so
+    #: tests can pin it; not a parameter of the call, because a caller choosing
+    #: when its own decision finished is what this replaced.
+    clock: object = None
+
+    def _now(self, fallback: datetime) -> datetime:
+        """The clock, or the pass's own reference time if none was given.
+
+        The fallback is the ``now`` the caller passed for the pass as a whole.
+        That is still measured rather than chosen per decision, and it keeps a
+        test that pins one time from having to pin two.
+        """
+
+        return self.clock() if self.clock is not None else fallback
 
     def run_for_watch(
         self,
@@ -213,7 +228,18 @@ class EntryAnalysisJob:
             )
 
         notes: list[str] = []
-        prompt = render_entry_prompt(bundle, self.canonical_text, self.addenda_texts)
+        # The prompt is rendered once, hashed, and that hash is what the record
+        # of the request carries. Rendering a second one to send would usually
+        # produce the same text, and "usually" is exactly the failure a stored
+        # input is meant to make impossible.
+        stored_input, prompt = build_stored_input(
+            bundle=bundle,
+            facts=facts,
+            canonical_text=self.canonical_text,
+            addenda_texts=self.addenda_texts,
+            thesis_key=thesis_key,
+            setup_ids=setup_ids,
+        )
         request = LLMRequest(prompt=prompt, bundle=bundle)
         provider_id = getattr(self.provider, "provider_id", "?")
         execution_id: str | None = None
@@ -238,6 +264,7 @@ class EntryAnalysisJob:
             )
             begun = self.executions.begin(
                 key,
+                stored_input=stored_input,
                 security_id=bundle.security_id,
                 decision_cutoff_at=facts.decision_cutoff_at,
                 provider_id=provider_id,
@@ -323,9 +350,14 @@ class EntryAnalysisJob:
                     prompt_sha256=request.prompt_sha256,
                     bundle_sha256=bundle.bundle_sha256,
                     canonical_prompt_sha256=bundle.canonical_prompt_sha256,
+                    answered_at=self._now(now),
                 )
 
         validation = validate_entry_analysis(response, facts, bundle=bundle)
+        # The decision is complete here: the model answered and the answer met
+        # the contract. Measured rather than declared, because it is the line
+        # that decides which prices count as available afterwards.
+        decision_completed_at = self._now(now)
 
         decision = IntradayDecision(
             security_id=bundle.security_id,
@@ -396,6 +428,7 @@ class EntryAnalysisJob:
             thesis_key=thesis_key,
             bundle=bundle,
             analysis_kind=analysis_kind,
+            decision_completed_at=decision_completed_at,
             entry_price=entry_price,
             entry_price_method=entry_price_method,
             setup_ids=setup_ids,

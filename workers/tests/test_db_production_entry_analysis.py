@@ -27,6 +27,7 @@ psycopg2 = pytest.importorskip("psycopg2")
 from surge.analysis.entry_analysis import (  # noqa: E402
     EntryAnalysisResponse,
     EntryAnalysisState,
+    EntryContractError,
     EntryGuardFacts,
     IntradayBundle,
 )
@@ -37,13 +38,19 @@ from surge.analysis.execution import (  # noqa: E402
     FailureClass,
 )
 from surge.analysis.execution_db import DatabaseExecutionStore  # noqa: E402
+from surge.analysis.input_snapshot import build_stored_input, reconstruct  # noqa: E402
 from surge.analysis.llm import ProviderKind, ZoneBasisKind  # noqa: E402
 from surge.entry.models import (  # noqa: E402
     AnalysisKind,
     EntryAttemptStatus,
     ObservedPrice,
     UniverseVerdict,
+    VerificationStatus,
     WatchState,
+)
+from surge.entry.price_observer import (  # noqa: E402
+    EntryPriceObservation,
+    EntryPriceUnavailable,
 )
 from surge.jobs.production_entry_analysis import (  # noqa: E402
     ProductionEntryAnalysis,
@@ -61,6 +68,9 @@ pytestmark = [
 CUTOFF = datetime(2026, 9, 17, 2, 15, tzinfo=UTC)
 COMPLETED_AT = datetime(2026, 9, 17, 2, 16, tzinfo=UTC)
 LATER = datetime(2026, 9, 17, 2, 17, tzinfo=UTC)
+#: When the runner accepts the answer. After the cutoff and after LATER, so
+#: an entry price observed afterwards is unambiguously afterwards.
+DECIDED_AT = datetime(2026, 9, 17, 2, 18, tzinfo=UTC)
 CANONICAL = "c" * 64
 
 
@@ -158,6 +168,7 @@ def _bundle(security_id: str) -> IntradayBundle:
         session_date=date(2026, 9, 17),
         decision_cutoff_at=CUTOFF,
         canonical_prompt_sha256=CANONICAL,
+        answered_at=LATER,
         sections={
             "live_price": {"price": "1000"},
             "stage3_setup": {"state": "WATCH_BREAKOUT"},
@@ -173,7 +184,6 @@ def _facts(**overrides) -> EntryGuardFacts:
             amount=Decimal("1000"), currency="JPY", observed_at=CUTOFF
         ),
         "decision_cutoff_at": CUTOFF,
-        "decision_completed_at": COMPLETED_AT,
         "coverage_meets_requirements": True,
         "coverage_detail": "all collectors reported",
     }
@@ -218,12 +228,46 @@ class _Provider:
         return self._response
 
 
-def _runner(conn, provider) -> ProductionEntryAnalysis:
+class _Observer:
+    """An intraday price source, for tests only.
+
+    Returns a price stamped at ``not_before`` plus a second, which is what a
+    real one has to do: the runner refuses anything observed before the decision
+    completed. A stub that returned a fixed timestamp would pass by accident.
+    """
+
+    method = "LAST_TRADE"
+
+    def __init__(self, amount="1005", raises=None, at_offset=timedelta(seconds=1)):
+        self._amount = amount
+        self._raises = raises
+        self._offset = at_offset
+        self.calls = 0
+
+    def observe(self, *, security_id, market_code, not_before):
+        self.calls += 1
+        if self._raises:
+            raise self._raises
+        return EntryPriceObservation(
+            price=ObservedPrice(
+                amount=Decimal(self._amount),
+                currency="JPY",
+                observed_at=not_before + self._offset,
+            ),
+            method=self.method,
+        )
+
+
+def _runner(conn, provider, observer=None) -> ProductionEntryAnalysis:
     return ProductionEntryAnalysis(
         conn=conn,
         store=DatabaseExecutionStore(conn),
         provider=provider,
         canonical_text="CANONICAL",
+        price_observer=observer if observer is not None else _Observer(),
+        # Pinned so the ordering assertions are about the code rather than about
+        # how long the test took.
+        clock=lambda: DECIDED_AT,
     )
 
 
@@ -235,10 +279,6 @@ def _run(runner, watch_id, security_id, trigger_id, **overrides):
         "facts": _facts(),
         "thesis_key": "WATCH_BREAKOUT|R_A",
         "now": LATER,
-        "entry_price": ObservedPrice(
-            amount=Decimal("1005"), currency="JPY", observed_at=LATER
-        ),
-        "entry_price_method": "LAST_TRADE",
     }
     kwargs.update(overrides)
     return runner.run_for_trigger(**kwargs)
@@ -461,6 +501,7 @@ def test_a_crash_after_tx2_resumes_from_the_stored_answer(conn):
         prompt_sha256="p" * 64,
         bundle_sha256="b" * 64,
         canonical_prompt_sha256=CANONICAL,
+        answered_at=LATER,
     )
     conn.commit()
 
@@ -501,6 +542,7 @@ def test_the_stored_answer_round_trips_without_losing_the_zone_basis(conn):
         prompt_sha256="p" * 64,
         bundle_sha256="b" * 64,
         canonical_prompt_sha256=CANONICAL,
+        answered_at=LATER,
     )
     conn.commit()
 
@@ -803,3 +845,244 @@ def test_completion_without_the_hashes_is_refused_for_a_hosted_model(conn):
             validation=EntryValidation(status=ValidationStatus.PASSED),
         )
     conn.rollback()
+
+
+# ------------------------------- the input survives the process (Audit 5 A)
+
+
+def test_a_crash_after_tx1_leaves_everything_needed_to_finish(conn):
+    """Not just a findable row - a resumable one. The bundle used to live in the
+    caller's memory, so recovery depended on the process that died still being
+    alive, and a recovery pass that built a new bundle would have been resuming
+    a different analysis under the original trigger's name."""
+
+    watch_id, security_id, trigger_id = _triggered(conn)
+    runner = _runner(conn, _Provider(raises=SystemExit("killed mid-call")))
+
+    with pytest.raises(SystemExit):
+        _run(runner, watch_id, security_id, trigger_id)
+
+    other = psycopg2.connect(DSN)
+    try:
+        reloaded = DatabaseExecutionStore(other).find(
+            ExecutionKey(
+                watch_id=watch_id,
+                trigger_transition_id=trigger_id,
+                analysis_kind=AnalysisKind.REANALYSIS,
+            )
+        )
+    finally:
+        other.close()
+
+    stored = reloaded.stored_input
+    assert stored is not None
+    assert reloaded.can_be_resumed
+    assert stored.bundle_serialized
+    assert len(stored.prompt_sha256) == 64
+    assert stored.thesis_key == "WATCH_BREAKOUT|R_A"
+    assert stored.decision_price == Decimal("1000")
+    assert stored.universe_decision == "INCLUDED"
+    # And it rebuilds into the prompt that was sent.
+    rebuilt = reconstruct(stored, canonical_text="CANONICAL")
+    assert rebuilt.bundle.bundle_sha256 == stored.bundle_sha256
+
+
+def test_recovery_runs_from_the_stored_input_with_no_bundle_in_hand(conn):
+    """The whole point of the snapshot: resume_all takes no bundles, no facts
+    and no thesis keys, because taking them meant depending on the process that
+    crashed."""
+
+    watch_id, security_id, trigger_id = _triggered(conn)
+    runner = _runner(conn, _Provider(raises=TimeoutError("connection timed out")))
+    started = _run(runner, watch_id, security_id, trigger_id)
+    assert started.retried
+
+    # A different runner, with a provider that will answer, and nothing in hand.
+    answering = _runner(conn, _Provider())
+    recovery = resume_all(answering, now=LATER)
+
+    mine = [
+        r for r in recovery.resumed
+        if r.analysis_execution_id == started.analysis_execution_id
+    ]
+    assert len(mine) == 1
+    assert mine[0].created_a_prediction
+    assert not [u for u in recovery.unresumable if u["watch_id"] == watch_id]
+
+
+def test_a_canonical_file_that_moved_stops_the_resume(conn):
+    """The stored input is intact and the method is not. Continuing would
+    attribute a decision to inputs it never saw, so the analysis fails as
+    INPUT_RECONSTRUCTION_MISMATCH and the watch re-arms."""
+
+    watch_id, security_id, trigger_id = _triggered(conn)
+    runner = _runner(conn, _Provider(raises=TimeoutError("timed out")))
+    started = _run(runner, watch_id, security_id, trigger_id)
+    assert started.retried
+
+    moved_on = ProductionEntryAnalysis(
+        conn=conn,
+        store=DatabaseExecutionStore(conn),
+        provider=_Provider(),
+        canonical_text="CANONICAL, with a paragraph added since",
+        price_observer=_Observer(),
+        clock=lambda: DECIDED_AT,
+    )
+    recovery = resume_all(moved_on, now=LATER)
+
+    result = next(
+        r for r in recovery.resumed
+        if r.analysis_execution_id == started.analysis_execution_id
+    )
+    assert result.failure_class is FailureClass.INPUT_RECONSTRUCTION_MISMATCH
+    status, watch_state = _status(conn, result.analysis_execution_id)
+    assert status == "FAILED"
+    assert watch_state == "REARMED"
+
+
+# --------------------- the decision's clock and the price (Audit 5 B and C)
+
+
+def test_the_entry_price_is_observed_after_the_decision_not_before(conn):
+    """It used to be an argument, which meant it had been observed before the
+    analysis even started: the most favourable possible reading, handed in by
+    the caller."""
+
+    watch_id, security_id, trigger_id = _triggered(conn)
+    observer = _Observer()
+    result = _run(_runner(conn, _Provider(), observer), watch_id, security_id, trigger_id)
+
+    assert observer.calls == 1
+    assert result.decision_completed_at == DECIDED_AT
+    assert result.created_a_prediction
+
+    conn.rollback()
+    with conn.cursor() as cur:
+        cur.execute(
+            "select decision_completed_at, entry_price_observed_at, entry_price_method, "
+            "analysis_answered_at from prod.entry_analysis_executions "
+            "where analysis_execution_id = %s",
+            (result.analysis_execution_id,),
+        )
+        completed, observed, method, answered = cur.fetchone()
+
+    assert completed == DECIDED_AT
+    assert observed > completed
+    assert method == "LAST_TRADE"
+    assert answered is not None and answered <= completed
+
+
+def test_no_price_is_observed_for_anything_that_is_not_an_entry(conn):
+    """A REJECT does not need one, and asking spends a provider call on a number
+    nothing uses."""
+
+    watch_id, security_id, trigger_id = _triggered(conn)
+    observer = _Observer()
+    rejected = _answer(state=EntryAnalysisState.REJECT, reject_reason="the level failed")
+    result = _run(
+        _runner(conn, _Provider(response=rejected), observer),
+        watch_id,
+        security_id,
+        trigger_id,
+    )
+
+    assert observer.calls == 0
+    assert result.prediction_id is None
+
+
+def test_an_unpriceable_entry_is_recorded_rather_than_lost(conn):
+    """No intraday source is bound today, so this is the shape of every real
+    ENTRY until one is. The decision happened; it could not be priced; both
+    facts are in the ledger."""
+
+    watch_id, security_id, trigger_id = _triggered(conn)
+    observer = _Observer(raises=EntryPriceUnavailable("no intraday source is bound"))
+    result = _run(_runner(conn, _Provider(), observer), watch_id, security_id, trigger_id)
+
+    assert result.attempt_status is EntryAttemptStatus.NO_ENTRY_REFERENCE_PRICE
+    assert result.attempt_id is not None
+    assert result.prediction_id is None
+    status, _watch_state = _status(conn, result.analysis_execution_id)
+    assert status == "COMPLETED"
+
+
+# ----------------------------------- one entrance, one kind (Audit 5 D and I)
+
+
+def test_a_direct_entry_cannot_borrow_the_watch_entrance(conn):
+    """A watch trigger answered by an ENTRY_DECISION would put an attempt saying
+    "entered directly" beside a transition saying "reanalysis"."""
+
+    watch_id, security_id, trigger_id = _triggered(conn)
+
+    with pytest.raises(EntryContractError, match="answered by a REANALYSIS"):
+        _run(
+            _runner(conn, _Provider()),
+            watch_id,
+            security_id,
+            trigger_id,
+            analysis_kind=AnalysisKind.ENTRY_DECISION,
+        )
+
+
+def test_a_trigger_cannot_be_answered_by_an_analysis_that_predates_it(conn):
+    """The bundle would have been assembled before the event it is a reaction
+    to, so the analysis would be answering something it could not have seen."""
+
+    watch_id, security_id, trigger_id = _triggered(conn)
+    store = DatabaseExecutionStore(conn)
+    stored, _prompt = build_stored_input(
+        bundle=_bundle(security_id),
+        facts=_facts(),
+        canonical_text="CANONICAL",
+        thesis_key="WATCH_BREAKOUT|R_A",
+    )
+
+    with pytest.raises(psycopg2.errors.RaiseException, match="predates the event"):
+        store.begin(
+            ExecutionKey(
+                watch_id=watch_id,
+                trigger_transition_id=trigger_id,
+                analysis_kind=AnalysisKind.REANALYSIS,
+            ),
+            stored_input=stored,
+            # Long before the trigger, which the fixture stamps with now().
+            decision_cutoff_at=datetime(2020, 1, 1, tzinfo=UTC),
+            provider_id="groq_hosted",
+            provider_kind="HOSTED_LLM",
+            run_id=None,
+            now=LATER,
+        )
+    conn.rollback()
+
+
+# ------------------------------------- verification reaches the episode (H)
+
+
+def test_verification_travels_as_far_as_the_episode(conn):
+    """The episode is the unit scoring counts. A LIVE_VERIFIED prediction inside
+    an episode nobody verified would be counted as real evidence."""
+
+    watch_id, security_id, trigger_id = _triggered(conn)
+    result = _run(
+        _runner(conn, _Provider()),
+        watch_id,
+        security_id,
+        trigger_id,
+        verification=VerificationStatus.IMPLEMENTED_NOT_LIVE_VERIFIED,
+    )
+    assert result.episode_id
+
+    conn.rollback()
+    with conn.cursor() as cur:
+        cur.execute(
+            "select e.verification::text, p.verification::text, a.verification::text "
+            "from prod.episodes e "
+            "join prod.predictions p on p.episode_id = e.episode_id "
+            "join prod.entry_attempts a on a.attempt_id = p.attempt_id "
+            "where e.episode_id = %s",
+            (result.episode_id,),
+        )
+        episode, prediction, attempt = cur.fetchone()
+
+    assert episode == prediction == attempt == "IMPLEMENTED_NOT_LIVE_VERIFIED"
