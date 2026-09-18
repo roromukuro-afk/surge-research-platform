@@ -18,12 +18,17 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import (
+    UTC,
+    date,  # noqa: E402
+    datetime,
+)
 from decimal import Decimal
 
 import pytest
 
 from surge.analysis.entry_analysis import EntryAnalysisState
+from surge.analysis.execution import FailureClass, classify_provider_failure  # noqa: E402
 from surge.analysis.groq_provider import (  # noqa: E402
     ANALYSIS_EXTERNAL_TOOL_USED,
     ANALYSIS_FREE_QUOTA_BLOCKED,
@@ -43,11 +48,15 @@ from surge.analysis.groq_provider import (  # noqa: E402
     OutputMode,
     Quota,
     QuotaUnknown,
+    RateLimited,
     RequestMode,
+    RequestTooLarge,
     Retention,
     StructuredOutputError,
     entry_analysis_schema,
     estimate_tokens,
+    failure_for_status,
+    policy_from_env,
     preflight,
     quota_from_headers,
     response_format,
@@ -259,6 +268,26 @@ def test_a_combined_meter_counts_the_completion_reserve_too():
     assert "completion reserve" in with_reserve.reason
 
 
+def test_only_a_prompt_that_is_over_by_itself_is_called_unsendable():
+    """Measured (D-256): Groq counts the completion as less than
+    max_completion_tokens. So "cannot be sent at all" is certain only when the
+    prompt alone is over; when it is the reserve that tips it over, Groq may
+    well accept - it still does not fit a paced batch, and the reason says the
+    contract smoke decides rather than claiming a refusal nobody observed."""
+
+    prompt = "x" * 14_000  # about 4,000 estimated tokens
+
+    prompt_over = preflight(prompt, quota=Quota(max_tokens_per_minute=3_000),
+                            reserved_output_tokens=2_048)
+    reserve_over = preflight(prompt, quota=Quota(max_tokens_per_minute=5_000),
+                             reserved_output_tokens=2_048)
+
+    assert not prompt_over.fits and not reserve_over.fits
+    assert "cannot be sent at all" in prompt_over.reason
+    assert "cannot be sent at all" not in reserve_over.reason
+    assert "contract smoke decides" in reserve_over.reason
+
+
 def test_separate_input_and_output_meters_are_judged_separately():
     """An account with ITPM and OTPM is not the same as one combined figure,
     and adding them would refuse requests that fit."""
@@ -445,6 +474,26 @@ def test_the_entry_schema_carries_the_two_fields_an_entry_cannot_do_without():
     assert "decision_price_used" in schema["properties"]
     assert schema["properties"]["state"]["enum"] == [s.value for s in EntryAnalysisState]
     assert set(schema["required"]) == set(schema["properties"])
+
+
+def _full_entry(**overrides) -> dict:
+    """A complete, contract-valid Entry answer."""
+
+    base = {
+        "state": "ENTRY",
+        "rationale": "cleared the level on expanding volume; enter now",
+        "decision_price_used": 1000,
+        "proposed_initial_failure_line": 940,
+        "reachable_zone_low": 1010,
+        "reachable_zone_high": 1150,
+        "reachable_zone_basis_kinds": ["VOLUME_STRUCTURE"],
+        "reachable_zone_basis": "expanding volume through the level",
+        "concepts_considered": [],
+        "watch_trigger_description": None,
+        "reject_reason": None,
+    }
+    base.update(overrides)
+    return base
 
 
 def _full_stage3(**overrides) -> dict:
@@ -688,9 +737,54 @@ def test_content_that_is_not_json_is_refused():
 # ------------------------------------------------------------ credentials
 
 
-def test_a_missing_key_names_the_file_and_the_consequence():
-    with pytest.raises(CredentialsMissing, match=r"\.env\.local"):
+def test_a_missing_key_names_where_it_actually_comes_from():
+    """It used to say ".env.local", and nothing in the worker has ever read that
+    file - so following the instruction would have produced the same error."""
+
+    with pytest.raises(CredentialsMissing, match="Set-SurgeSecret"):
         GroqHostedProvider.from_env({ENV_API_KEY: ""})
+
+
+# ------------------------------------ ZDR is an observation of one account
+
+
+def test_without_an_observation_zdr_is_unknown_and_production_is_refused():
+    """The published terms are the same for every account; whether ZDR is on is
+    not. So the code's own answer stays unknown until someone has looked."""
+
+    policy = policy_from_env({})
+
+    assert policy.zero_data_retention_enabled is None
+    assert not policy.privacy_gate_passes
+
+
+def test_an_observation_of_the_console_passes_the_gate_and_says_when():
+    policy = policy_from_env({"GROQ_ZDR_CONFIRMED_ON": "2026-09-18"}, today=date(2026, 9, 18))
+
+    assert policy.zero_data_retention_enabled is True
+    assert policy.privacy_gate_passes
+    assert "2026-09-18" in policy.notes
+
+
+def test_an_observation_dated_in_the_future_is_refused():
+    """Nobody observed a setting tomorrow. Accepting one would make the
+    attestation a formality."""
+
+    with pytest.raises(GroqError, match="has not happened yet"):
+        policy_from_env({"GROQ_ZDR_CONFIRMED_ON": "2026-09-19"}, today=date(2026, 9, 18))
+
+
+def test_a_malformed_observation_is_refused_rather_than_ignored():
+    with pytest.raises(GroqError, match="ISO date"):
+        policy_from_env({"GROQ_ZDR_CONFIRMED_ON": "yes"})
+
+
+def test_from_env_carries_the_observed_policy_into_the_provider():
+    provider = GroqHostedProvider.from_env(
+        {ENV_API_KEY: "gsk-x", "GROQ_MODEL": "groq/compound", "GROQ_ZDR_CONFIRMED_ON": "2026-09-18"}
+    )
+
+    assert provider.policy.privacy_gate_passes
 
 
 def test_a_missing_model_is_refused_rather_than_defaulted():
@@ -908,3 +1002,164 @@ def test_the_quota_probe_also_refuses_tools():
     body = sent["body"]
     assert body["tool_choice"] == "none"
     assert body["compound_custom"] == {"tools": {"enabled_tools": []}}
+
+
+# ------------------------- json_object requests have to say "json" (live 400)
+
+
+def _groq_rule(body: dict) -> None:
+    """What Groq does, found by the first live request: a json_object response
+    format is refused unless some message contains the word json. Written down
+    here because the fake transport used to accept anything, which is how a path
+    that could never have worked passed every test."""
+
+    if (body.get("response_format") or {}).get("type") == "json_object":
+        joined = " ".join(m.get("content") or "" for m in body.get("messages") or [])
+        if "json" not in joined.lower():
+            raise AssertionError(
+                "'messages' must contain the word 'json' in some form, to use "
+                "'response_format' of type 'json_object'"
+            )
+
+
+def test_a_json_object_request_satisfies_groqs_json_rule():
+    provider = _provider(_completion(_full_entry()), model_id="groq/compound")
+
+    provider.analyse_entry(LLMRequest(prompt="the rendered entry prompt", bundle=None))
+
+    body = provider._sent["body"]
+    assert body["response_format"] == {"type": "json_object"}
+    _groq_rule(body)
+
+
+def test_the_schema_travels_in_its_own_message_and_the_prompt_is_untouched():
+    """The prompt is what prompt_sha256 is taken over at TX1, so it has to be
+    the same whichever output mode carries it. The schema goes beside it."""
+
+    provider = _provider(_completion(_full_entry()), model_id="groq/compound")
+
+    provider.analyse_entry(LLMRequest(prompt="the rendered entry prompt", bundle=None))
+
+    messages = provider._sent["body"]["messages"]
+    assert messages[0]["role"] == "system"
+    assert '"state"' in messages[0]["content"]
+    assert messages[-1] == {"role": "user", "content": "the rendered entry prompt"}
+
+
+def test_a_strict_request_sends_the_prompt_alone():
+    """Structured Outputs enforces the schema itself; nothing is added."""
+
+    provider = _provider(_completion(_full_entry()), model_id="openai/gpt-oss-120b")
+
+    provider.analyse_entry(LLMRequest(prompt="the rendered entry prompt", bundle=None))
+
+    assert provider._sent["body"]["messages"] == [
+        {"role": "user", "content": "the rendered entry prompt"}
+    ]
+
+
+def test_the_preflight_counts_the_framing_as_well_as_the_prompt():
+    """A preflight that left the schema out would pass a request the account
+    refuses."""
+
+    provider = _provider(_completion(_full_entry()), model_id="groq/compound")
+
+    provider.analyse_entry(LLMRequest(prompt="x", bundle=None))
+
+    framing = GroqHostedProvider.json_object_framing(entry_analysis_schema())
+    assert provider.last_preflight.prompt_tokens_estimated > len(framing) // 8
+
+
+# ---------------------------- every HTTP status says whether it can recover
+
+
+class _HttpErrorTransport:
+    """Raises the way the real transport does for a 4xx: urllib's HTTPError."""
+
+    def __init__(self, status: int, body: dict | None = None):
+        self.status = status
+        self.body = body or {}
+
+    def __call__(self, url, **kwargs):
+        import io
+        import urllib.error
+
+        raise urllib.error.HTTPError(
+            url, self.status, "error", {}, io.BytesIO(json.dumps(self.body).encode())
+        )
+
+
+def _provider_raising(status: int, body: dict | None = None) -> GroqHostedProvider:
+    provider = GroqHostedProvider(
+        model_id="groq/compound",
+        api_key="gsk-not-a-real-key",
+        policy=ZDR_CONFIRMED,
+        transport=_HttpErrorTransport(status, body),
+        quota=Quota(max_tokens_per_minute=70_000),
+    )
+    return provider
+
+
+@pytest.mark.parametrize(
+    ("status", "failure_class", "transient"),
+    [
+        (413, FailureClass.QUOTA_BLOCKED, False),
+        (400, FailureClass.CONTRACT_VIOLATION, False),
+        (422, FailureClass.CONTRACT_VIOLATION, False),
+        (401, FailureClass.PROVIDER_NOT_CONFIGURED, False),
+        (403, FailureClass.PROVIDER_NOT_CONFIGURED, False),
+        (404, FailureClass.PROVIDER_NOT_CONFIGURED, False),
+    ],
+)
+def test_a_client_error_is_terminal_and_says_which_kind(status, failure_class, transient):
+    """urllib's HTTPError is an OSError, and an OSError reads as the network -
+    so without this a 413 or a 400 would be retried as a dropped connection,
+    five times, sending the same refused request each time."""
+
+    provider = _provider_raising(status)
+
+    with pytest.raises(GroqError) as caught:
+        provider.analyse_entry(LLMRequest(prompt="p", bundle=None))
+
+    assert classify_provider_failure(caught.value) is failure_class
+    assert failure_class.is_transient is transient
+
+
+def test_a_413_is_the_one_found_live_and_it_carries_groqs_explanation():
+    provider = _provider_raising(
+        413,
+        {"error": {"type": "invalid_request_error", "code": "request_too_large",
+                   "message": "Request Entity Too Large"}},
+    )
+
+    with pytest.raises(RequestTooLarge, match="request_too_large"):
+        provider.analyse_entry(LLMRequest(prompt="p", bundle=None))
+
+
+def test_a_rate_limit_the_transport_gave_up_on_is_still_a_rate_limit():
+    """The transport retries a 429 itself and then raises a RuntimeError. The
+    status survives as the chained cause, so this is retried later rather than
+    failed now."""
+
+    import io
+    import urllib.error
+
+    def exhausted(url, **kwargs):
+        last = urllib.error.HTTPError(url, 429, "Too Many Requests", {}, io.BytesIO(b"{}"))
+        raise RuntimeError(f"fetch failed after 3 attempts: {url}: {last}") from last
+
+    provider = GroqHostedProvider(
+        model_id="groq/compound", api_key="gsk-not-a-real-key", policy=ZDR_CONFIRMED,
+        transport=exhausted, quota=Quota(max_tokens_per_minute=70_000),
+    )
+
+    with pytest.raises(RateLimited) as caught:
+        provider.analyse_entry(LLMRequest(prompt="p", bundle=None))
+
+    assert classify_provider_failure(caught.value) is FailureClass.PROVIDER_RATE_LIMITED
+    assert FailureClass.PROVIDER_RATE_LIMITED.is_transient
+
+
+def test_a_server_error_is_transient():
+    assert classify_provider_failure(failure_for_status(503, "")) is FailureClass.PROVIDER_ERROR
+    assert FailureClass.PROVIDER_ERROR.is_transient

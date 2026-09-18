@@ -145,8 +145,10 @@ class Credentials:
         secret = (source.get("APCA_API_SECRET_KEY") or "").strip()
         if not key_id or not secret:
             raise CredentialsMissing(
-                "APCA_API_KEY_ID and APCA_API_SECRET_KEY are not both set. Put them in .env.local "
-                "(never in the repository, never in a chat message) and re-run. Until then this "
+                "APCA_API_KEY_ID and APCA_API_SECRET_KEY are not both set. On this machine they "
+                "come from the encrypted store (ops\\windows\\Set-SurgeSecret.ps1), and the job runs "
+                "through ops\\windows\\Invoke-WithSurgeSecrets.ps1 - never in the repository, never "
+                "in a chat message. Until then this "
                 "provider is IMPLEMENTED_NOT_LIVE_VERIFIED: the adapter and its contract tests "
                 "exist and it has never called Alpaca"
             )
@@ -576,6 +578,74 @@ def next_page_token(payload: dict[str, Any]) -> str | None:
     return token or None
 
 
+#: Alpaca stamps a daily bar at 00:00 New York time of the session (04:00Z in
+#: daylight time, 05:00Z in standard time - see ``session_date_of``); the regular
+#: session ends at 16:00 the same day, so sixteen hours after the stamp. On a
+#: 13:00 early close that is three hours late, which only makes the confirmation
+#: wait longer than it had to.
+REGULAR_CLOSE_AFTER_STAMP = timedelta(hours=16)
+
+
+def session_close(
+    symbol: str,
+    session_date: date,
+    *,
+    now: datetime | None = None,
+    credentials: Credentials | None = None,
+    transport=fetch,
+):
+    """The confirmed close of ``session_date`` for a US ``symbol``: the SIP daily bar (D-262).
+
+    Read with the window ending at the latest permitted end, and confirmed only
+    if the session had ended - plus the free plan's fifteen-minute SIP delay -
+    before it was read; otherwise the bar may still be growing.
+    """
+
+    from surge.entry.session_close import (
+        SessionClose,
+        SessionCloseUnavailable,
+        assert_close_is_confirmed,
+    )
+
+    now = now or datetime.now(UTC)
+    # Up to midday UTC the next day covers the session's bar (stamped 04:00Z or
+    # 05:00Z on the day) without pulling every session since.
+    day_after = datetime(session_date.year, session_date.month, session_date.day, 12, tzinfo=UTC) + timedelta(days=1)
+    try:
+        payload, provenance = fetch_bars(
+            [symbol],
+            start=session_date,
+            end=min(latest_permitted_end(now), day_after),
+            now=now,
+            credentials=credentials,
+            transport=transport,
+            asof=session_date,
+        )
+        bars = to_canonical_bars(payload, provenance=provenance)
+    except (RuntimeError, OSError, ValueError, ArithmeticError) as exc:
+        raise SessionCloseUnavailable(f"the SIP daily bar for {symbol} could not be read: {exc}") from exc
+    matching = [b for b in bars if b.native_symbol == symbol and b.trade_date == session_date]
+    if not matching or matching[0].close is None:
+        raise SessionCloseUnavailable(f"no {session_date.isoformat()} SIP daily bar for {symbol}")
+    bar = matching[0]
+    close = SessionClose(
+        market_code="US",
+        symbol=symbol,
+        session_date=session_date,
+        close=bar.close,
+        currency=bar.currency,
+        session_closed_at=bar.source_timestamp + REGULAR_CLOSE_AFTER_STAMP,
+        fetched_at=provenance.received_at,
+        provider="ALPACA",
+        feed=FEED,
+        basis=bar.venue_basis.value,
+        publication_delay=SIP_DELAY + DELAY_MARGIN,
+        evidence=("ALPACA_BASIC_FREE_PLAN", "RAW_UNADJUSTED"),
+    )
+    assert_close_is_confirmed(close)
+    return close
+
+
 __all__ = [
     "ADJUSTMENT",
     "BARS_DATASET",
@@ -595,6 +665,7 @@ __all__ = [
     "assert_smoke_sized",
     "bars_url",
     "credential_smoke",
+    "session_close",
     "capabilities",
     "check_window",
     "fetch_bars",

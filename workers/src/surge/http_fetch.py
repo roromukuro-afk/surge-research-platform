@@ -127,4 +127,6 @@ def fetch(
             last_error = exc
             time.sleep(1.5 * (attempt + 1))
 
-    raise RuntimeError(f"fetch failed after {retries} attempts: {url}: {last_error}")
+    # Chained, so a caller can tell a rate limit it ran out of retries for from a
+    # server error or a dropped connection without parsing this sentence.
+    raise RuntimeError(f"fetch failed after {retries} attempts: {url}: {last_error}") from last_error

@@ -269,6 +269,7 @@ def _market(code="JP", **overrides) -> MarketInputs:
         "analysis_output_mode_usable": True,
         "analysis_zdr_confirmed": True,
         "analysis_live_smoke_passed": True,
+        "analysis_request_accepted": True,
         "scheduler_configured": True,
         "object_store_configured": True,
     }

@@ -41,8 +41,9 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+import re
+from dataclasses import dataclass, field, replace
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
@@ -55,11 +56,17 @@ from surge.http_fetch import fetch
 
 GROQ_BASE = "https://api.groq.com/openai/v1"
 PROVIDER_ID = "groq_hosted"
-PROVIDER_VERSION = "groq-hosted-1.0.0"
+PROVIDER_VERSION = "groq-hosted-1.1.0"
 
 ENV_API_KEY = "GROQ_API_KEY"
 ENV_MODEL = "GROQ_MODEL"
 ENV_STRICT_MODELS = "GROQ_STRICT_MODELS"
+#: The date someone looked at this account's Data Controls page and saw Zero
+#: Data Retention switched on. Groq publishes no API for reading that setting,
+#: so the only evidence there can be is an observation, and it is recorded as
+#: one - dated, and carried into the policy's notes - rather than as a boolean
+#: that would read the same whether it was checked yesterday or never.
+ENV_ZDR_CONFIRMED_ON = "GROQ_ZDR_CONFIRMED_ON"
 
 #: Models Groq documents as supporting ``strict``. Overridable through
 #: ``GROQ_STRICT_MODELS`` because this list changes without warning; the code
@@ -211,6 +218,89 @@ class StructuredOutputError(GroqError):
     """The model returned something the contract cannot read."""
 
     failure_class = FailureClass.CONTRACT_VIOLATION
+
+
+class RequestTooLarge(GroqError):
+    """HTTP 413: this request, as it is, is not accepted on this account.
+
+    Terminal: retrying sends the same request again. What the 413 means was
+    measured rather than assumed (D-256). For ``openai/gpt-oss-120b`` the body
+    says it: a single request whose token count exceeds the per-minute
+    allowance. It follows tokens, not bytes - padding the body from 49 kB to
+    299 kB changed nothing, and ASCII and Japanese text of the same token count
+    were counted the same. ``groq/compound`` answers the same Entry request with
+    a bare "Request Entity Too Large" naming no model and no limit, with its own
+    70K-per-minute allowance untouched; Groq does not say why, and neither does
+    this class.
+    """
+
+    failure_class = FailureClass.QUOTA_BLOCKED
+
+
+class RateLimited(GroqError):
+    """HTTP 429, after the transport's own retries. Worth trying again later."""
+
+    failure_class = FailureClass.PROVIDER_RATE_LIMITED
+
+
+class ProviderUnavailable(GroqError):
+    """HTTP 5xx or a dropped connection. Worth trying again later."""
+
+    failure_class = FailureClass.PROVIDER_ERROR
+
+
+class RequestRejected(GroqError):
+    """HTTP 400 or 422: the request itself is wrong, and will be wrong again."""
+
+    failure_class = FailureClass.CONTRACT_VIOLATION
+
+
+class CredentialsRejected(GroqError):
+    """HTTP 401, 403 or 404: the key, its permissions or the model id."""
+
+    failure_class = FailureClass.PROVIDER_NOT_CONFIGURED
+
+
+def failure_for_status(status: int, detail: str) -> GroqError:
+    """The failure an HTTP status is, so the runner retries only what can recover.
+
+    Written out because the default would have been wrong: urllib's HTTPError is
+    an OSError, and an OSError reads as the network - so a 413 or a 400 would
+    have been retried as if the connection had dropped.
+    """
+
+    message = f"groq returned {status}: {detail}" if detail else f"groq returned {status}"
+    if status == 413:
+        return RequestTooLarge(message)
+    if status == 429:
+        return RateLimited(message)
+    if status >= 500:
+        return ProviderUnavailable(message)
+    if status in (401, 403, 404):
+        return CredentialsRejected(message)
+    return RequestRejected(message)
+
+
+def _groq_error_detail(exc) -> str:
+    """Groq's own explanation from an error body: its type, code and message.
+
+    Never the request, never its headers - the provider's description of what
+    it refused, which is what makes a 400 or a 413 diagnosable.
+    """
+
+    try:
+        body = json.loads(exc.read().decode("utf-8", "replace") or "{}")
+    except (ValueError, OSError, AttributeError):
+        return ""
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        return ""
+    detail = "; ".join(
+        f"{field}={error[field]}" for field in ("type", "code", "message") if error.get(field)
+    )
+    # Groq names the organisation in rate-limit messages. Not a credential, but
+    # an account identifier with no business in a log line or a probe record.
+    return re.sub(r"org_[A-Za-z0-9]+", "org_<redacted>", detail)
 
 
 class ExternalToolUsed(GroqError):
@@ -412,6 +502,44 @@ GROQ_POLICY = DataPolicy(
         "and Zero Data Retention selectable in Data Controls."
     ),
 )
+
+
+def policy_from_env(env: dict[str, str] | None = None, *, today: date | None = None) -> DataPolicy:
+    """GROQ_POLICY, with Zero Data Retention set from a recorded observation.
+
+    GROQ_POLICY describes Groq's published terms, which are the same for every
+    account, and so it has to leave ZDR as unknown: whether ZDR is on is a fact
+    about one account. This is where that fact comes in - and it comes in as a
+    dated observation of the console, because there is no API that reports it.
+
+    A date in the future is refused rather than trusted. Nobody observed a
+    setting tomorrow, and accepting one would make the attestation a formality.
+    """
+
+    source = env if env is not None else os.environ
+    raw = (source.get(ENV_ZDR_CONFIRMED_ON) or "").strip()
+    if not raw:
+        return GROQ_POLICY
+    try:
+        observed = date.fromisoformat(raw)
+    except ValueError as exc:
+        raise GroqError(
+            f"{ENV_ZDR_CONFIRMED_ON} has to be the ISO date the setting was observed, like 2026-09-18"
+        ) from exc
+    if observed > (today or date.today()):
+        raise GroqError(
+            f"{ENV_ZDR_CONFIRMED_ON} is {observed.isoformat()}, which has not happened yet; an "
+            "observation cannot be dated in the future"
+        )
+    return replace(
+        GROQ_POLICY,
+        zero_data_retention_enabled=True,
+        notes=(
+            (GROQ_POLICY.notes or "")
+            + f" Zero Data Retention observed enabled for this account in the console's Data "
+            f"Controls on {observed.isoformat()}."
+        ).strip(),
+    )
 
 #: Kept beside it as the comparison that decided the question, and as a live
 #: guard: a future adapter that tried to use the free Gemini tier for Stage 3
@@ -617,7 +745,26 @@ def preflight(
 
     # One combined meter: the prompt and the reserve share it.
     per_minute = quota.max_tokens_per_minute
+    if per_minute is not None and estimated > per_minute:
+        # Certain: the prompt alone is over, whatever the completion. Measured
+        # (D-256): Groq refuses such a request with HTTP 413 and a message
+        # naming the per-minute limit, and counts tokens, not bytes.
+        return Preflight(
+            prompt_tokens_estimated=estimated,
+            reserved_output_tokens=reserved_output_tokens,
+            quota=quota,
+            fits=False,
+            reason=(
+                f"~{estimated} input tokens alone exceed the combined allowance of {per_minute} "
+                "per minute. A single request cannot be sent at all"
+            ),
+            reason_code=ANALYSIS_FREE_QUOTA_BLOCKED,
+        )
     if per_minute is not None and combined > per_minute:
+        # Not certain: Groq was measured to count the completion as less than
+        # max_completion_tokens, so it may accept the request. Treated as not
+        # fitting anyway - a request that uses the whole minute leaves nothing
+        # to pace a batch with - and the contract smoke is what decides.
         return Preflight(
             prompt_tokens_estimated=estimated,
             reserved_output_tokens=reserved_output_tokens,
@@ -625,8 +772,9 @@ def preflight(
             fits=False,
             reason=(
                 f"~{estimated} input tokens plus a {reserved_output_tokens} token completion "
-                f"reserve is {combined}, against a combined allowance of {per_minute} per minute. "
-                "A single request cannot be sent at all"
+                f"reserve is {combined}, over the combined allowance of {per_minute} per minute. "
+                "Groq counts less than the full reserve, so it may accept the request, but it "
+                "would leave no room to pace a batch; the contract smoke decides"
             ),
             reason_code=ANALYSIS_FREE_QUOTA_BLOCKED,
         )
@@ -913,15 +1061,18 @@ class GroqHostedProvider:
         model = (source.get(ENV_MODEL) or "").strip()
         if not key:
             raise CredentialsMissing(
-                f"{ENV_API_KEY} is not set. Put it in .env.local - never in the repository, never "
-                "in a chat message - and re-run. Until then the analysis provider is the "
-                "deterministic stand-in, which cannot produce a formal prediction"
+                f"{ENV_API_KEY} is not set. On this machine it comes from the encrypted store: "
+                f"ops\\windows\\Set-SurgeSecret.ps1 -Name {ENV_API_KEY}, then run the job through "
+                "ops\\windows\\Invoke-WithSurgeSecrets.ps1. Never in the repository, never in a "
+                "chat message. Until then the analysis provider is the deterministic stand-in, "
+                "which cannot produce a formal prediction"
             )
         if not model:
             raise GroqError(
                 f"{ENV_MODEL} is not set. The model is configuration, not code: name the one this "
                 "run should use so the output row records which model answered"
             )
+        overrides.setdefault("policy", policy_from_env(source))
         return cls(
             model_id=model,
             api_key=key,
@@ -952,9 +1103,33 @@ class GroqHostedProvider:
     def _headers(self) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
             "Accept": "application/json",
         }
+
+    @staticmethod
+    def json_object_framing(schema: dict) -> str:
+        """The system message a JSON_OBJECT request has to carry.
+
+        Groq refuses a ``json_object`` request unless the messages contain the
+        word "json" - found live, as HTTP 400 "'messages' must contain the word
+        'json' in some form, to use 'response_format' of type 'json_object'".
+        The rendered Entry prompt never says it, so every compound request would
+        have been refused; the unit tests could not see it, because their fake
+        transport did not enforce a rule nobody had written down.
+
+        It is a separate system message rather than an edit to the rendered
+        prompt, so the prompt - and the prompt_sha256 recorded at TX1 - is the
+        same whichever output mode carries it. And it states the schema, because
+        json_object mode enforces only that the answer is JSON, not which JSON:
+        the model has to be told the shape it will be checked against.
+        """
+
+        return (
+            "Respond with exactly one JSON object and nothing else. It is checked against "
+            "this JSON Schema, and an answer that does not conform is discarded:\n"
+            + json.dumps(schema, sort_keys=True, separators=(",", ":"))
+        )
 
     def _request_body(self, prompt: str, *, schema_name: str, schema: dict, mode: OutputMode) -> bytes:
         if mode.sends_a_schema:
@@ -966,9 +1141,12 @@ class GroqHostedProvider:
         else:
             fmt = None
 
+        messages = [{"role": "user", "content": prompt}]
+        if mode is OutputMode.JSON_OBJECT:
+            messages.insert(0, {"role": "system", "content": self.json_object_framing(schema)})
         payload = {
             "model": self.model_id,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "temperature": self.temperature,
             "max_completion_tokens": self.max_completion_tokens,
         }
@@ -995,17 +1173,33 @@ class GroqHostedProvider:
             # refused.
             payload["tool_choice"] = "none"
             payload["compound_custom"] = {"tools": {"enabled_tools": []}}
-        return json.dumps(payload).encode("utf-8")
+        # UTF-8, not ASCII escapes. The canonical method is mostly Japanese, and
+        # json.dumps' default turns every one of those characters into a
+        # six-byte \uXXXX escape: measured, the same Entry request is 80,422
+        # bytes escaped and 49,407 as UTF-8, with identical content.
+        return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
     def _post(self, body: bytes):
-        response = self.transport(
-            f"{self.base_url}/chat/completions",
-            headers=self._headers(),
-            data=body,
-            method="POST",
-        )
+        import urllib.error
+
+        try:
+            response = self.transport(
+                f"{self.base_url}/chat/completions",
+                headers=self._headers(),
+                data=body,
+                method="POST",
+            )
+        except urllib.error.HTTPError as exc:
+            raise failure_for_status(exc.code, _groq_error_detail(exc)) from exc
+        except RuntimeError as exc:
+            # The transport retries 429 and 5xx itself and then gives up with a
+            # RuntimeError chained to the last error, which is what says which.
+            cause = exc.__cause__
+            if isinstance(cause, urllib.error.HTTPError):
+                raise failure_for_status(cause.code, _groq_error_detail(cause)) from exc
+            raise ProviderUnavailable(str(exc)) from exc
         if response.status != 200:
-            raise GroqError(f"groq returned {response.status}")
+            raise failure_for_status(response.status, "")
         return response
 
     def _content_of(self, payload: dict) -> str:
@@ -1050,8 +1244,14 @@ class GroqHostedProvider:
         else:
             self.policy.assert_production_privacy_gate_passes()
 
+        # Measured on everything that goes out, not only the prompt: in
+        # JSON_OBJECT mode the schema travels as a system message too, and a
+        # preflight that left it out would pass a request the account refuses.
+        sent = prompt
+        if self.output_mode is OutputMode.JSON_OBJECT:
+            sent = self.json_object_framing(schema) + "\n" + prompt
         check = preflight(
-            prompt, quota=self.quota, reserved_output_tokens=self.max_completion_tokens
+            sent, quota=self.quota, reserved_output_tokens=self.max_completion_tokens
         )
         self.last_preflight = check
         if not check.fits and check.reason_code == ANALYSIS_FREE_QUOTA_BLOCKED:
@@ -1260,7 +1460,13 @@ __all__ = [
     "ANALYSIS_PRIVACY_GATE_BLOCKED",
     "ANALYSIS_FREE_QUOTA_BLOCKED",
     "COMPOUND_MODEL_PREFIXES",
+    "CredentialsRejected",
     "ExternalToolUsed",
+    "ProviderUnavailable",
+    "RateLimited",
+    "RequestRejected",
+    "RequestTooLarge",
+    "failure_for_status",
     "executed_tools_in",
     "uses_built_in_tools",
     "PUBLISHED_FREE_LIMITS",
@@ -1273,6 +1479,7 @@ __all__ = [
     "ENV_MODEL",
     "GEMINI_FREE_TIER_POLICY",
     "GROQ_POLICY",
+    "policy_from_env",
     "PRODUCTION_RECOMMENDED_SETTING",
     "PROVIDER_ID",
     "CredentialsMissing",

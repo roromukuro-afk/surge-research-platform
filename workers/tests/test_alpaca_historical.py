@@ -255,7 +255,7 @@ def test_the_symbol_lookup_date_can_be_pinned_to_the_window():
 
 
 def test_a_missing_credential_names_the_file_and_not_the_value():
-    with pytest.raises(alpaca.CredentialsMissing, match=r"\.env\.local"):
+    with pytest.raises(alpaca.CredentialsMissing, match="Set-SurgeSecret"):
         alpaca.Credentials.from_env({})
 
 

@@ -34,6 +34,7 @@ Claude Code はこのプロジェクトの**主任開発エージェント**で�
 - データ制約で実装できない場合は Decision Needed として報告する。自分の解釈で補った箇所は「Claude Code 解釈（要確認）」と明記する。
 
 ### 1-4. Setup・ENTRY・価格
+- **2026-09-18 前提修正（D-261、ユーザー指示）**: Prediction は**市場終了後**に実行し、基準価格は対象セッションの**確定終値**（`signal_reference_price`。v5.1 の「分析基準価格」。取得規則は D-262）。この価格は `decision_completed_at` より前でよい。以下の場中 ENTRY と `entry_reference_price`（判断後に取引可能だった価格）の規則は、将来の実売買検証（`execution_price` / `next_session_entry_price`、未実装）の設計として残し、名称は変えない（D-263）。EOD Prediction の具体規則（Target の起点・Horizon・3,000円の確認・DB 制約・LLM 向け addendum）は D-265 で確定してから実装する。realtime polling は Prediction 生成に使わない。
 - 判定状態: `TECHNICAL_SETUP_EOD` / `POST_CLOSE_CATALYST_SETUP` / `ENTRY` / `WATCH_BREAKOUT` / `WATCH_PULLBACK` / `WATCH_OTHER` / `REJECT`。
 - **EOD 分析・引け後の材料分析は ENTRY を出さない。** 正式 Prediction は、場中の ENTRY 判断分析が「現在価格から ENTRY 可能」と判断した場合のみ。
 - 引けまでのチャート・価格・出来高によるセットアップ（`TECHNICAL_SETUP_EOD`）と、引け後の新規材料によるセットアップ（`POST_CLOSE_CATALYST_SETUP`）を分ける。引け後の材料を EOD 価格の未織り込み評価に使わない。

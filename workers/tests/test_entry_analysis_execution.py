@@ -586,3 +586,23 @@ def test_a_model_that_used_a_tool_is_never_called_again():
         is FailureClass.EXTERNAL_TOOL_USED
     )
     assert not FailureClass.EXTERNAL_TOOL_USED.is_transient
+
+
+
+def test_an_http_error_is_not_read_as_the_network():
+    """HTTPError subclasses OSError. Checked before the OSError branch, or a
+    413 would be retried as though a cable had been pulled."""
+
+    import io
+    import urllib.error
+
+    def http(status):
+        return urllib.error.HTTPError("https://x", status, "e", {}, io.BytesIO(b""))
+
+    assert classify_provider_failure(http(413)) is FailureClass.QUOTA_BLOCKED
+    assert classify_provider_failure(http(400)) is FailureClass.CONTRACT_VIOLATION
+    assert classify_provider_failure(http(401)) is FailureClass.PROVIDER_NOT_CONFIGURED
+    assert classify_provider_failure(http(429)) is FailureClass.PROVIDER_RATE_LIMITED
+    assert classify_provider_failure(http(502)) is FailureClass.PROVIDER_ERROR
+    # And a genuine socket error is still the network.
+    assert classify_provider_failure(OSError("connection reset")) is FailureClass.PROVIDER_ERROR

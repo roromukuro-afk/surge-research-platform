@@ -169,6 +169,20 @@ def classify_provider_failure(exc: BaseException) -> FailureClass:
 
     if isinstance(exc, ProviderFailure):
         return exc.failure_class
+    # Before the OSError branch, because urllib's HTTPError *is* an OSError: a
+    # 413 or a 400 would otherwise be read as the network and retried.
+    import urllib.error
+
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code == 429:
+            return FailureClass.PROVIDER_RATE_LIMITED
+        if exc.code >= 500:
+            return FailureClass.PROVIDER_ERROR
+        if exc.code == 413:
+            return FailureClass.QUOTA_BLOCKED
+        if exc.code in (401, 403, 404):
+            return FailureClass.PROVIDER_NOT_CONFIGURED
+        return FailureClass.CONTRACT_VIOLATION
     if isinstance(exc, _TRANSIENT_EXCEPTIONS):
         return (
             FailureClass.PROVIDER_TIMEOUT

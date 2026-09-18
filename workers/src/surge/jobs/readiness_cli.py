@@ -41,6 +41,30 @@ def _git_sha() -> str | None:
         return None
 
 
+def _analysis(args) -> dict:
+    """The analysis provider's facts: measured, unless flags say otherwise.
+
+    The flags stay for a machine that has no probe record yet and an operator
+    who has checked by hand - but each one can only turn a fact on, and the
+    evidence is what is reported whenever there is any.
+    """
+
+    from surge.runtime.analysis_evidence import analysis_facts
+
+    facts = analysis_facts(model=args.analysis_model)
+    for flag, name in (
+        ("analysis_credential", "analysis_credential_configured"),
+        ("analysis_quota_measured", "analysis_quota_measured"),
+        ("analysis_output_mode_usable", "analysis_output_mode_usable"),
+        ("analysis_zdr_confirmed", "analysis_zdr_confirmed"),
+        ("analysis_live_smoke_passed", "analysis_live_smoke_passed"),
+    ):
+        if getattr(args, flag, False) and not facts[name]:
+            facts[name] = True
+            facts["analysis_detail"][name] = "asserted with a flag; no evidence was read"
+    return facts
+
+
 #: What a flag may answer. Everything else in MarketInputs is the database's to
 #: fill, and passing it here would let a command line overrule a measurement.
 def _overrides_for(market: str, args) -> dict:
@@ -49,11 +73,7 @@ def _overrides_for(market: str, args) -> dict:
         "eod_price_provider": getattr(args, f"{prefix}_eod", None),
         "intraday_price_provider": getattr(args, f"{prefix}_intraday", None),
         "fx_provider": args.fx,
-        "analysis_credential_configured": args.analysis_credential,
-        "analysis_quota_measured": args.analysis_quota_measured,
-        "analysis_output_mode_usable": args.analysis_output_mode_usable,
-        "analysis_zdr_confirmed": args.analysis_zdr_confirmed,
-        "analysis_live_smoke_passed": args.analysis_live_smoke_passed,
+        **_analysis(args),
         "eod_analysis_provider": args.eod_analysis_provider,
         "eod_analysis_is_a_stand_in": not args.eod_analysis_is_real,
         "entry_analysis_provider": args.entry_analysis_provider,
@@ -71,11 +91,7 @@ def _inputs_for(market: str, args) -> MarketInputs:
         eod_price_provider=getattr(args, f"{prefix}_eod", None),
         intraday_price_provider=getattr(args, f"{prefix}_intraday", None),
         fx_provider=args.fx,
-        analysis_credential_configured=args.analysis_credential,
-        analysis_quota_measured=args.analysis_quota_measured,
-        analysis_output_mode_usable=args.analysis_output_mode_usable,
-        analysis_zdr_confirmed=args.analysis_zdr_confirmed,
-        analysis_live_smoke_passed=args.analysis_live_smoke_passed,
+        **_analysis(args),
         eod_analysis_provider=args.eod_analysis_provider,
         eod_analysis_is_a_stand_in=not args.eod_analysis_is_real,
         entry_analysis_provider=args.entry_analysis_provider,
@@ -152,6 +168,11 @@ def main(argv: list[str] | None = None) -> int:
         "--analysis-live-smoke-passed",
         action="store_true",
         help="assert something has actually been sent to the real provider and came back",
+    )
+    parser.add_argument(
+        "--analysis-model",
+        default=None,
+        help="the analysis model to judge; defaults to GROQ_MODEL",
     )
     parser.add_argument("--scheduler", action="store_true")
     parser.add_argument("--object-store", action="store_true")

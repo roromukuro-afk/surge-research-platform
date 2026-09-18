@@ -17,6 +17,10 @@ parquet = ["pyarrow>=17"]
 # Only needed to talk to Cloudflare R2. Conditional writes (If-None-Match on
 # PutObject) need a botocore new enough to send the header.
 r2 = ["boto3>=1.35"]
+# The JP session close (Yahoo, D-262) reuses the user's screener's browser-like
+# HTTPS session (curl_cffi impersonating Chrome) as it is. Tests use fakes and
+# do not need it.
+yahoo = ["curl_cffi>=0.13,<1"]
 
 [build-system]
 requires = ["hatchling"]

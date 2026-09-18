@@ -32,7 +32,7 @@ from enum import StrEnum
 
 from surge.runtime.schema_drift import compare
 
-READINESS_VERSION = "readiness-1.7.0"
+READINESS_VERSION = "readiness-1.8.0"
 
 
 class Verdict(StrEnum):
@@ -363,6 +363,12 @@ ANALYSIS_PROVIDER_STEPS: tuple[tuple[str, str, str], ...] = (
         "nothing has ever been sent to the real provider, so every claim about it is about the "
         "adapter rather than about the provider",
     ),
+    (
+        "analysis_request_accepted",
+        "the real Entry request is accepted by the model",
+        "the real Entry request has not been shown to be accepted. Fitting the model's advertised "
+        "limits is not the same thing: the account can still refuse it",
+    ),
 )
 
 
@@ -382,11 +388,12 @@ def check_analysis_provider_readiness(inputs: MarketInputs) -> list[Check]:
     checks: list[Check] = []
     for name, passing_detail, failing_detail in ANALYSIS_PROVIDER_STEPS:
         ok = bool(getattr(inputs, name))
+        measured = inputs.analysis_detail.get(name)
         checks.append(
             Check(
                 name=name,
                 status=CheckStatus.PASS if ok else CheckStatus.FAIL,
-                detail=passing_detail if ok else failing_detail,
+                detail=measured or (passing_detail if ok else failing_detail),
                 blocker_id="D-190",
             )
         )
@@ -573,6 +580,14 @@ class MarketInputs:
     analysis_output_mode_usable: bool = False
     analysis_zdr_confirmed: bool = False
     analysis_live_smoke_passed: bool = False
+    #: Whether the real Entry request is accepted by the model, as opposed to
+    #: fitting the model's advertised limits. Found to differ live: the free
+    #: tier's groq/compound advertises 70K tokens a minute and refuses the
+    #: canonical Entry request as too large.
+    analysis_request_accepted: bool = False
+    #: What was actually measured, per step, when the facts came from evidence
+    #: rather than from a flag. Replaces the generic sentence for that step.
+    analysis_detail: dict = field(default_factory=dict)
     eod_analysis_provider: str | None = None
     eod_analysis_is_a_stand_in: bool = True
     #: The intraday contract. This is the one a formal prediction comes from, so
