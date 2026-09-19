@@ -115,7 +115,7 @@ scripts, and it does not go through `runner_cli`.
 | registered by | `Register-JevPhaseBTask.ps1 -CohortId <cohort> -ExpectCommit <sha>` (`-DryRun` prints it first) |
 | runs | `Invoke-JevPhaseB.ps1` from a **frozen worktree** - a detached git worktree at the registered commit, kept apart from the working copy; the job refuses to run from anywhere else, at another commit, or with changes |
 | as | the current user, only when logged on, ordinary run level |
-| credentials | `TYPESAFE_API_KEY` only, decrypted from its DPAPI file for the run and removed after; the other stored keys are not read |
+| credentials | `TYPESAFE_API_KEY` only, decrypted from its DPAPI file for the run and removed after; the other stored keys are not read. The file is Set-SurgeSecret's (`%LOCALAPPDATA%\surge\secrets`) or, for a key stored from inside the Claude desktop app, the one copy in that app's package cache (`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Local\surge\secrets`): the app's AppData writes are virtualized there and Task Scheduler runs outside the app. The path used is logged |
 | logs | `%USERPROFILE%\.surge\evaluation\jev\<cohort>\scheduler\console\` (output) and `...\scheduler\runs\` (one record per run) |
 | double start | Task Scheduler `IgnoreNew`, and the job's own lock - a byte-range lock the operating system drops when the process ends, never taken over; a second instance sends nothing |
 | late start | `StartWhenAvailable`: after sleep or a restart the job runs if the day's window (16:10 JST to 09:00 JST on the next weekday) is still open, and ends without sending if it is not |

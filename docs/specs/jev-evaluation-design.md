@@ -304,7 +304,7 @@ plan-day と同じ読み込み・screening・抽出を、直近の session **S0 
 | working directory | `<frozen worktree>\workers\src`（`surge` は pip install されていないので、ここのコードだけが import される） |
 | frozen worktree | 専用の detached git worktree を登録 commit に固定。job は別の場所・別の commit・変更ありでは何もしない（`not_the_frozen_worktree`, exit 2） |
 | 実行ユーザー | 現在のユーザー、ログオン中のみ、通常の権限 |
-| secret | `TYPESAFE_API_KEY` だけを DPAPI から復号し、その実行の環境にだけ入れて終了時に消す。ほかの保存済み key は読まない。記録にもログにも出さない。preflight は key が環境に無ければ ready にしない |
+| secret | `TYPESAFE_API_KEY` だけを DPAPI から復号し、その実行の環境にだけ入れて終了時に消す。ほかの保存済み key は読まない。記録にもログにも出さない（使った file の path だけをログに残す）。preflight は key が環境に無ければ ready にしない。**Claude desktop app の中から保存した key は、app の AppData への書き込みが MSIX で仮想化されるため `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Local\surge\secrets` に実体があり、app の外で動く Task Scheduler からは標準の `%LOCALAPPDATA%\surge\secrets` に見えない**（2026-09-19 実測）。wrapper は標準の場所、無ければ package cache の 1 件を使う（`-SecretFile` で明示も可） |
 | ログ | `~/.surge/evaluation/jev/<cohort>/scheduler/console/`（出力）と `…/scheduler/runs/`（実行ごとの記録: status・exit code・S0・理由） |
 | 二重起動 | Task Scheduler の `IgnoreNew` と、job 自身の lock（OS が process の終了で必ず外す byte-range lock。乗っ取りはしない）。2 つ目は何も送らず exit 0 |
 | 冪等性 | 送信済みの日（`stage-run.json`）は二度と送らない。止まった日（`run-stopped` / `day-stopped`）は自動で再試行しない。`run-started` だけが残った日（途中で process が落ちた日）は再開しない（記録の無い送信があり得るので、二重課金を避ける） |

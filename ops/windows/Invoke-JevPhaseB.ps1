@@ -10,6 +10,13 @@
     process's environment - no other one - and it is removed again at the end.
     It is never written or printed.
 
+    Where the encrypted key is: -SecretFile when given; else Set-SurgeSecret's
+    %LOCALAPPDATA%\surge\secrets; else the one copy under the Claude desktop
+    app's package cache (%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Local\
+    surge\secrets), where a key stored from inside that app lands: the app's
+    AppData writes are virtualized there, and Task Scheduler runs outside it.
+    The path used is logged, never the value.
+
     The job decides everything else: whether the frozen worktree is at the
     registered commit, the cohort's lock (a second run sends nothing), the JPX
     business day, the send window, the cohort's stops and caps, and whether
@@ -33,7 +40,8 @@ param(
     [Parameter(Mandatory = $true)] [string] $ExpectCommit,
     [string] $RepoRoot = "",
     [string] $PythonExe = "python",
-    [string] $EvaluationRoot = (Join-Path $HOME ".surge")
+    [string] $EvaluationRoot = (Join-Path $HOME ".surge"),
+    [string] $SecretFile = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,7 +49,6 @@ $ErrorActionPreference = "Stop"
 # Windows PowerShell 5.1, which Task Scheduler starts, has no $PSScriptRoot in param() defaults.
 if (-not $RepoRoot) { $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path }
 $workersSrc = Join-Path $RepoRoot "workers\src"
-$secret = Join-Path $env:LOCALAPPDATA "surge\secrets\TYPESAFE_API_KEY.dpapi"
 $logDir = Join-Path $EvaluationRoot "evaluation\jev\$CohortId\scheduler\console"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
@@ -56,7 +63,22 @@ function Stop-Here([string] $message) {
 if (-not (Test-Path (Join-Path $workersSrc "surge\jobs\jev_eval.py"))) {
     Stop-Here "no surge\jobs\jev_eval.py under $workersSrc"
 }
-if (-not (Test-Path $secret)) {
+$secret = $SecretFile
+if (-not $secret) {
+    $standard = Join-Path $env:LOCALAPPDATA "surge\secrets\TYPESAFE_API_KEY.dpapi"
+    $packaged = @(Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages") -Directory -Filter "Claude_*" `
+            -ErrorAction SilentlyContinue |
+        ForEach-Object { Join-Path $_.FullName "LocalCache\Local\surge\secrets\TYPESAFE_API_KEY.dpapi" } |
+        Where-Object { Test-Path $_ })
+    if (Test-Path $standard) {
+        $secret = $standard
+    } elseif ($packaged.Count -eq 1) {
+        $secret = $packaged[0]
+    } elseif ($packaged.Count -gt 1) {
+        Stop-Here "TYPESAFE_API_KEY is stored in more than one Claude package cache; pass -SecretFile"
+    }
+}
+if (-not $secret -or -not (Test-Path $secret)) {
     Stop-Here "TYPESAFE_API_KEY is not stored for $env:USERNAME (ops\windows\Set-SurgeSecret.ps1)"
 }
 
@@ -79,6 +101,8 @@ try {
     $process = Start-Process -FilePath $PythonExe -ArgumentList $arguments -WorkingDirectory $workersSrc `
         -NoNewWindow -Wait -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
     $code = $process.ExitCode
+    # After the run: the redirection above creates the output file anew.
+    Add-Content -Path $out -Value "wrapper: key file $secret (the path only); exit $code" -Encoding UTF8
 }
 finally {
     Remove-Item Env:\TYPESAFE_API_KEY -ErrorAction SilentlyContinue
