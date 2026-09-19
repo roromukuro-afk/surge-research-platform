@@ -103,7 +103,7 @@ def build(out: Path) -> dict:
             shutil.rmtree(out)
         store = LocalObjectStore(out, store_id="fixture")
         written = export_cohort(env.root, COHORT, store, system="synthetic-fixture", exported_at=EXPORTED_AT)
-        store.put_immutable("fixture.json", json_bytes({
+        marker = json_bytes({
             "what": "a synthetic Phase B cohort for the web shadow's screens: made-up securities, prices, "
                     "disclosures and answers, run through the real Phase B code with fakes for every provider",
             "generator": "scripts/make_shadow_fixture.py",
@@ -112,7 +112,10 @@ def build(out: Path) -> dict:
             "target_business_days": 4,
             "calendar_version": jpx_calendar.CALENDAR_VERSION,
             "not_real_data": True,
-        }), "application/json")
+        })
+        # At the root, so a directory names the cohort it holds; beside the cohort, so the label travels with it.
+        store.put_immutable("fixture.json", marker, "application/json")
+        store.put_immutable(f"surge/phase-b/{COHORT}/fixture.json", marker, "application/json")
         return {"statuses": statuses, "written": written, "sent": transport.sent}
     finally:
         monkeypatch.undo()

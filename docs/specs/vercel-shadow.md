@@ -1,6 +1,6 @@
 # Phase B Web shadow（Vercel）設計
 
-状態: **v0.1（2026-09-19、D-279）** — Stage 1（synthetic fixture で動く Web UI）と Stage 2（artifact storage）を実装済み。Stage 3 以降は未着手。**正式な Phase B は何も変わらない。**
+状態: **v0.2（2026-09-19、D-279）** — Stage 1・2 を実装し、Vercel 上で動作を確認した（§9）。Cron → 保護された production → Workflow → 完了の経路も no-op で確認済み。Stage 3（実データ・Jev なし）は未着手。**正式な Phase B は何も変わらない。**
 
 ## 0. 前提（変えないもの）
 
@@ -136,3 +136,22 @@
 - `scripts/make_shadow_fixture.py` → `apps/web/fixtures/shadow/` — 合成の cohort（40 銘柄、4 営業日、うち 1 日は coverage 92.5% で停止、2 日分の outcome、partial report 2 本）。実際の Phase B のコード（scheduled job）に偽の Yahoo・Yanoshin・TypeSafe と偽の時計を通して作る。
 - `apps/web`: `/`（Overview）・`/predictions`・`/runs`・`/outcomes`・`/reports`・`/system`。`SURGE_SHADOW_SOURCE=fixture|local:<dir>|blob`（未設定なら開発時は fixture、本番は「未設定」と表示）。Jev の確率は「Jev 自身の回答、未校正」と明記して表示する（CLAUDE.md 1-17）。
 - テスト: `workers/tests/test_shadow.py`（Blob の意味論、改ざん検出、PC と hash が一致する export、ローカルパスや Canonical 本文が出ないこと、fixture の完全性）、`apps/web/scripts/shadow-smoke.mjs`（本番ビルドで 6 画面を fixture から描画、CI の web-contracts に追加）。
+
+## 9. Vercel 上での実施記録（2026-09-19、ユーザー承認後）
+
+| 項目 | 結果 |
+|---|---|
+| project | `surge-research-platform`（新規、Hobby、region iad1、OIDC 有効）。MCP では作成権限がなく（403）、ログイン済みの Vercel CLI で作成 |
+| Blob store | `surge-shadow`（新規、**private**、iad1）を project に接続。`BLOB_READ_WRITE_TOKEN` は Vercel が設定し、手元には残さない（接続時に CLI が書き出した `.env.local` は中身を表示せずに削除） |
+| Deployment Protection | Vercel Authentication = **All Deployments**（production を含む）。project 作成直後、最初のデプロイより前に設定 |
+| Trusted Sources | この project 自身の既定（同じ環境同士、development → preview）に **development → production** を足した（CLI が発行する短命の開発用 OIDC トークンで production を検証するため）。長期のバイパス用シークレットは作っていない（`vercel curl` は無ければ自動で作る実装なので使わない） |
+| 未認証アクセス | 3 つのホスト名 × 8 パス、Services 化の後は API を含む 7 パスすべてが Vercel のログインへ 302。本文にデータなし。ログインしていないブラウザでも「Login – Vercel」で止まる |
+| 認証済みアクセス | 開発用 OIDC（ユーザーの CLI 認証から発行）で 6 画面すべて 200・期待する内容 |
+| Services | `vercel.json` の `services`: `web`（`apps/web`、Next.js）と `shadow`（リポジトリのルート、entrypoint = `pyproject.toml`）。Python の関数と Workflows のキュー関数が別々にビルドされる（Python 3.12.14、uv） |
+| Python Workflow SDK | `vercel-workflow` 0.10.2 が Services の中で動く。**workflow 本体は決定性の sandbox で再実行され、import 時のファイル操作（`Path.resolve()` 等）も拒否される** → パッケージの import を副作用なしにし、パス設定は step と ASGI アプリで行う（SDK のローカル world で発見・テスト化） |
+| 凍結コードのクラウド実行 | `/api/shadow/health` がクラウドで frozen protocol の fingerprint を再計算し **`73cceb0d…`（公式 cohort と一致）**。curl_cffi 0.16.3 は import 可（Yahoo への実通信は Stage 3） |
+| Cron → Workflow | `/api/shadow/cron/noop`（`0 14 * * *`）を `vercel crons run` で起動: Cron の要求（`x-vercel-cron-schedule` 付き）は**シークレットなしで保護を通過**し、Workflow run が起動して `completed`（preview での手動起動も 4.4 秒で完了） |
+| Stage 2（クラウド） | 自己検証 workflow が合成 fixture の 28 object を private Blob に write-once で書き込み、全日を integrity 記録と照合して読み戻し、同じ内容の再書き込みは再実行扱い・別内容は拒否・元の内容は不変を確認。Blob 操作は advanced 31・simple 26 |
+
+- Blob の操作数（SURGE 分）は上の通り。チーム全体の月間使用量はダッシュボードでしか見えない（Stage 3 の前に確認する）。
+- 検証用の no-op cron は毎日 1 回（14:00–14:59 UTC）残している: Stage 3 の cron を入れるときに置き換える。

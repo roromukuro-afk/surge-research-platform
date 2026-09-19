@@ -311,15 +311,18 @@ export interface Shadow {
 }
 
 export async function openShadow(source: ArtifactSource): Promise<Shadow> {
-  // A directory may hold a synthetic cohort (the fixture, or a copy of it): its own clock and label come with it.
-  const fixture = source.kind !== "blob" ? await readJson<FixtureMeta>(source, "fixture.json") : null;
+  // A directory names the cohort it holds; a Blob store holds several and the environment picks one.
+  const directory = source.kind !== "blob" ? await readJson<FixtureMeta>(source, "fixture.json") : null;
   const root = (process.env.SURGE_SHADOW_PREFIX ?? DEFAULT_PREFIX).replace(/^\/+|\/+$/g, "");
-  const cohortId = process.env.SURGE_SHADOW_COHORT ?? fixture?.cohort_id ?? OFFICIAL_COHORT;
+  const cohortId = process.env.SURGE_SHADOW_COHORT ?? directory?.cohort_id ?? OFFICIAL_COHORT;
   const prefix = `${root}/${cohortId}`;
-  const [cohort, calendar] = await Promise.all([
+  const [cohort, calendar, marker] = await Promise.all([
     readJson<Cohort>(source, `${prefix}/cohort.json`),
     readJson<Calendar>(source, `${prefix}/calendar.json`),
+    // A synthetic cohort carries its own marker, wherever it is stored: the label and the clock come with it.
+    readJson<FixtureMeta>(source, `${prefix}/fixture.json`),
   ]);
+  const fixture = marker ?? (directory?.cohort_id === cohortId ? directory : null);
   return { source, prefix, cohortId, cohort, calendar, fixture, now: fixture ? new Date(fixture.as_of) : new Date() };
 }
 

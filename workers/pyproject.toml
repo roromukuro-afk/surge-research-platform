@@ -6,7 +6,9 @@ requires-python = ">=3.12"
 dependencies = ["openpyxl>=3.1"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.6", "pyarrow>=17", "tiktoken>=0.9"]
+dev = ["pytest>=8.0", "ruff>=0.6", "pyarrow>=17", "tiktoken>=0.9",
+       # The shadow service's workflows are tested on the SDK's local world (D-279).
+       "vercel>=0.11.3,<1"]
 # Exact token counts for the GPT-OSS models, whose tokeniser (o200k_harmony)
 # OpenAI publishes. Optional on purpose: without it the feasibility report
 # falls back to its estimate and says so, rather than reporting an estimate

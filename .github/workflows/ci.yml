@@ -22,7 +22,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e "workers[dev]"
       - name: Lint
-        run: ruff check workers scripts
+        run: ruff check workers scripts shadow_service
       - name: Unit tests
         run: pytest workers -q
 

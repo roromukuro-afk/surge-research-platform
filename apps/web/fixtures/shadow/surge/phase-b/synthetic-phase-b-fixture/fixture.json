@@ -1,0 +1,9 @@
+{
+  "what": "a synthetic Phase B cohort for the web shadow's screens: made-up securities, prices, disclosures and answers, run through the real Phase B code with fakes for every provider",
+  "generator": "scripts/make_shadow_fixture.py",
+  "cohort_id": "synthetic-phase-b-fixture",
+  "as_of": "2026-10-27T19:00:00+09:00",
+  "target_business_days": 4,
+  "calendar_version": "jpx-closed-days-2026-02-06",
+  "not_real_data": true
+}

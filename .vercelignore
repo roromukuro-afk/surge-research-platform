@@ -1,0 +1,20 @@
+# What a Vercel deployment uploads: the two services (apps/web, and the Python
+# service rooted here, which needs workers/src, docs/prompts and the files the
+# frozen code hashes). Nothing else leaves the machine.
+.git
+.github
+.claude
+.env
+.env.*
+**/node_modules
+**/.next
+**/.vercel
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+supabase
+scripts
+workers/tests
+ops/windows
+docs/*
+!docs/prompts

@@ -1,0 +1,24 @@
+# The Phase B web shadow's Python service on Vercel (D-279), rooted at the
+# repository: the frozen code under workers/src reads Canonical v5.1 and its own
+# frozen files by their place in the checkout (see shadow_service/__init__.py).
+# The worker package itself is workers/pyproject.toml; this file only tells
+# Vercel what to install and serve.
+
+[project]
+name = "surge-shadow-service"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    # The Vercel SDK: Blob, and Workflows served through Vercel Queues (>= 0.8.0).
+    "vercel>=0.11.3,<1",
+    # What the frozen Phase B code needs to read JPX, Yahoo and count tokens.
+    "curl_cffi>=0.13,<1",
+    "openpyxl>=3.1",
+    "tiktoken>=0.9",
+]
+
+[tool.vercel]
+entrypoint = "shadow_service.app:app"
+
+[[tool.vercel.workflows]]
+entrypoint = "shadow_service.flows:wf"
