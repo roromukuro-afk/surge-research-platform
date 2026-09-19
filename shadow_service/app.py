@@ -5,8 +5,10 @@ Authentication, All Deployments): a request reaches it only as the project's own
 cron, a signed-in member of the team, or a caller holding this project's OIDC
 token (Trusted Sources). There is no key in this service and none is read.
 
-    GET  /api/shadow/health[?tokenizer=1]   versions, the frozen protocol and input-building code this bundle
-                                            carries; with tokenizer=1, whether o200k_harmony loads here
+    GET  /api/shadow/health[?tokenizer=1][&files=1]
+                                            versions, the frozen protocol and input-building code this bundle
+                                            carries; tokenizer=1: whether o200k_harmony loads here; files=1:
+                                            the SHA-256 of each file the input-building code hash covers
     GET  /api/shadow/cron/noop              the no-op workflow (the cron path, D-279)
     POST /api/shadow/selftest/stage2?confirm=stage2-synthetic
                                             Stage 2 in the cloud with synthetic artifacts
@@ -71,6 +73,9 @@ async def health(request: dict) -> tuple[int, bytes]:
         "input_building_code_sha256": code_version()["code_sha256"],
         "repo_root_has_prompts": (REPO_ROOT / "docs" / "prompts" / "MANIFEST.md").exists(),
         **(_tokenizer() if request["query"].get("tokenizer") == ["1"] else {}),
+        # Each hashed file's SHA-256 (files of this public repository): what to compare when the combined hash differs.
+        **({"input_building_files_sha256": code_version()["files_sha256"]}
+           if request["query"].get("files") == ["1"] else {}),
     })
 
 

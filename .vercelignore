@@ -1,20 +1,31 @@
-# What a Vercel deployment uploads: the two services (apps/web, and the Python
-# service rooted here, which needs workers/src, docs/prompts and the files the
-# frozen code hashes). Nothing else leaves the machine.
-.git
-.github
-.claude
-.env
-.env.*
+# What a Vercel deployment uploads, and nothing else (D-279): the two services -
+# apps/web, and the Python service rooted here, which needs workers/src,
+# docs/prompts and the files the frozen code hashes (ops/jev-gateway-runner).
+# Everything at the top level is left out unless it is named below.
+/*
+!/vercel.json
+!/pyproject.toml
+!/apps
+!/docs
+!/ops
+!/shadow_service
+!/workers
+apps/*
+!apps/web
+apps/web/scripts
+apps/web/.impeccable
+apps/web/*.tsbuildinfo
+docs/*
+!docs/prompts
+ops/*
+!ops/jev-gateway-runner
+workers/*
+!workers/src
 **/node_modules
 **/.next
 **/.vercel
 **/__pycache__
 **/.pytest_cache
 **/.ruff_cache
-supabase
-scripts
-workers/tests
-ops/windows
-docs/*
-!docs/prompts
+**/.env
+**/.env.*
