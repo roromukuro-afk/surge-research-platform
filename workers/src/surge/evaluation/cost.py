@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import subprocess
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 
@@ -73,7 +74,7 @@ class Ledger:
 
     def record(self, response: dict, *, estimate: Decimal) -> None:
         self.requests += 1
-        cost = response.get("gateway_cost_usd")
+        cost = response.get("cost_usd", response.get("gateway_cost_usd"))
         if cost is None:
             self.spent_usd += estimate
             self.estimated_charges.append(str(response.get("label")))
@@ -107,6 +108,52 @@ def plan_problems(budget: Budget, estimates: list[Decimal], credits: dict | None
     return problems
 
 
+#: How old a balance read from TypeSafe's console may be (D-275). TypeSafe has
+#: no balance API, so the operator reads it; what this system spent since is
+#: subtracted from its own records.
+DIRECT_BALANCE_MAX_AGE = timedelta(days=7)
+
+
+def local_direct_spend(root: Path, since: datetime) -> Decimal:
+    """What this system spent on TypeSafe's own API after ``since``, from the records it wrote."""
+
+    total = Decimal(0)
+    base = root / "evaluation" / "jev"
+    for path in base.glob("*/responses/*.json"):
+        if path.name.endswith(".raw.json") or ".raw." in path.name:
+            continue
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if record.get("via") == "typesafe-direct" and record.get("cost_usd") is not None and \
+                datetime.fromisoformat(record["sent_at"]) > since:
+            total += Decimal(str(record["cost_usd"]))
+    # One-off checks outside any run (the 2026-09-19 comparison and rate-limit smoke).
+    for pattern in ("direct-compare-*/response.direct.json", "direct-throughput-smoke-*/response-*.json"):
+        for path in base.glob(pattern):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if record.get("cost_usd_at_published_price") and datetime.fromisoformat(record["sent_at"]) > since:
+                total += Decimal(str(record["cost_usd_at_published_price"]))
+    return total
+
+
+def direct_credit_state(balance_usd: Decimal | None, checked_at: datetime | None, *, root: Path,
+                        now: datetime | None = None) -> dict:
+    """TypeSafe's monthly credit before a run: the operator's reading, less local spend since it."""
+
+    if balance_usd is None or checked_at is None:
+        return {"error": "TypeSafe has no balance API: read Credit Balance at console.typesafe.ai/settings/billing "
+                         "and pass --credit-balance-usd and --credit-checked-at"}
+    now = now or datetime.now(UTC)
+    if checked_at.tzinfo is None:
+        return {"error": "--credit-checked-at needs a timezone"}
+    if now - checked_at > DIRECT_BALANCE_MAX_AGE or checked_at > now:
+        return {"error": f"the balance read at {checked_at.isoformat()} is not within the last "
+                         f"{DIRECT_BALANCE_MAX_AGE.days} days"}
+    spent = local_direct_spend(root, checked_at)
+    return {"balance": str(balance_usd - spent), "attested_balance": str(balance_usd),
+            "checked_at": checked_at.isoformat(), "spent_since_check": str(spent),
+            "source": "operator reading of the TypeSafe console, less this system's recorded spend since"}
+
+
 def read_credits(runner: Path, out: Path) -> dict:
     """The Gateway's balance and total used, through the runner. Not a model request.
 
@@ -126,5 +173,6 @@ def read_credits(runner: Path, out: Path) -> dict:
     return {"balance": result["balance"], "total_used": result["totalUsed"], "checked_at": result["checkedAt"]}
 
 
-__all__ = ["CONTEXT_TOKENS", "FREE_CREDIT_USD", "TOKEN_FACTOR", "Budget", "BudgetExceeded", "Ledger", "estimate_usd",
-           "estimated_jev_tokens", "plan_problems", "read_credits"]
+__all__ = ["CONTEXT_TOKENS", "DIRECT_BALANCE_MAX_AGE", "FREE_CREDIT_USD", "TOKEN_FACTOR", "Budget", "BudgetExceeded",
+           "Ledger", "direct_credit_state", "estimate_usd", "estimated_jev_tokens", "local_direct_spend",
+           "plan_problems", "read_credits"]

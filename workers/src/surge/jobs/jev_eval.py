@@ -14,10 +14,14 @@ because the files hold market data and answers about real securities):
     report          --run-id ID                              report.json and report.md
 
 Only ``run`` sends model requests. ``preflight`` reads the Gateway credit
-balance and nothing else. Nothing here writes to a database; every row is
-``teacher_admissible = false``. Only Phase A (the retrospective pilot) can be
-planned here; Phase B shadows the daily production screener and is not built
-yet.
+balance (or, for TypeSafe direct, takes the operator's reading of the console
+balance, since TypeSafe has no balance API) and sends nothing. The provider is
+the manifest's - TypeSafe direct for Phase B, the Gateway as its fallback and
+as Phase A's route (D-275) - unless ``--provider`` names the fallback.
+
+Nothing here writes to a database; every row is ``teacher_admissible = false``.
+Only Phase A (the retrospective pilot) can be planned here; Phase B shadows the
+daily production screener and is not built yet.
 
 ``R`` is ``ops/jev-gateway-runner/runner.mjs``; it needs AI_GATEWAY_API_KEY in
 its environment (run through Invoke-WithSurgeSecrets.ps1).
@@ -44,6 +48,7 @@ from surge.evaluation.cost import (
     Budget,
     BudgetExceeded,
     Ledger,
+    direct_credit_state,
     estimate_usd,
     estimated_jev_tokens,
     plan_problems,
@@ -52,7 +57,7 @@ from surge.evaluation.cost import (
 from surge.evaluation.leakage import check_sample
 from surge.evaluation.method import REPO_ROOT, load_method
 from surge.evaluation.outcome import OUTCOME_DEFINITION, OUTCOME_VERSION, compute_outcome
-from surge.evaluation.pacing import Pacer
+from surge.evaluation.pacing import Pacer, pacer_for
 from surge.evaluation.population import (
     MIN_SPACING_SESSIONS,
     SCREENER_DEFINITION,
@@ -70,6 +75,16 @@ from surge.evaluation.prices import (
     fetch_chart,
     history_from_chart,
     trading_sessions,
+)
+from surge.evaluation.providers import (
+    PROVIDER_NAMES,
+    SERVED_PROVIDER,
+    SERVED_VERSION,
+    TYPESAFE_DIRECT,
+    VERCEL_GATEWAY,
+    gateway_http_facts,
+    provider_for,
+    record_cost,
 )
 from surge.evaluation.report import (
     REPORT_VERSION,
@@ -92,8 +107,14 @@ from surge.routes.engine import ROUTE_VERSION
 
 EVALUATION_VERSION = "jev-eval-1.0.0"
 RUNNER = REPO_ROOT / "ops" / "jev-gateway-runner" / "runner.mjs"
-#: The Gateway's routing names the provider that answered; for Jev it is TypeSafe's (D-269).
-EXPECTED_PROVIDER = "typesafe-ai"
+#: Who answers, by either route: TypeSafe's (D-269, D-275).
+EXPECTED_PROVIDER = SERVED_PROVIDER
+#: A 429 from a provider that says how long to wait (TypeSafe direct): the wait
+#: is honoured, up to these limits; past them the run stops (D-275). Without a
+#: stated wait, the fallback backoff doubles from FALLBACK_BACKOFF_SECONDS.
+MAX_RATE_LIMIT_RETRIES = 3
+MAX_RATE_LIMIT_WAIT_SECONDS = 1800.0
+FALLBACK_BACKOFF_SECONDS = 60.0
 #: Seven months before the first S0: the feature warm-up (75 sessions) and the
 #: 60-session highs need that much behind the earliest S0.
 HISTORY_START = date(2024, 6, 1)
@@ -103,7 +124,9 @@ PHASES = {
     # verification needs 24 requests, not 115, under the free tier's limit.
     "A": {"s0_start": date(2025, 1, 1), "s0_end": date(2026, 6, 30),
           "primary": 75, "control": 25, "anonymized": 10, "drift": 5,
-          "evaluated": {"primary": 15, "control": 5, "anonymized": 2, "drift": 2}},
+          "evaluated": {"primary": 15, "control": 5, "anonymized": 2, "drift": 2},
+          # Phase A ran through the Gateway; Phase B's primary is TypeSafe direct (D-275).
+          "provider": VERCEL_GATEWAY},
 }
 PHASE_A_LIMITATIONS = [
     "screener = Routes A-H (route-1.0.0 on features-1.0.0) replayed point-in-time; material routes M1-M6 and "
@@ -127,6 +150,7 @@ CODE_FILES = [
     "workers/src/surge/evaluation/pacing.py",
     "workers/src/surge/evaluation/population.py",
     "workers/src/surge/evaluation/prices.py",
+    "workers/src/surge/evaluation/providers.py",
     "workers/src/surge/evaluation/report.py",
     "workers/src/surge/evaluation/state.py",
     "workers/src/surge/evaluation/store.py",
@@ -192,6 +216,46 @@ def code_version() -> dict:
 def _runner_metadata() -> dict:
     package = json.loads((RUNNER.parent / "package.json").read_text(encoding="utf-8"))
     return {"ai_sdk": package["dependencies"]["ai"], "runner_sha256": hashlib.sha256(RUNNER.read_bytes()).hexdigest()}
+
+
+def _model_metadata(provider: str) -> dict:
+    from surge.analysis.jev_questions import ENDPOINT
+
+    if provider == TYPESAFE_DIRECT:
+        return {
+            "requested_model": MODEL,
+            "endpoint": ENDPOINT,
+            "upstream": "typesafe-ai (TypeSafe System One), called directly",
+            "served": "the served version (e.g. jev-1.13.0) is recorded per request as `model` and pinned for the "
+                      "run: a change of version stops it",
+            "fallback": {"provider": VERCEL_GATEWAY, "requested_model": GATEWAY_MODEL, **_runner_metadata()},
+        }
+    return {
+        "requested_model": GATEWAY_MODEL,
+        "upstream": "typesafe-ai (TypeSafe System One)",
+        "typesafe_model_alias": MODEL,
+        "served": "recorded per request (served_model, resolved_provider, generation_id in predictions.*) "
+                  "and summarized in report.json; the Gateway id carries no version",
+        **_runner_metadata(),
+    }
+
+
+def _provider_of(manifest: dict, override: str | None) -> str:
+    """The run's provider: the manifest's, unless the fallback is chosen explicitly."""
+
+    name = override or manifest.get("provider") or VERCEL_GATEWAY
+    if name not in PROVIDER_NAMES:
+        raise EvaluationError(f"unknown provider {name!r}; one of {PROVIDER_NAMES}")
+    return name
+
+
+def _credits(provider: str, store: RunStore, *, runner: Path | None, credit_balance: Decimal | None,
+             credit_checked_at: datetime | None) -> dict | None:
+    if provider == TYPESAFE_DIRECT:
+        return direct_credit_state(credit_balance, credit_checked_at, root=store.root)
+    if runner is None:
+        return None
+    return read_credits(runner, store.path / _next_name(store, "credits"))
 
 
 def _stage(store: RunStore, name: str, payload: dict, files: dict[str, str]) -> None:
@@ -276,6 +340,7 @@ def plan(store: RunStore, *, phase: str = "A", seed: int, symbols: int, per_mont
     if phase not in PHASES:
         raise EvaluationError(f"only Phase {sorted(PHASES)} can be planned here")
     params = PHASES[phase]
+    provider = params.get("provider", VERCEL_GATEWAY)
     started = now or datetime.now(UTC)
     method = load_method()
 
@@ -370,16 +435,10 @@ def plan(store: RunStore, *, phase: str = "A", seed: int, symbols: int, per_mont
         "evaluation_version": EVALUATION_VERSION,
         "phase": phase,
         "started_at": started.isoformat(),
-        "model": GATEWAY_MODEL,
-        "provider": "vercel-ai-gateway",
-        "model_version_metadata": {
-            "requested_model": GATEWAY_MODEL,
-            "upstream": "typesafe-ai (TypeSafe System One)",
-            "typesafe_model_alias": MODEL,
-            "served": "recorded per request (served_model, resolved_provider, generation_id in predictions.*) "
-                      "and summarized in report.json; the Gateway id carries no version",
-            **_runner_metadata(),
-        },
+        "model": GATEWAY_MODEL if provider == VERCEL_GATEWAY else MODEL,
+        "provider": provider,
+        "fallback_provider": VERCEL_GATEWAY if provider == TYPESAFE_DIRECT else None,
+        "model_version_metadata": _model_metadata(provider),
         "question_schema_hash": question_schema_hash(),
         "method": method.manifest_entry(),
         "input_building_code": code_version(),
@@ -549,12 +608,19 @@ def _next_name(store: RunStore, stem: str) -> str:
     return f"{stem}-{n}.json"
 
 
-def preflight(store: RunStore, *, budget: Budget, runner: Path | None = RUNNER) -> dict:
-    """Every check that can be made without sending: leakage, schema, budget, credit."""
+def preflight(store: RunStore, *, budget: Budget, runner: Path | None = RUNNER, provider: str | None = None,
+              credit_balance: Decimal | None = None, credit_checked_at: datetime | None = None) -> dict:
+    """Every check that can be made without sending: leakage, schema, budget, credit.
+
+    The credit is the provider's: the Gateway's balance through the runner, or
+    TypeSafe's monthly credit as the operator read it, less recorded spend
+    since (TypeSafe has no balance API).
+    """
 
     for stage in ("plan", "build", "outcomes"):
         _verify_stage(store, stage)
     manifest = store.read_json("manifest.json")
+    provider = _provider_of(manifest, provider)
     _code_matches(manifest)
     _method_matches(manifest)
     canonical_sha = manifest["method"]["canonical"]["sha256"]
@@ -600,14 +666,14 @@ def preflight(store: RunStore, *, budget: Budget, runner: Path | None = RUNNER) 
             violations[sample.sample_id] = problems
 
     estimates = [Decimal(r["estimated_usd"]) for r in requests]
-    credits = None
-    if runner is not None:
-        credits = read_credits(runner, store.path / _next_name(store, "credits"))
+    credits = _credits(provider, store, runner=runner, credit_balance=credit_balance,
+                       credit_checked_at=credit_checked_at)
     budget_problems = plan_problems(budget, estimates, credits)
     tokens = [r["o200k_tokens"] for r in requests]
     result = {
         "checked_at": datetime.now(UTC).isoformat(),
         "run_id": store.run_id,
+        "provider": provider,
         "samples": {c: sum(s.cohort == c for s in samples) for c in ("PRIMARY", "CONTROL")},
         "requests": {v: sum(r["variant"] == v for r in requests) for v in ("main", "anonymized", "drift")},
         "requests_total": len(requests),
@@ -640,30 +706,38 @@ def _response_name(row: dict, raw: bool = False) -> str:
     return f"responses/{row['sample_id']}.{row['variant']}{'.raw' if raw else ''}.json"
 
 
-def response_problems(record: dict, row: dict) -> list[str]:
-    """Why the run must stop after this answer (D-270): any one of these ends it.
+def response_problems(record: dict, row: dict, *, provider: str = VERCEL_GATEWAY,
+                      pinned_model: str | None = None) -> list[str]:
+    """Why the run must stop after this answer (D-270, D-275): any one of these ends it.
 
-    A Gateway error; an incomplete answer; a model or provider other than
-    Jev's; an answer recorded against another request; a cost the Gateway did
-    not report, or above the request's (conservative) estimate; input tokens
-    past the estimate.
+    An error; an incomplete answer; a model or provider other than Jev's - for
+    TypeSafe direct, a served version other than the one the run began with;
+    an answer recorded against another request; a missing cost, or one above
+    the request's (conservative) estimate; input tokens past the estimate.
     """
 
     if record.get("status") != "ok":
-        return [f"Gateway error: {record.get('error')}"]
+        error = record.get("error")
+        return [f"{provider} error: {error if isinstance(error, dict) else str(error)[:160]}"]
     problems = []
     if record.get("completeness_problems"):
         problems.append(f"schema incomplete: {record['completeness_problems']}")
-    if record.get("model") != GATEWAY_MODEL:
-        problems.append(f"unexpected model {record.get('model')!r}")
+    model = record.get("model")
+    if provider == TYPESAFE_DIRECT:
+        if not isinstance(model, str) or not SERVED_VERSION.match(model):
+            problems.append(f"unexpected model {model!r}")
+        elif pinned_model is not None and model != pinned_model:
+            problems.append(f"the served model changed from {pinned_model} to {model} within the run")
+    elif model != GATEWAY_MODEL:
+        problems.append(f"unexpected model {model!r}")
     if record.get("resolved_provider") != EXPECTED_PROVIDER:
         problems.append(f"unexpected provider {record.get('resolved_provider')!r}")
     if record.get("request_sha256") != row["sha256"]:
         problems.append("the answer is recorded against another request")
-    cost = record.get("gateway_cost_usd")
+    cost = record_cost(record)
     if cost is None:
-        problems.append("the Gateway reported no cost")
-    elif Decimal(str(cost)) > Decimal(row["estimated_usd"]):
+        problems.append("no cost for this answer")
+    elif cost > Decimal(row["estimated_usd"]):
         problems.append(f"cost ${cost} is above the request's estimate ${row['estimated_usd']}")
     tokens = (record.get("usage") or {}).get("inputTokens")
     if not isinstance(tokens, int) or not 0 < tokens <= row["estimated_jev_tokens"]:
@@ -671,22 +745,8 @@ def response_problems(record: dict, row: dict) -> list[str]:
     return problems
 
 
-def http_facts(result: dict) -> dict:
-    """The HTTP side of one call as the runner saw it (D-273): status, error type, Retry-After, headers.
-
-    A success is a 200 (the SDK raises on anything else). ``retry_after`` is
-    the Retry-After header when the response carried one, else None. Nothing
-    here comes from the request.
-    """
-
-    error = result.get("error")
-    if not error:
-        return {"status": 200, "error_name": None, "error_type": None, "retry_after": None,
-                "response_headers": (result.get("response") or {}).get("headers")}
-    headers = error.get("responseHeaders") or {}
-    retry_after = next((str(v) for k, v in headers.items() if k.lower() == "retry-after"), None)
-    return {"status": error.get("statusCode"), "error_name": error.get("name"), "error_type": error.get("type"),
-            "retry_after": retry_after, "response_headers": headers or None}
+#: The Gateway runner's HTTP facts (D-273); kept under this name for callers of Phase A.
+http_facts = gateway_http_facts
 
 
 def _prediction_rows(store: RunStore) -> list[dict]:
@@ -703,18 +763,26 @@ def _prediction_rows(store: RunStore) -> list[dict]:
     return rows
 
 
-def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER, pacer: Pacer | None = None) -> dict:
+def _rate_limit_wait(record: dict, attempt: int) -> float:
+    stated = (record.get("http") or {}).get("retry_after_seconds")
+    return float(stated) if stated is not None else FALLBACK_BACKOFF_SECONDS * 2 ** attempt
+
+
+def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER, pacer: Pacer | None = None,
+        provider: str | None = None, credit_balance: Decimal | None = None,
+        credit_checked_at: datetime | None = None, transport=None) -> dict:
     """Send the planned requests - main, then anonymized, then drift - inside the hard budget.
 
-    Paced for the Gateway's free tier (D-273, D-274): one request every 5
-    minutes, at most four in any rolling 20 minutes. Every answer records when
-    it was requested, the previous successful request and the rolling count,
-    and the HTTP facts of a failure.
+    Through the run's provider (the manifest's, or the Gateway fallback when
+    asked for), paced by its policy: TypeSafe direct one request every 5
+    seconds, the Gateway one every 5 minutes (D-274, D-275). Every answer
+    records when it was requested, the previous successful request, the
+    rolling counts and the HTTP facts of a failure; the raw response is kept
+    beside it. A 429 from TypeSafe direct waits what the server asks
+    (``retry_after_ms`` / Retry-After), or a doubling backoff when it asks
+    nothing, and tries the same request again - at most 3 times, never longer
+    than 30 minutes at once; a Gateway 429 stops the run.
     """
-
-    from surge.jobs.jev_smoke import gateway_record
-
-    pacer = pacer or Pacer()
 
     for stage in ("plan", "build", "outcomes"):
         _verify_stage(store, stage)
@@ -729,8 +797,13 @@ def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER, pacer: Pacer 
     if checked["budget"] != {"max_usd": str(budget.max_usd), "max_requests": budget.max_requests}:
         raise EvaluationError(f"the budget differs from the one preflight checked ({checked['budget']})")
     manifest = store.read_json("manifest.json")
+    provider = _provider_of(manifest, provider)
+    if checked.get("provider", VERCEL_GATEWAY) != provider:
+        raise EvaluationError(f"preflight checked {checked.get('provider', VERCEL_GATEWAY)}, not {provider}")
     _code_matches(manifest)
     _method_matches(manifest)
+    adapter = provider_for(provider, runner=runner, transport=transport)
+    pacer = pacer or pacer_for(provider)
 
     requests = store.read_jsonl("requests.jsonl")
     order = {"main": 0, "anonymized": 1, "drift": 2}
@@ -742,15 +815,17 @@ def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER, pacer: Pacer 
             ledger.record(store.read_json(_response_name(row)), estimate=Decimal(row["estimated_usd"]))
         else:
             pending.append(row)
-    credits = read_credits(runner, store.path / _next_name(store, "credits"))
+    credits = _credits(provider, store, runner=runner, credit_balance=credit_balance,
+                       credit_checked_at=credit_checked_at)
     problems = plan_problems(budget, [Decimal(r["estimated_usd"]) for r in pending], credits)
     if problems:
         raise EvaluationError(f"not sending: {problems}")
 
     stopped, last = None, None
     previous_success_at = None
+    pinned_model = None
     max_in_window = 0
-    asked = questions()
+    sends = 0  # every HTTP attempt of this invocation, in order
     for count, row in enumerate(pending, start=1):
         label = f"{row['sample_id']}.{row['variant']}"
         estimate = Decimal(row["estimated_usd"])
@@ -761,50 +836,65 @@ def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER, pacer: Pacer 
         except (BudgetExceeded, StoreError) as exc:
             stopped = f"{label}: {exc}"
             break
-        raw_out = store.path / _response_name(row, raw=True)
-        if raw_out.exists():
-            raise StoreError(f"{raw_out} exists without its record; look at it before sending again")
-        raw_out.parent.mkdir(parents=True, exist_ok=True)
-        waited = pacer.wait()
-        requested_at = datetime.now(UTC).isoformat()
-        in_window = pacer.mark_sent()
-        in_last_60s = pacer.count_within(60.0)
-        max_in_window = max(max_in_window, in_window)
-        subprocess.run(["node", str(runner), str(store.path / row["file"]), str(raw_out)], check=False,
-                       timeout=300, cwd=str(runner.parent), capture_output=True, text=True)
-        result = (json.loads(raw_out.read_text(encoding="utf-8")) if raw_out.exists()
-                  else {"error": {"message": "the runner wrote nothing"}, "latencyMs": 0})
-        record = gateway_record(result, asked=asked, label=label, request_sha256=row["sha256"])
-        record["pacing"] = {
-            "requested_at": requested_at,
-            "runner_started_at": result.get("startedAt"),
-            "previous_success_at": previous_success_at,
-            "requests_in_rolling_60s": in_last_60s,
-            "requests_in_policy_window": in_window,
-            "waited_seconds": round(waited, 3),
-            "policy": {"min_interval_seconds": pacer.min_interval, "window_seconds": pacer.window,
-                       "max_in_window": pacer.max_in_window},
-        }
-        record["http"] = http_facts(result)
+        rate_limited = []
+        for attempt in range(MAX_RATE_LIMIT_RETRIES + 1):
+            raw_name = _response_name(row, raw=True)
+            if attempt:
+                raw_name = raw_name.replace(".raw.json", f".raw.{attempt}.json")
+            raw_out = store.path / raw_name
+            if raw_out.exists():
+                raise StoreError(f"{raw_out} exists without its record; look at it before sending again")
+            waited = pacer.wait()
+            requested_at = datetime.now(UTC).isoformat()
+            in_window = pacer.mark_sent()
+            in_last_60s = pacer.count_within(60.0)
+            max_in_window = max(max_in_window, in_window)
+            sends += 1
+            record = adapter.call(store.path / row["file"], raw_out, label=label, request_sha256=row["sha256"])
+            record["pacing"] = {
+                "send_index": sends,
+                "requested_at": requested_at,
+                "runner_started_at": record.get("runner_started_at") or record.get("sent_at"),
+                "previous_success_at": previous_success_at,
+                "requests_in_rolling_60s": in_last_60s,
+                "requests_in_policy_window": in_window,
+                "waited_seconds": round(waited, 3),
+                "policy": {"min_interval_seconds": pacer.min_interval, "window_seconds": pacer.window,
+                           "max_in_window": pacer.max_in_window},
+            }
+            if record["http"]["status"] != 429 or not adapter.honours_rate_limit_wait:
+                break
+            wait = _rate_limit_wait(record, attempt)
+            rate_limited.append({"requested_at": requested_at, "raw_file": raw_name, "http": record["http"],
+                                 "wait_seconds": round(wait, 3)})
+            if attempt == MAX_RATE_LIMIT_RETRIES or wait > MAX_RATE_LIMIT_WAIT_SECONDS:
+                break
+            _progress(f"{label}: 429, waiting {wait:.1f}s as the provider asks")
+            pacer.sleep(wait)
+        record["rate_limited_attempts"] = rate_limited
         store.write_json(_response_name(row), record)
         ledger.record(record, estimate=estimate)
-        last = {"label": label, "pacing": record["pacing"], "http": record["http"]}
-        problems = response_problems(record, row)
+        last = {"label": label, "pacing": record["pacing"], "http": record["http"],
+                "rate_limited_attempts": rate_limited}
+        problems = response_problems(record, row, provider=provider, pinned_model=pinned_model)
         if problems:
             stopped = f"{label}: {problems}"
             break
+        pinned_model = pinned_model or (record.get("model") if provider == TYPESAFE_DIRECT else None)
         previous_success_at = requested_at
         if count % 10 == 0:
             _progress(f"sent {count}/{len(pending)}, ${ledger.spent_usd}")
 
-    summary = {"sent_this_time": ledger.requests - (len(requests) - len(pending)), "requests_answered":
+    summary = {"provider": provider, "served_model": pinned_model,
+               "sent_this_time": ledger.requests - (len(requests) - len(pending)), "requests_answered":
                ledger.requests, "spent_usd": str(ledger.spent_usd), "stopped": stopped,
                "estimated_charges": ledger.estimated_charges, "credits_before": credits,
                "max_requests_in_policy_window": max_in_window}
     if stopped is not None:
         store.write_json(_next_name(store, "run-stopped"), {**summary, "last_request": last})
     elif ledger.requests == len(requests):
-        summary["credits_after"] = read_credits(runner, store.path / _next_name(store, "credits"))
+        summary["credits_after"] = _credits(provider, store, runner=runner, credit_balance=credit_balance,
+                                            credit_checked_at=credit_checked_at)
         rows = _prediction_rows(store)
         main = [r for r in rows if r["variant"] == "main"]
         files = {
@@ -852,6 +942,12 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--budget-usd", type=Decimal, required=True)
             p.add_argument("--max-requests", type=int, required=True)
             p.add_argument("--runner", type=Path, default=RUNNER)
+            p.add_argument("--provider", choices=PROVIDER_NAMES, default=None,
+                           help="the manifest's provider unless given; vercel-ai-gateway is the fallback (D-275)")
+            p.add_argument("--credit-balance-usd", type=Decimal, default=None,
+                           help="TypeSafe direct: Credit Balance as read at console.typesafe.ai/settings/billing")
+            p.add_argument("--credit-checked-at", type=datetime.fromisoformat, default=None,
+                           help="TypeSafe direct: when that balance was read (ISO 8601 with timezone)")
         if name == "preflight":
             p.add_argument("--no-credits", action="store_true", help="skip the Gateway balance (not ready to send)")
     args = parser.parse_args(argv)
@@ -865,9 +961,12 @@ def main(argv: list[str] | None = None) -> int:
         result = freeze_outcomes(store)
     elif args.command == "preflight":
         result = preflight(store, budget=Budget(args.budget_usd, args.max_requests),
-                           runner=None if args.no_credits else args.runner)
+                           runner=None if args.no_credits else args.runner, provider=args.provider,
+                           credit_balance=args.credit_balance_usd, credit_checked_at=args.credit_checked_at)
     elif args.command == "run":
-        result = run(store, budget=Budget(args.budget_usd, args.max_requests), runner=args.runner)
+        result = run(store, budget=Budget(args.budget_usd, args.max_requests), runner=args.runner,
+                     provider=args.provider, credit_balance=args.credit_balance_usd,
+                     credit_checked_at=args.credit_checked_at)
     else:
         result = report(store)
     print(json.dumps(result, indent=2, ensure_ascii=False, default=str))

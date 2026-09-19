@@ -774,8 +774,7 @@ class _FakeYanoshin:
                                response_sha256="0" * 64, total_count=len(items))
 
 
-@pytest.fixture()
-def planned_run(tmp_path, monkeypatch):
+def _plan_offline(tmp_path, monkeypatch, provider):
     codes = [str(2000 + i) for i in range(8)]
     days = business_days(date(2024, 6, 3), date(2026, 8, 31))
     charts = {f"{c}.T": chart(days, walk(len(days), start=600.0 + 250 * i, seed=i),
@@ -795,7 +794,8 @@ def planned_run(tmp_path, monkeypatch):
     monkeypatch.setitem(jev_eval.PHASES, "A", {**jev_eval.PHASES["A"], "primary": 6, "control": 2,
                                                 "anonymized": 1, "drift": 1,
                                                 "evaluated": {"primary": 3, "control": 1, "anonymized": 1,
-                                                              "drift": 1}})
+                                                              "drift": 1},
+                                                "provider": provider})
     monkeypatch.setattr(jev_eval, "_o200k", lambda text: len(text) // 3)
     store = RunStore(tmp_path, "t1")
     summary = jev_eval.plan(store, seed=7, symbols=8, now=NOW, yahoo=_FakeYahoo(charts),
@@ -803,6 +803,11 @@ def planned_run(tmp_path, monkeypatch):
     assert summary["official_samples"] == {"PRIMARY": 6, "CONTROL": 2}
     assert summary["samples"] == {"PRIMARY": 3, "CONTROL": 1}
     return store
+
+
+@pytest.fixture()
+def planned_run(tmp_path, monkeypatch):
+    return _plan_offline(tmp_path, monkeypatch, "vercel-ai-gateway")
 
 
 def test_plan_build_freeze_and_preflight_offline(planned_run):
@@ -899,8 +904,8 @@ def test_every_answer_records_its_pacing_and_http_facts(ready_run, monkeypatch):
     _fake_gateway(monkeypatch)
     jev_eval.run(store, budget=BUDGET, pacer=_pacer())
     records = sorted((store.read_json(f"responses/{p.name}") for p in (store.path / "responses").glob("*.json")
-                      if not p.name.endswith(".raw.json")), key=lambda r: r["pacing"]["requested_at"])
-    assert len(records) == 6
+                      if not p.name.endswith(".raw.json")), key=lambda r: r["pacing"]["send_index"])
+    assert len(records) == 6 and [r["pacing"]["send_index"] for r in records] == [1, 2, 3, 4, 5, 6]
     assert [r["pacing"]["waited_seconds"] for r in records] == [0.0] + [300.0] * 5
     assert max(r["pacing"]["requests_in_policy_window"] for r in records) == 4
     assert all(r["pacing"]["requests_in_rolling_60s"] == 1 for r in records)
@@ -923,11 +928,13 @@ def test_a_429_is_recorded_with_its_headers_and_stops_the_run(ready_run, monkeyp
 
     sent = _fake_gateway(monkeypatch, answer=rate_limited)
     summary = jev_eval.run(store, budget=BUDGET, pacer=_pacer())
-    assert len(sent) == 3 and "Gateway error" in summary["stopped"]
+    assert len(sent) == 3 and "vercel-ai-gateway error" in summary["stopped"]
     stop = store.read_json("run-stopped-1.json")
     last = stop["last_request"]
     assert last["http"] == {"status": 429, "error_name": "GatewayRateLimitError", "error_type": "rate_limit_exceeded",
-                            "retry_after": "30", "response_headers": {"Retry-After": "30", "x-vercel-id": "hnd1::test"}}
+                            "retry_after": "30", "retry_after_seconds": 30.0,
+                            "response_headers": {"Retry-After": "30", "x-vercel-id": "hnd1::test"}}
+    assert last["rate_limited_attempts"] == []  # the Gateway's 429 is not waited out: it stops the run
     assert last["pacing"]["requests_in_policy_window"] == 3
     assert last["pacing"]["requests_in_rolling_60s"] == 1
     assert last["pacing"]["previous_success_at"] is not None
@@ -1048,3 +1055,237 @@ def test_a_request_file_changed_after_preflight_is_never_sent(ready_run, monkeyp
     with pytest.raises(StoreError, match="does not match"):
         jev_eval.run(store, budget=BUDGET, pacer=_pacer())
     assert sent == []
+
+
+# ----------------------------------------------------------------- TypeSafe direct (D-275), offline
+
+
+FAKE_KEY = "ts-test-key-not-a-real-one-0000000000"
+
+
+def _direct_answer_body(model="jev-1.13.0", tokens=None):
+    options = list(DECISIONS)
+    return {
+        "model": model,
+        "answers": {
+            "decision": {"type": "choice", "choice": "REJECT", "confidence": 0.3,
+                         "probabilities": {k: (0.6 if k == "REJECT" else 0.1) for k in options}},
+            "reaches_target": {"type": "noul", "noul": 0.17},
+            "upside_band": {"type": "score", "score": 0.78, "confidence": 0.73,
+                            "legend": {str(i): f"band {i}" for i in range(5)},
+                            "probabilities": {"0": 0.27, "1": 0.69, "2": 0.04, "3": 0.0, "4": 0.0}},
+            **{f"basis_{k}": {"type": "noul", "noul": 0.2} for k in (
+                "current_material", "supply_structure", "volume_structure", "support_resistance",
+                "volatility_range", "sector_move")},
+        },
+        "usage": {"input_tokens": tokens if tokens is not None else 22605, "output_tokens": 211},
+    }
+
+
+def _tokens_within_estimate(data: bytes) -> int:
+    # The o200k stand-in in these tests is len(text) // 3; Jev counts about 1.2x that.
+    return int(len(data.decode("utf-8")) // 3 * 1.2)
+
+
+class _FakeTransport:
+    """TypeSafe's API, answering every request with a complete answer."""
+
+    def __init__(self, tokens_for=None):
+        self.tokens_for = tokens_for
+        self.calls = []
+
+    def __call__(self, url, data, headers, timeout):
+        self.calls.append({"url": url, "data": data, "auth": headers.get("Authorization")})
+        tokens = self.tokens_for(data) if self.tokens_for else None
+        body = _direct_answer_body(tokens=tokens)
+        return 200, {"x-typesafe-request-id": "req_test"}, json.dumps(body).encode("utf-8")
+
+
+def _direct_pacer():
+    return _pacer(min_interval=5.0, window=60.0, max_in_window=12)
+
+
+DIRECT_CREDIT = {"credit_balance": Decimal("5.00")}
+
+
+def _read_an_hour_ago():
+    return datetime.now(UTC) - timedelta(hours=1)
+
+
+def test_the_direct_wire_body_is_the_same_request_in_typesafe_form():
+    from surge.analysis.jev_questions import questions, to_gateway
+    from surge.evaluation.providers import ProviderError, direct_wire_body
+
+    stored = {"model": "typesafe-ai/jev", "state": {"x": "状態"}, "questions": to_gateway(questions())}
+    wire = json.loads(direct_wire_body(stored))
+    assert wire["model"] == "jev-latest" and wire["state"] == stored["state"] and wire["questions"] == questions()
+    assert {q["type"] for q in wire["questions"].values()} == {"choice", "noul", "score"}
+    with pytest.raises(ProviderError, match="questions"):
+        direct_wire_body({**stored, "questions": {}})
+
+
+def test_a_stated_wait_is_read_from_ms_seconds_a_date_or_the_body():
+    from email.utils import format_datetime
+
+    from surge.evaluation.providers import retry_after_seconds
+
+    assert retry_after_seconds({"retry-after-ms": "1500"}, None) == 1.5
+    assert retry_after_seconds({"Retry-After": "30"}, None) == 30.0
+    in_a_minute = format_datetime(datetime.now(UTC) + timedelta(seconds=60), usegmt=True)
+    assert 50 < retry_after_seconds({"retry-after": in_a_minute}, None) <= 60
+    assert retry_after_seconds({}, {"error": {"retry_after_ms": 2000}}) == 2.0
+    assert retry_after_seconds({}, {"retry_after_ms": 500}) == 0.5
+    assert retry_after_seconds({"x-other": "1"}, {}) is None
+
+
+def test_a_direct_answer_is_kept_raw_and_recorded_without_key_or_request(tmp_path, monkeypatch):
+    from surge.analysis.jev_questions import questions, to_gateway
+    from surge.evaluation.providers import TypeSafeDirect, direct_wire_body
+
+    monkeypatch.setenv("TYPESAFE_API_KEY", FAKE_KEY)
+    stored = {"model": "typesafe-ai/jev", "state": {"canonical_v5_1": "CANONICAL-TEXT-MUST-NOT-LEAK"},
+              "questions": to_gateway(questions())}
+    request = tmp_path / "request.json"
+    request.write_bytes(json.dumps(stored).encode("utf-8"))
+    transport = _FakeTransport()
+    record = TypeSafeDirect(transport=transport).call(request, tmp_path / "raw.json", label="s.main",
+                                                      request_sha256="r" * 64)
+    raw = (tmp_path / "raw.json").read_bytes()
+    assert json.loads(raw) == _direct_answer_body()  # the raw output, as it came
+    assert transport.calls[0]["auth"] == f"Bearer {FAKE_KEY}" and transport.calls[0]["url"].endswith("/systemone")
+    assert record["via"] == "typesafe-direct" and record["model"] == "jev-1.13.0" and record["status"] == "ok"
+    assert record["usage"] == {"inputTokens": 22605, "outputTokens": 211, "totalTokens": 22816}
+    assert Decimal(record["cost_usd"]) == Decimal(22605) * Decimal("0.042") / Decimal(1_000_000)
+    assert record["completeness_problems"] == [] and record["request_id"] == "req_test"
+    assert record["wire_sha256"] == hashlib.sha256(direct_wire_body(stored)).hexdigest()
+    written = json.dumps(record) + raw.decode("utf-8")
+    assert FAKE_KEY not in written and "CANONICAL-TEXT-MUST-NOT-LEAK" not in written
+
+
+def test_the_direct_credit_is_the_operators_reading_less_recorded_spend(tmp_path):
+    from surge.evaluation.cost import direct_credit_state, local_direct_spend
+
+    responses = tmp_path / "evaluation" / "jev" / "r1" / "responses"
+    responses.mkdir(parents=True)
+    read_at = datetime(2026, 9, 19, 9, 0, tzinfo=UTC)
+    for name, sent, cost_usd, via in (("a.main.json", read_at + timedelta(hours=1), "0.001", "typesafe-direct"),
+                                      ("b.main.json", read_at - timedelta(hours=1), "0.002", "typesafe-direct"),
+                                      ("c.main.json", read_at + timedelta(hours=2), "0.004", "vercel-ai-gateway")):
+        (responses / name).write_text(json.dumps({"via": via, "sent_at": sent.isoformat(), "cost_usd": cost_usd}),
+                                      encoding="utf-8")
+    assert local_direct_spend(tmp_path, read_at) == Decimal("0.001")  # only direct, only after the reading
+    state = direct_credit_state(Decimal("5.00"), read_at, root=tmp_path, now=read_at + timedelta(days=1))
+    assert state["balance"] == "4.999" and state["spent_since_check"] == "0.001"
+    assert "no balance API" in direct_credit_state(None, None, root=tmp_path)["error"]
+    assert "last 7 days" in direct_credit_state(Decimal("5"), read_at, root=tmp_path,
+                                                now=read_at + timedelta(days=8))["error"]
+
+
+@pytest.fixture()
+def direct_ready_run(tmp_path, monkeypatch):
+    store = _plan_offline(tmp_path, monkeypatch, "typesafe-direct")
+    manifest = store.read_json("manifest.json")
+    assert manifest["provider"] == "typesafe-direct" and manifest["model"] == "jev-latest"
+    assert manifest["fallback_provider"] == "vercel-ai-gateway"
+    jev_eval.build(store, yanoshin=_FakeYanoshin())
+    jev_eval.freeze_outcomes(store)
+    monkeypatch.setenv("TYPESAFE_API_KEY", FAKE_KEY)
+    unread = jev_eval.preflight(store, budget=BUDGET)
+    assert not unread["ready_to_send"] and "no balance API" in unread["budget_problems"][0]
+    checked = jev_eval.preflight(store, budget=BUDGET, credit_balance=Decimal("5.00"),
+                                 credit_checked_at=_read_an_hour_ago())
+    assert checked["ready_to_send"] and checked["provider"] == "typesafe-direct"
+    return store
+
+
+def test_a_direct_run_is_paced_every_5_seconds_and_reported(direct_ready_run):
+    store = direct_ready_run
+    transport = _FakeTransport(tokens_for=_tokens_within_estimate)
+    summary = jev_eval.run(store, budget=BUDGET, pacer=_direct_pacer(), transport=transport,
+                           credit_checked_at=_read_an_hour_ago(), **DIRECT_CREDIT)
+    assert summary["stopped"] is None and summary["requests_answered"] == 6 and len(transport.calls) == 6
+    assert summary["provider"] == "typesafe-direct" and summary["served_model"] == "jev-1.13.0"
+    assert all(json.loads(c["data"])["model"] == "jev-latest" for c in transport.calls)
+    records = sorted((store.read_json(f"responses/{p.name}") for p in (store.path / "responses").glob("*.json")
+                      if ".raw" not in p.name), key=lambda r: r["pacing"]["send_index"])
+    assert [r["pacing"]["waited_seconds"] for r in records] == [0.0] + [5.0] * 5
+    assert all(r["via"] == "typesafe-direct" and r["rate_limited_attempts"] == [] for r in records)
+    assert len(list((store.path / "responses").glob("*.raw.json"))) == 6  # the raw output of every answer
+    result = jev_eval.report(store)
+    assert result["pipeline"]["providers"] == ["typesafe-direct"]
+    assert result["pipeline"]["served_models"] == ["jev-1.13.0"]
+    assert result["pipeline"]["cost"]["cost_bases"] == [
+        "TypeSafe published price x input tokens (output free); TypeSafe reports no cost"]
+    assert result["pipeline"]["cost"]["cost_usd_total"] > 0
+    prediction = store.read_jsonl("predictions.jsonl")[0]
+    assert prediction["answers_as_recorded"]["decision"]["confidence"] == 0.3
+    assert prediction["teacher_admissible"] is False
+    everything = "".join(p.read_text(encoding="utf-8") for p in store.path.rglob("*.json") if "requests" not in p.parts)
+    assert FAKE_KEY not in everything
+
+
+def test_a_direct_429_waits_what_the_server_asks_and_tries_again(direct_ready_run):
+    store = direct_ready_run
+    pacer = _direct_pacer()
+    answers = iter(["ok", (429, {"retry-after-ms": "1500"},
+                           {"error": {"type": "rate_limit_exceeded", "message": "slow down"}})])
+
+    def scripted(url, data, headers, timeout):
+        step = next(answers, "ok")
+        if step == "ok":
+            return _FakeTransport(tokens_for=_tokens_within_estimate)(url, data, headers, timeout)
+        status, response_headers, body = step
+        return status, response_headers, json.dumps(body).encode("utf-8")
+
+    summary = jev_eval.run(store, budget=BUDGET, pacer=pacer, transport=scripted,
+                           credit_checked_at=_read_an_hour_ago(), **DIRECT_CREDIT)
+    assert summary["stopped"] is None and summary["requests_answered"] == 6
+    records = [store.read_json(f"responses/{p.name}") for p in (store.path / "responses").glob("*.json")
+               if ".raw" not in p.name]
+    waited = [r for r in records if r["rate_limited_attempts"]]
+    assert len(waited) == 1
+    attempt = waited[0]["rate_limited_attempts"][0]
+    assert attempt["wait_seconds"] == 1.5 and attempt["http"]["retry_after_ms"] == "1500"
+    assert attempt["http"]["status"] == 429 and attempt["http"]["error_name"] == "TypeSafeRateLimitError"
+    assert 1.5 in pacer.sleep.__self__.slept  # the stated wait, honoured
+    assert len(list((store.path / "responses").glob("*.raw.1.json"))) == 1  # the retry's raw output kept apart
+
+
+def test_a_direct_429_without_a_stated_wait_backs_off_then_stops(direct_ready_run):
+    store = direct_ready_run
+    pacer = _direct_pacer()
+
+    def always_limited(url, data, headers, timeout):
+        return 429, {}, json.dumps({"error": {"type": "rate_limit_exceeded", "message": "slow down"}}).encode()
+
+    summary = jev_eval.run(store, budget=BUDGET, pacer=pacer, transport=always_limited,
+                           credit_checked_at=_read_an_hour_ago(), **DIRECT_CREDIT)
+    assert "typesafe-direct error" in summary["stopped"]
+    stop = store.read_json("run-stopped-1.json")
+    waits = [a["wait_seconds"] for a in stop["last_request"]["rate_limited_attempts"]]
+    assert waits == [60.0, 120.0, 240.0, 480.0]  # three waits and retries; the fourth 429 ends the run
+    assert [s for s in pacer.sleep.__self__.slept if s >= 60] == [60.0, 120.0, 240.0]
+
+
+def test_a_change_of_served_version_stops_a_direct_run(direct_ready_run):
+    store = direct_ready_run
+    versions = iter(["jev-1.13.0", "jev-1.14.0"])
+
+    def upgraded(url, data, headers, timeout):
+        body = _direct_answer_body(model=next(versions, "jev-1.14.0"), tokens=_tokens_within_estimate(data))
+        return 200, {}, json.dumps(body).encode()
+
+    summary = jev_eval.run(store, budget=BUDGET, pacer=_direct_pacer(), transport=upgraded,
+                           credit_checked_at=_read_an_hour_ago(), **DIRECT_CREDIT)
+    assert "changed from jev-1.13.0 to jev-1.14.0" in summary["stopped"]
+
+
+def test_the_gateway_is_kept_as_the_fallback_of_a_direct_run(direct_ready_run, monkeypatch):
+    store = direct_ready_run
+    monkeypatch.setattr(jev_eval, "read_credits", lambda runner, out: {"balance": "4.99", "total_used": "0.01"})
+    with pytest.raises(jev_eval.EvaluationError, match="preflight checked typesafe-direct"):
+        jev_eval.run(store, budget=BUDGET, provider="vercel-ai-gateway", pacer=_pacer())
+    assert jev_eval.preflight(store, budget=BUDGET, provider="vercel-ai-gateway")["ready_to_send"]
+    sent = _fake_gateway(monkeypatch)
+    summary = jev_eval.run(store, budget=BUDGET, provider="vercel-ai-gateway", pacer=_pacer())
+    assert summary["stopped"] is None and len(sent) == 6 and summary["provider"] == "vercel-ai-gateway"

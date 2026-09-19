@@ -1,6 +1,6 @@
 # Jev 予測性能評価 設計
 
-状態: **v1.1（ユーザー確定 2026-09-18、Phase A の規模と送信間隔は D-274 で変更）** — **Phase A 完了**（run `jev-a-20260918-05`、commit 3dcb292、24 / 24、§10）。Phase B は未着手（設計変更なし）
+状態: **v1.2（ユーザー確定 2026-09-19、Phase B の経路は D-275）** — Phase A 完了（§10）。Phase B は未着手: 主経路 = TypeSafe 直接 API、Vercel AI Gateway = fallback。**D-272 を決めるまで Phase B は開始しない**
 前提: [D-267](../unresolved-decisions.md) EOD Prediction 規則（S0 確定終値・目標 ×1.20・S1 から評価・T+1/3/5/10/20・期限 T+20）/ D-269（Vercel AI Gateway 経由の Jev は技術的に適合、production default ではない）/ D-268（+20% 到達の判定基準は未決）/ D-270（本設計の確定）
 
 ## 0. 目的と範囲
@@ -78,9 +78,9 @@ Jev の training cutoff を信頼できる形で確定できず、過去の outc
 ## 8. API 予算
 
 - **Phase A**: 24 request（main 20 + 匿名化 2 + drift 2、D-274）、hard budget **$0.05**、5 分間隔。（当初は 100 件 + 匿名化 約 10 件・drift 約 5 件、hard budget $0.20）
-- **Phase B**: 1,500〜2,000 件。
+- **Phase B**: 1,500〜2,000 件。**主経路は TypeSafe 直接 API**（D-275、model `jev-latest`、初期 pacing 1 request / 5 秒）。実測単価 約 $0.00095 / 件なら約 $1.4〜$1.9 で、TypeSafe の月次 $5 promotional credit 内に収まる。Vercel AI Gateway は rate limit のため fallback（direct の障害時・出力比較・adapter の regression test）。
 - 現在の実測 Gateway cost（1 件 ≈ $0.00092、D-269）を基準に、**run ごとに hard budget**（金額と件数）を設定し、超える前に止める。
-- **Vercel AI Gateway の無料 $5 credit を超える実行はしない。** paid credit の購入・auto-reload はしない（Auto-reload は Off を確認済み）。実行前に Gateway の残高を確認する。
+- **どちらの経路でも無料 credit を超える実行はしない。** 有料 credit の購入・カード登録・auto-reload / auto-recharge はしない（Gateway の Auto-reload は Off、TypeSafe の auto-recharge は Off でカード未登録）。実行前に残高を確認する: Gateway は runner で残高を読み、TypeSafe は残高 API が無いので operator が console の Credit Balance を読んだ値（7 日以内）から、この system がその後に記録した支出を引いた額を使う。
 
 ---
 
@@ -135,6 +135,7 @@ API を送る直前まで（`preflight`）を実装・テストし、そこで�
 - **1 件でも次のどれかが出たら `run` はその時点で止まる**（ユーザー指示 2026-09-18、再試行しない）: Gateway error / schema incomplete / 予算の異常（報告されない cost、見積もりを超える cost、見積もりを超える input tokens、予算・件数の上限）/ request の hash 不一致（送る直前にファイルを照合）/ 想定外の model（`typesafe-ai/jev` 以外）・provider（`typesafe-ai` 以外）/ integrity violation（stage ファイルの照合失敗）。止まった run は `run-stopped-<n>.json` を残し、**再開しない**（見直してから新しい run にする）。
 - 全件の後に Gateway の残高をもう一度読み、`stage-run.json` に送信前後の残高を残す。
 - **送信の間隔（D-273 → D-274）**: Gateway の free tier は `typesafe-ai/jev` を rate limit する。5 件連続の後の 6 件目で 429 を 2 回再現し（約 2.2 秒間隔の `-03`、15 秒間隔かつ 60 秒に最大 4 件の `-04`）、窓の大きさは docs からも応答 header からも分からない。Phase A は**5 分間隔**で送り、guard は任意の 20 分に最大 4 件（`surge.evaluation.pacing.Pacer`。超えそうなら待ち、超えたら例外）。各応答に `pacing`（request 時刻・runner 側の開始時刻・直前の成功時刻・rolling 60 秒の件数・方針の窓の件数・待った秒数・方針）と `http`（status・error 名と type・Retry-After（無ければ null）・応答 header）を残す。runner は Gateway の error から応答側だけを写し、request 本文（`cause.requestBodyValues`）と API key は記録しない（`ops/jev-gateway-runner/describe-error.mjs`、`node check-describe.mjs` で offline に確認できる）。rate limit の境界はこれ以上探索しない。
+- **Phase B の経路と送信（D-275）**: `surge.evaluation.providers` の TypeSafe direct（primary）と Vercel Gateway（fallback）。保存する request は従来どおり 1 つ（Gateway の wire 形式、preflight の検査対象）で、direct はそこから自分の wire 形式（model `jev-latest`、yes/no 型 `noul`）を作り、送ったバイトの hash を `wire_sha256` に残す。pacing は direct 5 秒間隔（60 秒に最大 12）、Gateway 5 分間隔。429 は direct なら provider の `retry_after_ms`（`retry-after-ms` → `Retry-After` → body）を優先して待って同じ request を再送（最大 3 回、1 回の待ちは 30 分まで、値が無ければ 60 秒から倍々）、超えたら停止。Gateway の 429 は Phase A どおり即停止。direct の served version（例 `jev-1.13.0`）は run の最初の回答で固定し、変われば停止。raw の出力（加工前）を `responses/*.raw*.json`に保存し、予測行にも `answers_as_recorded` を残す。複数回の平均・confidence / probability のしきい値・decision ルールの変更は実装しない。
 
 ### 9-3c. run ディレクトリ
 

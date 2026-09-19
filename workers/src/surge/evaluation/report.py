@@ -46,7 +46,10 @@ def prediction_row(record: dict, sample: dict, *, variant: str, request: dict, e
     decision = answers.get("decision") or {}
     upside = answers.get("upside_band") or {}
     usage = record.get("usage") or {}
-    cost = record.get("gateway_cost_usd")
+    # TypeSafe direct records carry cost_usd (published price x tokens); Gateway
+    # records carry the reported gateway_cost_usd (and, since D-275, cost_usd too).
+    cost = record.get("cost_usd", record.get("gateway_cost_usd"))
+    gateway_cost = record.get("gateway_cost_usd")
     problems = list(record.get("completeness_problems") or [])
     return {
         "sample_id": sample["sample_id"],
@@ -69,7 +72,15 @@ def prediction_row(record: dict, sample: dict, *, variant: str, request: dict, e
         "generation_id": record.get("generation_id"),
         "input_tokens": usage.get("inputTokens"),
         "output_tokens": usage.get("outputTokens"),
-        "gateway_cost_usd": None if cost is None else float(cost),
+        "via": record.get("via"),
+        "request_id": record.get("request_id") or record.get("generation_id"),
+        "wire_sha256": record.get("wire_sha256"),
+        "cost_usd": None if cost is None else float(cost),
+        "cost_basis": record.get("cost_basis") or ("reported by the Gateway" if gateway_cost is not None else None),
+        "gateway_cost_usd": None if gateway_cost is None else float(gateway_cost),
+        # Every answer as recorded (for TypeSafe direct, exactly as the API returned it).
+        "answers_as_recorded": answers,
+        "rate_limited_attempts": len(record.get("rate_limited_attempts") or []),
         "decision": decision.get("choice"),
         "decision_probabilities": decision.get("probabilities"),
         "decision_confidence": decision.get("confidence"),
@@ -300,7 +311,8 @@ def pipeline_summary(predictions: list[dict], outcomes: list[dict], *, planned: 
     latencies = [p["latency_seconds"] for p in sent if p["latency_seconds"] is not None]
     tokens = [p["input_tokens"] for p in sent if p["input_tokens"] is not None]
     ratios = [p["input_tokens"] / p["o200k_tokens"] for p in sent if p["input_tokens"] and p["o200k_tokens"]]
-    costs = [p["gateway_cost_usd"] for p in sent if p["gateway_cost_usd"] is not None]
+    costs = [p["cost_usd"] for p in sent if p.get("cost_usd") is not None]
+    gateway_costs = [p["gateway_cost_usd"] for p in sent if p.get("gateway_cost_usd") is not None]
     return {
         "requests": {
             "planned": planned,
@@ -312,11 +324,15 @@ def pipeline_summary(predictions: list[dict], outcomes: list[dict], *, planned: 
         },
         "cost": {
             "budget": budget,
-            "gateway_cost_usd_total": sum(costs),
+            "cost_usd_total": sum(costs),
+            "cost_bases": sorted({p["cost_basis"] for p in sent if p.get("cost_basis")}),
+            "gateway_cost_usd_total": sum(gateway_costs),
             "requests_without_reported_cost": len(sent) - len(costs),
             "estimated_usd_total": sum(p["estimated_usd"] for p in sent),
-            "gateway_cost_usd_mean": _mean(costs),
+            "cost_usd_mean": _mean(costs),
         },
+        "providers": sorted({p["via"] for p in sent if p.get("via")}),
+        "rate_limited_attempts": sum(p.get("rate_limited_attempts") or 0 for p in sent),
         "tokens": {
             "input_mean": _mean(tokens),
             "input_min": min(tokens, default=None),
@@ -422,9 +438,10 @@ def render_markdown(report: dict) -> str:
         f"- requests: planned {req['planned']}, sent {req['sent']}, ok {req['ok']}, errors {req['errors']}, "
         f"incomplete {req['incomplete']} (main {req['by_variant']['main']}, anonymized "
         f"{req['by_variant']['anonymized']}, drift {req['by_variant']['drift']})",
-        f"- cost: ${_fmt(cost['gateway_cost_usd_total'], 6)} reported by the Gateway "
-        f"(estimated ${_fmt(cost['estimated_usd_total'], 6)}; {cost['requests_without_reported_cost']} without a "
-        f"reported cost); budget {json.dumps(cost['budget'])}",
+        f"- cost: ${_fmt(cost['cost_usd_total'], 6)} ({'; '.join(cost['cost_bases']) or '-'}; estimated "
+        f"${_fmt(cost['estimated_usd_total'], 6)}; {cost['requests_without_reported_cost']} without a cost); "
+        f"budget {json.dumps(cost['budget'])}; provider {', '.join(pipe['providers']) or '-'}; "
+        f"429 waits {pipe['rate_limited_attempts']}",
         f"- input tokens: mean {_fmt(tok['input_mean'], 0)}, min {_fmt(tok['input_min'])}, p50 "
         f"{_fmt(tok['input_p50'])}, p90 {_fmt(tok['input_p90'])}, max {_fmt(tok['input_max'])}; Jev / o200k "
         f"{_fmt(tok['jev_to_o200k_ratio_mean'])}",

@@ -75,4 +75,22 @@ class Pacer:
         return count
 
 
-__all__ = ["MAX_IN_WINDOW", "MIN_INTERVAL_SECONDS", "WINDOW_SECONDS", "Pacer", "PacingError"]
+#: Per provider (D-275). TypeSafe's own API answered six requests two seconds
+#: apart without a 429 (2026-09-19), so Phase B starts at one every 5 seconds -
+#: enough for a benchmark gathered over weeks; the most the API allows is not
+#: sought. The Gateway keeps Phase A's 5-minute policy.
+POLICIES = {
+    "typesafe-direct": {"min_interval": 5.0, "window": 60.0, "max_in_window": 12},
+    "vercel-ai-gateway": {"min_interval": MIN_INTERVAL_SECONDS, "window": WINDOW_SECONDS,
+                          "max_in_window": MAX_IN_WINDOW},
+}
+
+
+def pacer_for(provider: str, **overrides) -> Pacer:
+    if provider not in POLICIES:
+        raise PacingError(f"no pacing policy for {provider!r}")
+    return Pacer(**{**POLICIES[provider], **overrides})
+
+
+__all__ = ["MAX_IN_WINDOW", "MIN_INTERVAL_SECONDS", "POLICIES", "WINDOW_SECONDS", "Pacer", "PacingError",
+           "pacer_for"]
