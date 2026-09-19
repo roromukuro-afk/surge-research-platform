@@ -257,3 +257,17 @@ def test_stage3_a_day_started_just_before_its_window_waits_for_it(tmp_path):
     result = json.loads(done.stdout.strip().splitlines()[-1])
     assert datetime.fromisoformat(result["opened_now"]) >= datetime.fromisoformat(result["opens"])
     assert result["written"] and result["elapsed"] >= 2.5  # it slept until the window opened, then ran the day
+
+
+def test_the_c_extensions_a_day_needs_load_inside_a_step(tmp_path):
+    # In a process of its own (tests/shadow_extensions_child.py), which imports only shadow_service.flows: from
+    # the SDK's first run on, a C extension loaded for the first time fails inside a step (every Yahoo read of the
+    # first cloud probe, 2026-09-19), so flows.py loads curl_cffi and tiktoken on the host and shares them.
+    import subprocess
+
+    child = Path(__file__).with_name("shadow_extensions_child.py")
+    done = subprocess.run([sys.executable, str(child), str(tmp_path)], capture_output=True, text=True, timeout=300,
+                          check=False)
+    assert done.returncode == 0, done.stderr[-3000:]
+    outputs = json.loads(done.stdout.strip().splitlines()[-1])
+    assert [o["ok"] for o in outputs] == [True, True] and all(o["encodings"] > 0 for o in outputs)

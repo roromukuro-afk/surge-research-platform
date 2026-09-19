@@ -1,9 +1,18 @@
 """The shadow's workflows (D-279).
 
 A workflow body is replayed inside the SDK's deterministic sandbox, so this
-module imports only the SDK at the top; everything with side effects - Blob,
-the frozen Phase B code, the network - is imported inside a step, which runs as
-an ordinary function.
+module imports little at the top; everything with side effects - Blob, the
+frozen Phase B code, the network - is imported inside a step, which runs as an
+ordinary function.
+
+The exception is two C-extension packages the steps use: curl_cffi (the Yahoo
+read) and tiktoken (the build's token counts). From its first run on, the SDK
+replaces ``sys.modules`` with a mapping of its own, and a C extension loaded for
+the first time after that fails inside a step ("SystemError: ... dictobject.c:
+... bad argument to internal function": every Yahoo read of the first cloud
+probe, 2026-09-19). So they are imported here, on the host, before any run, and
+the sandbox shares them (``passthrough_modules``) instead of loading them again
+when it replays this module.
 
 - ``noop``: does nothing. It proves the path the scheduled jobs will take:
   a Vercel Cron request reaches the protected production deployment, starts a
@@ -13,6 +22,8 @@ an ordinary function.
   through the write-once store, reads every copied day back against its
   integrity record, and checks that the store refuses an overwrite. No real
   data, no model request.
+- ``extension_selftest``: one Yahoo chart read and one o200k token count inside
+  a step (offline: the extensions only) - what the day's read and build need.
 - ``shadow_day``: Stage 3 (``surge.shadow.day``). A Phase B day of the PC's
   cohort read, screened and drawn in steps, the requests built by the frozen
   code and none sent; the artifacts go to Blob under ``surge/phase-b-shadow``.
@@ -21,9 +32,13 @@ an ordinary function.
 
 from __future__ import annotations
 
-from vercel.workflow import Workflows, get_step_metadata, sleep
+import curl_cffi.requests  # noqa: F401 - loaded on the host before any run (see above)
+import tiktoken  # noqa: F401 - the same
+from vercel.workflow import Workflows, get_step_metadata, sandbox, sleep
 
-wf = Workflows()
+#: The C-extension packages loaded above, with what they load: shared with the sandbox, never loaded twice.
+HOST_EXTENSIONS = frozenset({"curl_cffi", "cffi", "_cffi_backend", "tiktoken", "tiktoken_ext", "regex"})
+wf = Workflows(sandbox_policy=sandbox.SandboxPolicy(passthrough_modules=HOST_EXTENSIONS))
 
 JSON = "application/json"
 #: surge.shadow.day.CHUNK_SIZE: securities per read step (a workflow body imports nothing of surge).
@@ -53,6 +68,45 @@ async def noop_step(trigger: str, requested_at: str) -> dict:
 @wf.workflow
 async def noop(trigger: str, requested_at: str) -> dict:
     return await noop_step(trigger, requested_at)
+
+
+# ----------------------------------------------------------------- the extensions, inside a step
+
+
+@wf.step(max_retries=0)
+async def extension_step(symbol: str, offline: bool) -> dict:
+    """What a read step and the build do with the C extensions: a Yahoo chart read and an o200k count."""
+
+    import platform
+    from datetime import UTC, date, datetime, timedelta
+    from importlib import metadata
+
+    from shadow_service import use_workers_src
+
+    use_workers_src()
+    from curl_cffi import requests as curl_requests
+
+    versions = {name: metadata.version(name) for name in ("curl_cffi", "tiktoken")}
+    if offline:
+        import tiktoken
+
+        curl_requests.Session(impersonate="chrome").close()
+        return {"ok": True, "offline": True, "python": platform.python_version(), **versions,
+                "encodings": len(tiktoken.list_encoding_names())}
+    from surge.analysis.tokenizer import exact_tokens_or_none
+    from surge.evaluation.prices import fetch_chart
+    from surge.providers.yahoo_finance import YahooSession
+
+    yahoo = YahooSession()
+    result = fetch_chart(symbol, date.today() - timedelta(days=30), session=yahoo, now=datetime.now(UTC))
+    return {"ok": True, "offline": False, "python": platform.python_version(), **versions,
+            "bars": len(result.get("timestamp") or []), "crumb_obtained": bool(yahoo._crumb),
+            "o200k_harmony_tokens": exact_tokens_or_none("SURGE shadow tokenizer probe", encoding="o200k_harmony")}
+
+
+@wf.workflow
+async def extension_selftest(symbol: str, offline: bool) -> dict:
+    return await extension_step(symbol, offline)
 
 
 # ----------------------------------------------------------------- Stage 2 self-test

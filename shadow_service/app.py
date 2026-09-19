@@ -12,6 +12,7 @@ token (Trusted Sources). There is no key in this service and none is read.
     GET  /api/shadow/cron/noop              the no-op workflow (the cron path, D-279)
     POST /api/shadow/selftest/stage2?confirm=stage2-synthetic
                                             Stage 2 in the cloud with synthetic artifacts
+    GET  /api/shadow/selftest/extensions   one Yahoo chart read and one o200k count inside a workflow step
     POST /api/shadow/stage3/probe?s0=YYYY-MM-DD&confirm=stage3-probe
                                             Stage 3: a past business day read and screened; nothing written
     POST /api/shadow/stage3/day?[s0=YYYY-MM-DD&]confirm=stage3-day
@@ -138,6 +139,21 @@ async def selftest_stage2(request: dict) -> tuple[int, bytes]:
     return _json(200, {"keys": len(keys), **result})
 
 
+async def selftest_extensions(_request: dict) -> tuple[int, bytes]:
+    """The C extensions a day needs, used inside a step: one Yahoo chart (7203.T) and one token count."""
+
+    from vercel.workflow import start
+
+    from shadow_service.flows import extension_selftest
+
+    run = await start(extension_selftest, "7203.T", False)
+    result = await _started(run, 90)
+    output = result.get("output") or {}
+    print(f"extension selftest {result['run_id']}: {result['status']} bars={output.get('bars')} "
+          f"crumb={output.get('crumb_obtained')} tokens={output.get('o200k_harmony_tokens')}", flush=True)
+    return _json(200, result)
+
+
 async def stage3_start(request: dict) -> tuple[int, bytes]:
     """Start a Stage 3 run and answer at once: a day takes about half an hour of steps."""
 
@@ -201,6 +217,7 @@ ROUTES = {
     ("GET", "/api/shadow/health"): health,
     ("GET", "/api/shadow/cron/noop"): cron_noop,
     ("POST", "/api/shadow/selftest/stage2"): selftest_stage2,
+    ("GET", "/api/shadow/selftest/extensions"): selftest_extensions,
     ("POST", "/api/shadow/stage3/probe"): stage3_start,
     ("POST", "/api/shadow/stage3/day"): stage3_start,
 }
