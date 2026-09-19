@@ -573,7 +573,7 @@ def test_the_plan_must_fit_the_budget_and_the_credit_balance():
     assert plan_problems(budget, estimates * 2, ok) == ["6 requests planned, the budget allows 3"]
     assert "above the budget" in plan_problems(Budget(Decimal("0.002"), 3), estimates, ok)[0]
     assert "not been read" in plan_problems(budget, estimates, None)[0]
-    assert "could not be read" in plan_problems(budget, estimates, {"error": "401"})[0]
+    assert "could not be used" in plan_problems(budget, estimates, {"error": "401"})[0]
     assert "above the credit balance" in plan_problems(budget, estimates, {"balance": "0.10", "total_used": "4.9"})[0]
 
 
@@ -845,7 +845,7 @@ def test_plan_build_freeze_and_preflight_offline(planned_run):
     checked = jev_eval.preflight(store, budget=Budget(Decimal("0.05"), 10), runner=None)
     assert checked["leakage_and_integrity"]["violations"] == {}
     assert checked["requests_total"] == 6
-    assert checked["budget_problems"] == ["the Gateway credit balance has not been read"]
+    assert checked["budget_problems"] == ["the credit balance has not been read"]
     assert checked["ready_to_send"] is False
     with pytest.raises(jev_eval.EvaluationError, match="not ready"):
         jev_eval.run(store, budget=Budget(Decimal("0.05"), 10), runner=Path("runner.mjs"))
@@ -1105,13 +1105,6 @@ def _direct_pacer():
     return _pacer(min_interval=5.0, window=60.0, max_in_window=12)
 
 
-DIRECT_CREDIT = {"credit_balance": Decimal("5.00")}
-
-
-def _read_an_hour_ago():
-    return datetime.now(UTC) - timedelta(hours=1)
-
-
 def test_the_direct_wire_body_is_the_same_request_in_typesafe_form():
     from surge.analysis.jev_questions import questions, to_gateway
     from surge.evaluation.providers import ProviderError, direct_wire_body
@@ -1162,23 +1155,50 @@ def test_a_direct_answer_is_kept_raw_and_recorded_without_key_or_request(tmp_pat
     assert FAKE_KEY not in written and "CANONICAL-TEXT-MUST-NOT-LEAK" not in written
 
 
-def test_the_direct_credit_is_the_operators_reading_less_recorded_spend(tmp_path):
+def _snapshot(root, *, balance="5.00", confirmed_at=None, expires_on=date(2026, 10, 19)):
+    return jev_eval.record_credit(root, balance_usd=Decimal(balance),
+                                  confirmed_at=confirmed_at or datetime.now(UTC) - timedelta(hours=1),
+                                  expires_on=expires_on, displayed_expiry="Oct 19, 2026")
+
+
+def test_the_direct_credit_is_the_console_snapshot_less_recorded_spend_until_it_expires(tmp_path):
     from surge.evaluation.cost import direct_credit_state, local_direct_spend
 
     responses = tmp_path / "evaluation" / "jev" / "r1" / "responses"
+    nested = tmp_path / "evaluation" / "jev" / "cohort-x" / "days" / "2026-09-24" / "responses"
     responses.mkdir(parents=True)
-    read_at = datetime(2026, 9, 19, 9, 0, tzinfo=UTC)
-    for name, sent, cost_usd, via in (("a.main.json", read_at + timedelta(hours=1), "0.001", "typesafe-direct"),
-                                      ("b.main.json", read_at - timedelta(hours=1), "0.002", "typesafe-direct"),
-                                      ("c.main.json", read_at + timedelta(hours=2), "0.004", "vercel-ai-gateway")):
-        (responses / name).write_text(json.dumps({"via": via, "sent_at": sent.isoformat(), "cost_usd": cost_usd}),
-                                      encoding="utf-8")
-    assert local_direct_spend(tmp_path, read_at) == Decimal("0.001")  # only direct, only after the reading
-    state = direct_credit_state(Decimal("5.00"), read_at, root=tmp_path, now=read_at + timedelta(days=1))
-    assert state["balance"] == "4.999" and state["spent_since_check"] == "0.001"
-    assert "no balance API" in direct_credit_state(None, None, root=tmp_path)["error"]
-    assert "last 7 days" in direct_credit_state(Decimal("5"), read_at, root=tmp_path,
-                                                now=read_at + timedelta(days=8))["error"]
+    nested.mkdir(parents=True)
+    read_at = datetime(2026, 9, 19, 8, 43, 13, tzinfo=UTC)
+    for folder, name, sent, charged, via in (
+            (responses, "a.main.json", read_at + timedelta(hours=1), {"cost_usd": "0.001"}, "typesafe-direct"),
+            (responses, "b.main.json", read_at - timedelta(hours=1), {"cost_usd": "0.002"}, "typesafe-direct"),
+            (responses, "c.main.json", read_at + timedelta(hours=2), {"cost_usd": "0.004"}, "vercel-ai-gateway"),
+            # An error without a cost counts at its estimate (ledger_usd), and Phase B days are found too.
+            (nested, "d.main.json", read_at + timedelta(days=5), {"cost_usd": None, "ledger_usd": "0.0011"},
+             "typesafe-direct")):
+        (folder / name).write_text(json.dumps({"via": via, "sent_at": sent.isoformat(), **charged}), encoding="utf-8")
+    (responses / "a.main.raw.json").write_text(json.dumps({"usage": {}}), encoding="utf-8")
+    assert local_direct_spend(tmp_path, read_at) == Decimal("0.0021")  # direct only, after the reading
+    assert "no TypeSafe credit snapshot" in direct_credit_state(tmp_path)["error"]
+
+    jev_eval.record_credit(tmp_path, balance_usd=Decimal("5.00"), confirmed_at=read_at,
+                           expires_on=date(2026, 10, 19), displayed_expiry="Oct 19, 2026",
+                           clock=lambda: read_at + timedelta(minutes=5))
+    # No age limit: 29 days later the snapshot still holds, less what was spent since.
+    later = direct_credit_state(tmp_path, now=datetime(2026, 10, 18, 23, 59, tzinfo=UTC))
+    assert later["balance"] == "4.9979" and later["spent_since_confirmation"] == "0.0021"
+    assert later["expires_at"] == "2026-10-19T00:00:00+00:00" and later["displayed_expiry"] == "Oct 19, 2026"
+    expired = direct_credit_state(tmp_path, now=datetime(2026, 10, 19, 0, 0, tzinfo=UTC))
+    assert expired["expired"] and "confirm the new console balance once" in expired["error"]
+    # The new balance, confirmed once, is a new snapshot; the old one is kept.
+    jev_eval.record_credit(tmp_path, balance_usd=Decimal("5.00"), confirmed_at=datetime(2026, 10, 19, 1, 0, tzinfo=UTC),
+                           expires_on=date(2026, 11, 19), clock=lambda: datetime(2026, 10, 19, 1, 5, tzinfo=UTC))
+    renewed = direct_credit_state(tmp_path, now=datetime(2026, 10, 20, tzinfo=UTC))
+    assert renewed["balance"] == "5.00" and renewed["snapshot"] == "typesafe-2.json"
+    assert (tmp_path / "evaluation" / "jev" / "credit" / "typesafe-1.json").exists()
+    with pytest.raises(ValueError, match="future"):
+        jev_eval.record_credit(tmp_path, balance_usd=Decimal("5"), confirmed_at=datetime(2030, 1, 1, tzinfo=UTC),
+                               expires_on=date(2030, 2, 1))
 
 
 @pytest.fixture()
@@ -1191,9 +1211,9 @@ def direct_ready_run(tmp_path, monkeypatch):
     jev_eval.freeze_outcomes(store)
     monkeypatch.setenv("TYPESAFE_API_KEY", FAKE_KEY)
     unread = jev_eval.preflight(store, budget=BUDGET)
-    assert not unread["ready_to_send"] and "no balance API" in unread["budget_problems"][0]
-    checked = jev_eval.preflight(store, budget=BUDGET, credit_balance=Decimal("5.00"),
-                                 credit_checked_at=_read_an_hour_ago())
+    assert not unread["ready_to_send"] and "no TypeSafe credit snapshot" in unread["budget_problems"][0]
+    _snapshot(store.root)
+    checked = jev_eval.preflight(store, budget=BUDGET)
     assert checked["ready_to_send"] and checked["provider"] == "typesafe-direct"
     return store
 
@@ -1201,8 +1221,7 @@ def direct_ready_run(tmp_path, monkeypatch):
 def test_a_direct_run_is_paced_every_5_seconds_and_reported(direct_ready_run):
     store = direct_ready_run
     transport = _FakeTransport(tokens_for=_tokens_within_estimate)
-    summary = jev_eval.run(store, budget=BUDGET, pacer=_direct_pacer(), transport=transport,
-                           credit_checked_at=_read_an_hour_ago(), **DIRECT_CREDIT)
+    summary = jev_eval.run(store, budget=BUDGET, pacer=_direct_pacer(), transport=transport)
     assert summary["stopped"] is None and summary["requests_answered"] == 6 and len(transport.calls) == 6
     assert summary["provider"] == "typesafe-direct" and summary["served_model"] == "jev-1.13.0"
     assert all(json.loads(c["data"])["model"] == "jev-latest" for c in transport.calls)
@@ -1237,8 +1256,7 @@ def test_a_direct_429_waits_what_the_server_asks_and_tries_again(direct_ready_ru
         status, response_headers, body = step
         return status, response_headers, json.dumps(body).encode("utf-8")
 
-    summary = jev_eval.run(store, budget=BUDGET, pacer=pacer, transport=scripted,
-                           credit_checked_at=_read_an_hour_ago(), **DIRECT_CREDIT)
+    summary = jev_eval.run(store, budget=BUDGET, pacer=pacer, transport=scripted)
     assert summary["stopped"] is None and summary["requests_answered"] == 6
     records = [store.read_json(f"responses/{p.name}") for p in (store.path / "responses").glob("*.json")
                if ".raw" not in p.name]
@@ -1258,8 +1276,7 @@ def test_a_direct_429_without_a_stated_wait_backs_off_then_stops(direct_ready_ru
     def always_limited(url, data, headers, timeout):
         return 429, {}, json.dumps({"error": {"type": "rate_limit_exceeded", "message": "slow down"}}).encode()
 
-    summary = jev_eval.run(store, budget=BUDGET, pacer=pacer, transport=always_limited,
-                           credit_checked_at=_read_an_hour_ago(), **DIRECT_CREDIT)
+    summary = jev_eval.run(store, budget=BUDGET, pacer=pacer, transport=always_limited)
     assert "typesafe-direct error" in summary["stopped"]
     stop = store.read_json("run-stopped-1.json")
     waits = [a["wait_seconds"] for a in stop["last_request"]["rate_limited_attempts"]]
@@ -1275,8 +1292,7 @@ def test_a_change_of_served_version_stops_a_direct_run(direct_ready_run):
         body = _direct_answer_body(model=next(versions, "jev-1.14.0"), tokens=_tokens_within_estimate(data))
         return 200, {}, json.dumps(body).encode()
 
-    summary = jev_eval.run(store, budget=BUDGET, pacer=_direct_pacer(), transport=upgraded,
-                           credit_checked_at=_read_an_hour_ago(), **DIRECT_CREDIT)
+    summary = jev_eval.run(store, budget=BUDGET, pacer=_direct_pacer(), transport=upgraded)
     assert "changed from jev-1.13.0 to jev-1.14.0" in summary["stopped"]
 
 

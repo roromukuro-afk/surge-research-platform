@@ -144,9 +144,15 @@ def trading_sessions(histories: list[History], *, min_share: float = 0.3) -> lis
     for history in histories:
         for bar in history.bars:
             counts[bar.trade_date] = counts.get(bar.trade_date, 0) + 1
-    threshold = max(1, int(len(histories) * min_share))
+    return sessions_from_counts(counts, len(histories), min_share=min_share)
+
+
+def sessions_from_counts(counts: dict[date, int], securities: int, *, min_share: float = 0.3) -> list[date]:
+    """``trading_sessions`` from bar counts per date gathered as histories were read (none kept in memory)."""
+
+    threshold = max(1, int(securities * min_share))
     return sorted(day for day, n in counts.items() if n >= threshold)
 
 
 __all__ = ["DATASET_KEY", "PROVIDER_ID", "TURNOVER_BASIS", "History", "PriceHistoryError", "fetch_chart",
-           "fetch_history", "history_from_chart", "trading_sessions"]
+           "fetch_history", "history_from_chart", "sessions_from_counts", "trading_sessions"]

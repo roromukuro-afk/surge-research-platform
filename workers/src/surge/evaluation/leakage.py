@@ -140,6 +140,39 @@ def check_sample(sample: Sample, screened: Screen, state: dict, outcome: Outcome
     return problems
 
 
-__all__ = ["anonymized_has_no_identity", "bars_not_after_s0", "base_matches", "check_sample",
-           "disclosures_before_cutoff", "eligible_and_not_teacher_data", "method_matches_manifest",
-           "no_date_after_cutoff", "outcome_window_outside_state", "screened_as_of_s0"]
+def base_is_the_sample_close(state: dict, sample: Sample) -> list[str]:
+    from decimal import Decimal
+
+    if Decimal(state["s0"]["confirmed_close_jpy"]) != sample.s0_close_as_traded:
+        return [f"the state's S0 close {state['s0']['confirmed_close_jpy']} is not the sample's "
+                f"{sample.s0_close_as_traded}"]
+    return []
+
+
+def check_prospective_sample(sample: Sample, screened: Screen, state: dict, *, canonical_sha256: str,
+                             addenda_sha256: list[str], anonymized_state: dict | None = None) -> list[str]:
+    """Every check of ``check_sample`` that needs no outcome: Phase B asks before its outcome exists.
+
+    The outcome's own checks (its window after S0 and outside the state, its
+    base the state's close) run when it is frozen, after T+20.
+    """
+
+    s0 = sample.s0
+    problems = [
+        *bars_not_after_s0(state, s0),
+        *disclosures_before_cutoff(state, s0),
+        *no_date_after_cutoff(state, s0),
+        *base_is_the_sample_close(state, sample),
+        *screened_as_of_s0(screened, s0),
+        *method_matches_manifest(state, canonical_sha256, addenda_sha256),
+        *eligible_and_not_teacher_data(sample),
+    ]
+    if anonymized_state is not None:
+        problems += anonymized_has_no_identity(anonymized_state, sample)
+        problems += method_matches_manifest(anonymized_state, canonical_sha256, addenda_sha256)
+    return problems
+
+
+__all__ = ["anonymized_has_no_identity", "bars_not_after_s0", "base_is_the_sample_close", "base_matches",
+           "check_prospective_sample", "check_sample", "disclosures_before_cutoff", "eligible_and_not_teacher_data",
+           "method_matches_manifest", "no_date_after_cutoff", "outcome_window_outside_state", "screened_as_of_s0"]

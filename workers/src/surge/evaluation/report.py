@@ -11,7 +11,15 @@ calibration is computed for it.
 The anonymized and repeated requests are compared pairwise with their main
 request and kept out of every number above.
 
+Phase B (D-272) also reports Primary's three pre-registered Route D subgroups
+apart - D only, D and another route, no D - each with its own calibration,
+hit rates, decisions, scores, maximum upside and maximum drawdown.
+
 A Phase A report says first that its numbers are not for adoption.
+
+Jev's answers are read as they came (``DECISION_INTERPRETATION``): no
+threshold, no averaging, no override. A Phase B cohort freezes this reading
+together with ``prediction_row``'s source.
 """
 
 from __future__ import annotations
@@ -22,6 +30,7 @@ import statistics
 from collections.abc import Iterable
 
 from surge.analysis.jev_questions import BASIS, DECISIONS
+from surge.evaluation.selection import SUBGROUP_DEFINITION, SUBGROUPS
 
 REPORT_VERSION = "eval-report-1.0.0"
 HIT_DEFINITIONS = ("hit_20_high", "hit_20_close")
@@ -30,7 +39,23 @@ PHASE_A_BANNER = (
     "Phase A retrospective pilot: pipeline verification only. Jev may have seen these outcomes in training; "
     "nothing in this report is used to adopt or reject it (D-270)."
 )
+PHASE_B_BANNER = (
+    "Phase B prospective shadow evaluation: Jev's raw answers, read as they came, against outcomes computed after "
+    "T+20. Jev is not connected to production predictions; nothing here is teacher data (D-270, D-272)."
+)
 VARIANTS = ("main", "anonymized", "drift")
+#: How an answer becomes the numbers evaluated (frozen by a Phase B cohort).
+DECISION_INTERPRETATION = {
+    "version": "jev-answer-reading-1.0.0",
+    "decision": "answers.decision.choice as returned (ENTRY / WATCH_BREAKOUT / WATCH_PULLBACK / WATCH_OTHER / "
+                "REJECT); no code-side override",
+    "reaches_target": "answers.reaches_target.noul as returned, the probability of yes; no probability threshold",
+    "upside": "answers.upside_band.score and its probabilities as returned",
+    "basis": "answers.basis_*.noul as returned",
+    "confidence": "recorded as returned; no confidence threshold, never used to filter or re-weight",
+    "repeats": "one answer per sample; drift repeats are measured apart and never averaged into it",
+    "raw_output": "kept as it came beside each record",
+}
 
 
 # ----------------------------------------------------------------- the rows
@@ -81,6 +106,9 @@ def prediction_row(record: dict, sample: dict, *, variant: str, request: dict, e
         # Every answer as recorded (for TypeSafe direct, exactly as the API returned it).
         "answers_as_recorded": answers,
         "rate_limited_attempts": len(record.get("rate_limited_attempts") or []),
+        "route_d_subgroup": sample.get("route_d_subgroup"),
+        "selection_probability": sample.get("selection_probability"),
+        "match_tier": sample.get("match_tier"),
         "decision": decision.get("choice"),
         "decision_probabilities": decision.get("probabilities"),
         "decision_confidence": decision.get("confidence"),
@@ -222,6 +250,43 @@ def primary_metrics(rows: list[dict]) -> dict:
         "reaches_target_vs_max_upside_high": spearman(probabilities, [r["max_upside_high"] for r in rows]),
     }
     return result
+
+
+def subgroup_metrics(rows: list[dict]) -> dict:
+    """One pre-registered Route D subgroup of Primary: the same reading, never pooled with the others."""
+
+    result: dict = {"n": len(rows)}
+    if not rows:
+        return result
+    probabilities = [float(r["reaches_target"]) for r in rows]
+    for definition in HIT_DEFINITIONS:
+        hits = [bool(r[definition]) for r in rows]
+        result[definition] = {
+            "positives": sum(hits),
+            "hit_rate": sum(hits) / len(hits),
+            "brier": brier(probabilities, hits),
+            "reaches_target_calibration": calibration(probabilities, hits),
+        }
+    result["mean_reaches_target"] = _mean(probabilities)
+    result["decision_counts"] = {choice: sum(r["decision"] == choice for r in rows) for choice in DECISIONS}
+    result["upside_score"] = {"mean": _mean(r["upside_score"] for r in rows),
+                              "median": _median(r["upside_score"] for r in rows)}
+    for key, kinds in (("max_upside", ("high", "close")), ("max_drawdown", ("low", "close"))):
+        result[key] = {}
+        for kind in kinds:
+            values = [r[f"{key}_{kind}"] for r in rows]
+            result[key][f"{kind}_mean"] = _mean(values)
+            result[key][f"{kind}_median"] = _median(values)
+    return result
+
+
+def route_d_subgroups(primary: list[dict]) -> dict:
+    """Primary's pre-registered Route D subgroups (D-272), each apart."""
+
+    return {"definition": SUBGROUP_DEFINITION,
+            **{group: subgroup_metrics([r for r in primary if r.get("route_d_subgroup") == group])
+               for group in SUBGROUPS},
+            "without_subgroup": sum(r.get("route_d_subgroup") not in SUBGROUPS for r in primary)}
 
 
 def control_benchmark(control: list[dict], primary: list[dict]) -> dict:
@@ -402,13 +467,14 @@ def build_report(manifest: dict, predictions: list[dict], outcomes: list[dict], 
         "report_version": REPORT_VERSION,
         "run_id": manifest["run_id"],
         "phase": manifest["phase"],
-        "banner": PHASE_A_BANNER if manifest["phase"] == "A" else None,
+        "banner": {"A": PHASE_A_BANNER, "B": PHASE_B_BANNER}.get(manifest["phase"]),
         "model": manifest["model"],
         "outcome_label_status": "neither +20% definition is the label (D-268); not merged with success_label",
         "undefined_values": "null (in markdown '-') where a statistic is undefined for these samples",
         "pipeline": pipeline,
         "answers": {"PRIMARY": answers_summary(primary), "CONTROL": answers_summary(control)},
         "primary": primary_metrics(primary),
+        "route_d_subgroups": route_d_subgroups(primary),
         "control_benchmark": control_benchmark(control, primary),
         "anonymized_sensitivity": paired_summary(anonymized),
         "drift": paired_summary(drift),
@@ -480,6 +546,26 @@ def render_markdown(report: dict) -> str:
                          f"{_fmt(m['mean_ret_t20'])} | {_fmt(m['median_max_upside_high'])} |")
         lines += ["", "Spearman: " + ", ".join(
             f"{k} {_fmt(v)}" for k, v in primary["score_vs_future_return_spearman"].items()), ""]
+    groups = report.get("route_d_subgroups") or {}
+    if any(groups.get(g, {}).get("n") for g in SUBGROUPS):
+        lines += ["## Primary by Route D subgroup (pre-registered, not pooled)", "",
+                  "| subgroup | n | hit high | hit close | mean reaches_target | ECE high | ECE close | "
+                  "median upside score | median max upside high | median max drawdown low | decisions |",
+                  "|---|---|---|---|---|---|---|---|---|---|---|"]
+        for group in SUBGROUPS:
+            m = groups[group]
+            if not m["n"]:
+                lines.append(f"| {group} | 0 | - | - | - | - | - | - | - | - | - |")
+                continue
+            decisions = ", ".join(f"{k} {v}" for k, v in m["decision_counts"].items() if v)
+            lines.append(
+                f"| {group} | {m['n']} | {_fmt(m['hit_20_high']['hit_rate'])} | {_fmt(m['hit_20_close']['hit_rate'])} | "
+                f"{_fmt(m['mean_reaches_target'])} | "
+                f"{_fmt(m['hit_20_high']['reaches_target_calibration']['expected_calibration_error'])} | "
+                f"{_fmt(m['hit_20_close']['reaches_target_calibration']['expected_calibration_error'])} | "
+                f"{_fmt(m['upside_score']['median'])} | {_fmt(m['max_upside']['high_median'])} | "
+                f"{_fmt(m['max_drawdown']['low_median'])} | {decisions or '-'} |")
+        lines.append("")
     control = report["control_benchmark"]
     lines += ["## Control (benchmark only)", "", f"n = {control['n']}; decisions {json.dumps(control['decision_counts'])}",
               ""]
@@ -500,7 +586,7 @@ def render_markdown(report: dict) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["BASIS_KEYS", "HIT_DEFINITIONS", "PHASE_A_BANNER", "REPORT_VERSION", "answers_summary",
-           "average_precision", "brier", "build_report", "by_decision", "calibration", "control_benchmark",
-           "paired_rows", "paired_summary", "pipeline_summary", "prediction_row", "primary_metrics", "render_markdown",
-           "spearman"]
+__all__ = ["BASIS_KEYS", "DECISION_INTERPRETATION", "HIT_DEFINITIONS", "PHASE_A_BANNER", "PHASE_B_BANNER",
+           "REPORT_VERSION", "answers_summary", "average_precision", "brier", "build_report", "by_decision",
+           "calibration", "control_benchmark", "paired_rows", "paired_summary", "pipeline_summary", "prediction_row",
+           "primary_metrics", "render_markdown", "route_d_subgroups", "spearman", "subgroup_metrics"]

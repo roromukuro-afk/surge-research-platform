@@ -114,6 +114,11 @@ class Sample:
     matched_to: str | None = None
     anonymized_pair: bool = False
     drift_repeat: bool = False
+    #: Phase B (surge.evaluation.selection): the pre-registered Route D subgroup of a
+    #: Primary sample, the probability it was drawn with, and how a Control was matched.
+    route_d_subgroup: str | None = None
+    selection_probability: float | None = None
+    match_tier: str | None = None
     teacher_admissible: bool = False
 
     def row(self) -> dict:
