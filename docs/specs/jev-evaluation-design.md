@@ -311,6 +311,8 @@ plan-day と同じ読み込み・screening・抽出を、直近の session **S0 
 | 遅れた起動 | `StartWhenAvailable`。スリープ・再起動の後でも、その日の送信窓（16:10 JST〜翌平日 09:00 JST）の中なら実行、外なら送らずに exit 0。15 分以内の早い起動は窓が開くまで待つ |
 | exit code | 0 = 何もすることが無い・送信完了、2 = guard が止めた、1 = 想定外のエラー、3 = wrapper が job を起動できない |
 
+**状態（2026-09-19 20:30 JST）**: cohort 作成済み（frozen fingerprint `73cceb0d…`。Canonical・addenda 5 本・question schema の hash が MANIFEST とコードに一致し、`jev-1.13.0`・2026-09-24・25 営業日・$2.50 で固定されていることを確認）。task `surge-jev-phase-b-jev-phase-b-jp-20260924-v1`（Task Scheduler の `Surge` フォルダ）を登録済みで、repository の外に置いた専用の frozen worktree `surge-phase-b-jp-20260924-v1` を commit `e4b1bb3` に固定して動かす。次回の起動は 2026-09-21（月）16:10 で、JPX の休業日なので送信せず終了する。**最初に送信し得るのは 2026-09-24（木）16:10 JST**。登録した task を手動で 2 回起動し、土曜は `closed_day`（exit 0、何も取得・送信しない）、別の process が lock を持つ間は `locked`（exit 0）になることを確かめた。
+
 ### 11-8. まだしていないこと
 
 - T+20 後の `freeze-outcomes` と `phase-b-report` は自動 job に入れていない（最初の日 9/24 の T+20 は 10/23）。
