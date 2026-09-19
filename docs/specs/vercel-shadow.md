@@ -173,6 +173,8 @@
 | Cron → Workflow | `/api/shadow/cron/noop`（`0 14 * * *`）を `vercel crons run` で起動: Cron の要求（`x-vercel-cron-schedule` 付き）は**シークレットなしで保護を通過**し、Workflow run が起動して `completed`（preview での手動起動も 4.4 秒で完了） |
 | Stage 2（クラウド） | 自己検証 workflow が合成 fixture の 28 object を private Blob に write-once で書き込み、全日を integrity 記録と照合して読み戻し、同じ内容の再書き込みは再実行扱い・別内容は拒否・元の内容は不変を確認。Blob 操作は advanced 31・simple 26 |
 | Web 画面の Blob 読み出し | production を `SURGE_SHADOW_SOURCE=blob`・`SURGE_SHADOW_COHORT=synthetic-phase-b-fixture` にして再デプロイ（CLI から、push 済みの commit と同じ tree。project は Git 未連携）。開発用 OIDC で 7 画面（6 画面と停止日の predictions）すべて 200、integrity 照合を通って描画。直前の fixture 版と本文を比べ、違いは Blob にコピーした範囲（9/24 全体・9/28 の停止日・report-1・typesafe-1）と出典の表示だけ |
+| 入力構築コードの同一性 | `/api/shadow/health` の `input_building_code_sha256` は当初 `18a8d21b…` で、PC の凍結 worktree の `8158344c…`（9/24 の PC の manifest に入る値）と違った。ファイル別に比べると（`?files=1`）30 本中 `ops/jev-gateway-runner/package-lock.json` だけが Python の関数バンドルに入っていなかった（アップロードはされていた）。`vercel.json` の shadow service に `includeFiles: ops/jev-gateway-runner/**` を足して、30 本すべて一致（`8158344c…`）。Workflow の step 側（別バンドル）は no-op step の出力で確認する |
+| アップロードの範囲 | deployment のソース一覧に `bw.html`・CLAUDE.md・README.md と、作業ツリーの未追跡ファイル（`apps/web/.impeccable` など）が入っていた（どのサービスも使っていない）。`.vercelignore` を許可リスト（vercel.json・pyproject.toml・shadow_service・workers/src・docs/prompts・ops/jev-gateway-runner・apps/web）にし、deploy は push 済み commit の `git archive` から行う |
 
 - Blob の操作数（SURGE 分）は上の通り。チーム全体の月間使用量はダッシュボードでしか見えない（Stage 3 の前に確認する）。
 - 検証用の no-op cron は毎日 1 回（14:00–14:59 UTC）残している: Stage 3 の cron を入れるときに置き換える。

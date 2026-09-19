@@ -38,10 +38,16 @@ async def noop_step(trigger: str, requested_at: str) -> dict:
     import platform
     from datetime import UTC, datetime
 
+    from shadow_service import use_workers_src
+
+    use_workers_src()
+    from surge.jobs.jev_eval import code_version
+
     info = get_step_metadata()
+    # The steps run from their own bundle: this is the input-building code a day's manifest would name.
     return {"did": "nothing", "trigger": trigger, "requested_at": requested_at, "run_id": info.run_id,
             "step_ran_at": datetime.now(UTC).isoformat(), "attempt": info.attempt,
-            "python": platform.python_version()}
+            "python": platform.python_version(), "input_building_code_sha256": code_version()["code_sha256"]}
 
 
 @wf.workflow

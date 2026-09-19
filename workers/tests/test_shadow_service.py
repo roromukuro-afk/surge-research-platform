@@ -113,6 +113,9 @@ def test_the_noop_workflow_runs_to_completion_and_does_nothing(local_world):
 
     output = _run(noop, "test", "2026-09-19T00:00:00+00:00")
     assert output["did"] == "nothing" and output["trigger"] == "test" and output["attempt"] == 1
+    from surge.jobs.jev_eval import code_version
+
+    assert output["input_building_code_sha256"] == code_version()["code_sha256"]
 
 
 def test_the_stage2_selftest_copies_verifies_and_is_refused_an_overwrite(local_world, monkeypatch):
