@@ -31,6 +31,10 @@ Phase B, the prospective shadow cohort (``surge.evaluation.phase_b``, D-272):
                                                              what Task Scheduler runs each weekday at
                                                              16:10 JST (D-277): exit 0 = nothing to do
                                                              or sent, 2 = stopped by a guard, 1 = error
+    phase-b-outcome-scheduled --cohort-id C --expect-repo P --expect-commit SHA
+                                                             each weekday at 18:00 JST (D-278): outcomes
+                                                             whose T+20 has closed, then the rolling or
+                                                             final report; never calls Jev
     check-calendar                                           JPX's published closed days against ours
 
 Only ``run`` (and ``phase-b-day --send``) sends model requests. ``preflight``
@@ -234,7 +238,10 @@ CODE_FILES = [
 ]
 YAHOO_PAUSE_SECONDS = 0.3
 PRICE_ARCHIVE = "inputs/prices.jsonl.gz"
-OUTCOME_PRICE_ARCHIVE = "outcome-inputs/prices.jsonl.gz"
+#: Each freeze of a Phase B day's outcomes writes into a fresh numbered folder;
+#: stage-outcomes.json, written last, is what makes one of them the outcome.
+OUTCOME_ATTEMPTS = "outcome-attempts"
+FINAL_REPORT = "report-final.json"
 #: How far before S0 the outcome's price history is read again after T+20.
 OUTCOME_LOOKBACK_DAYS = 30
 
@@ -251,6 +258,18 @@ class SendWindowClosed(EvaluationError):
 
 class ClosedDay(EvaluationError):
     """Not a TSE business day by JPX's published calendar: nothing is planned or sent."""
+
+
+class OutcomeNotDue(EvaluationError):
+    """T+20 has not closed yet (by the calendar, or in the prices read): nothing is frozen, nothing is wrong."""
+
+
+class OutcomeStopped(EvaluationError):
+    """An outcome that must not be frozen now: prices missing (coverage) or artifacts that do not verify (integrity)."""
+
+    def __init__(self, kind: str, message: str):
+        super().__init__(f"{kind}: {message}")
+        self.kind = kind
 
 
 # ----------------------------------------------------------------- helpers
@@ -956,12 +975,14 @@ def build(store: RunStore, *, yanoshin=None) -> dict:
 # ----------------------------------------------------------------- outcomes
 
 
-def freeze_outcomes(store: RunStore, *, clock: Clock | None = None, yahoo=None, sleep=time.sleep) -> dict:
+def freeze_outcomes(store: RunStore, *, clock: Clock | None = None, yahoo=None, sleep=time.sleep,
+                    lock_held: bool = False) -> dict:
     """Phase A: every outcome fixed from prices before a single answer exists.
 
     Phase B: after T+20 - the answers were given before S1 could open - from
     prices read again then, by the cohort's frozen outcome code; the answers
-    are not read.
+    are not read. Written once, under the cohort's lock; a frozen outcome is
+    never frozen again.
     """
 
     _verify_stage(store, "plan")
@@ -969,6 +990,12 @@ def freeze_outcomes(store: RunStore, *, clock: Clock | None = None, yahoo=None, 
         raise StoreError(f"outcomes for {store.run_id} are already frozen")
     manifest = store.read_json("manifest.json")
     if manifest["phase"] == "B":
+        if not lock_held:
+            try:
+                with JobLock(phase_b.job_lock_path(store.root, manifest["cohort_id"])):
+                    return freeze_outcomes(store, clock=clock, yahoo=yahoo, sleep=sleep, lock_held=True)
+            except JobLockHeld as exc:
+                raise EvaluationError(f"not freezing: {exc}") from exc
         return _freeze_outcomes_b(store, manifest, clock=clock, yahoo=yahoo, sleep=sleep)
     _code_matches(manifest)
     if (store.path / "responses").exists() and any((store.path / "responses").iterdir()):
@@ -986,14 +1013,39 @@ def freeze_outcomes(store: RunStore, *, clock: Clock | None = None, yahoo=None, 
     return summary
 
 
+def _next_attempt(store: RunStore) -> int:
+    n = 1
+    while (store.path / OUTCOME_ATTEMPTS / str(n)).exists():
+        n += 1
+    return n
+
+
 def _freeze_outcomes_b(store: RunStore, manifest: dict, *, clock: Clock | None, yahoo, sleep) -> dict:
+    """One Phase B day's outcomes, by the frozen ``compute_outcome``, from prices read after T+20 closed.
+
+    ``OutcomeNotDue`` when T+20 has not closed - by JPX's calendar before
+    anything is read, or in the prices read (an unscheduled closure);
+    ``OutcomeStopped`` when a price history cannot be read (coverage) or an
+    artifact does not verify (integrity). Nothing is written in either case.
+    Everything is computed before anything is written, into a fresh
+    ``outcome-attempts/<n>/``; ``stage-outcomes.json``, written last and once,
+    names the attempt that is the outcome - so a freeze interrupted halfway
+    leaves an attempt nothing refers to, never a half-written outcome.
+    """
+
     from surge.providers.yahoo_finance import YahooSession
 
-    _verify_stage(store, "run")
+    try:
+        _verify_stage(store, "run")
+    except (StoreError, EvaluationError) as exc:
+        raise OutcomeStopped("integrity", str(exc)) from exc
     # A cohort stopped later (a version change) leaves the days answered before it valid.
     _day_cohort(store, manifest, allow_stopped=True)
     now = _now(clock)
     s0 = date.fromisoformat(manifest["s0"])
+    due = phase_b.close_confirmed_at(jpx_calendar.business_day_after(s0, HORIZON))
+    if now < due:
+        raise OutcomeNotDue(f"S0 {s0}: T+{HORIZON} by JPX's calendar is final from {due.isoformat()}")
     samples = _load_samples(store)
     codes = sorted({s.code for s in samples})
     yahoo = yahoo or YahooSession()
@@ -1010,15 +1062,18 @@ def _freeze_outcomes_b(store: RunStore, manifest: dict, *, clock: Clock | None, 
         bar_counts.update({bar.trade_date for bar in history.bars})
     archive.close()
     if failures:
-        raise EvaluationError(f"{len(failures)} of {len(codes)} histories could not be read; outcomes are not "
-                              f"frozen: {failures[:3]}")
+        raise OutcomeStopped("coverage", f"{len(failures)} of {len(codes)} histories could not be read: "
+                                         f"{failures[:3]}")
     sessions = sessions_from_counts(bar_counts, len(histories))
+    if s0 not in sessions:
+        raise OutcomeStopped("integrity", f"S0 {s0} is not a session in the prices read now")
     after = [d for d in sessions if d > s0]
-    if s0 not in sessions or len(after) < HORIZON:
-        raise EvaluationError(f"S0 {s0}: {len(after)} sessions after it so far; T+{HORIZON} has not closed")
+    if len(after) < HORIZON:
+        raise OutcomeNotDue(f"S0 {s0}: {len(after)} sessions after it in the prices read; T+{HORIZON} has not "
+                            "closed")
     t_last = after[HORIZON - 1]
     if now < phase_b.close_confirmed_at(t_last):
-        raise EvaluationError(f"T+{HORIZON} ({t_last}) is final from {phase_b.close_confirmed_at(t_last).isoformat()}")
+        raise OutcomeNotDue(f"T+{HORIZON} ({t_last}) is final from {phase_b.close_confirmed_at(t_last).isoformat()}")
     rows, problems = [], {}
     for sample in samples:
         try:
@@ -1026,21 +1081,30 @@ def _freeze_outcomes_b(store: RunStore, manifest: dict, *, clock: Clock | None, 
         except ValueError as exc:
             problems[sample.sample_id] = str(exc)[:200]
     if problems:
-        raise EvaluationError(f"outcomes are not frozen: {problems}")
+        raise OutcomeStopped("integrity", f"the prices read now disagree with the plan: {problems}")
+    attempt = _next_attempt(store)
+    prefix = f"{OUTCOME_ATTEMPTS}/{attempt}/"
     files = {
-        OUTCOME_PRICE_ARCHIVE: store.write_bytes(OUTCOME_PRICE_ARCHIVE, buffer.getvalue()),
-        "outcome-inputs/sessions.json": store.write_json("outcome-inputs/sessions.json", {
+        prefix + "prices.jsonl.gz": store.write_bytes(prefix + "prices.jsonl.gz", buffer.getvalue()),
+        prefix + "sessions.json": store.write_json(prefix + "sessions.json", {
             "rule": "a date on which at least 30% of the day's sample securities have a bar (D-142)",
             "fetched_at": now.isoformat(), "sessions": [d.isoformat() for d in sessions]}),
-        "outcomes.jsonl": store.write_jsonl("outcomes.jsonl", rows),
-        "outcomes.parquet": store.write_parquet("outcomes.parquet", rows),
+        prefix + "outcomes.jsonl": store.write_jsonl(prefix + "outcomes.jsonl", rows),
+        prefix + "outcomes.parquet": store.write_parquet(prefix + "outcomes.parquet", rows),
     }
-    summary = {"frozen_at": now.isoformat(), "t_plus_20": t_last.isoformat(), "answers_read": False,
-               "prices_read_after_t_plus_20": True,
+    summary = {"frozen_at": now.isoformat(), "t_plus_20": t_last.isoformat(), "attempt": attempt,
+               "outcomes_file": prefix + "outcomes.jsonl", "outcome_version": OUTCOME_VERSION,
+               "answers_read": False, "prices_read_after_t_plus_20": True,
                "resolution": {r: sum(o["resolution"] == r for o in rows)
                               for r in ("RESOLVED", "UNRESOLVED_MISSING_DATA", "PENDING")}}
     _stage(store, "outcomes", summary, files)
     return summary
+
+
+def _outcome_rows(store: RunStore) -> list[dict]:
+    """The frozen outcomes: the attempt stage-outcomes.json names (Phase B), or outcomes.jsonl (Phase A)."""
+
+    return store.read_jsonl(store.read_json("stage-outcomes.json").get("outcomes_file") or "outcomes.jsonl")
 
 
 # ----------------------------------------------------------------- preflight
@@ -1558,7 +1622,7 @@ def report(store: RunStore) -> dict:
     stage = _verify_stage(store, "run")
     _verify_stage(store, "outcomes")
     manifest = store.read_json("manifest.json")
-    result = build_report(manifest, _prediction_rows(store), store.read_jsonl("outcomes.jsonl"),
+    result = build_report(manifest, _prediction_rows(store), _outcome_rows(store),
                           planned=len(store.read_jsonl("requests.jsonl")), budget=stage["budget"])
     # The numbers may be computed by later code than the inputs were built by
     # (a report can be recomputed); which code is recorded, not enforced.
@@ -1677,52 +1741,178 @@ def phase_b_status(root: Path, cohort_id: str, *, clock: Clock | None = None) ->
         "remaining_usd": str(cap - spent),
         "credit": direct_credit_state(root, now=_now(clock)),
         "schedule": phase_b.schedule(_now(clock)),
+        "outcomes": _phase_b_progress(root, cohort_id, cohort),
+        "latest_report": _latest_report(store),
         "scheduler_runs": [json.loads(p.read_text(encoding="utf-8"))
                            for p in sorted((store.path / "scheduler" / "runs").glob("*.json"))[-5:]],
     }
 
 
-def phase_b_report(root: Path, cohort_id: str, *, clock: Clock | None = None) -> dict:
-    """The cohort's report so far: every day sent in full, before S1 could open, whose outcomes are frozen."""
+def _counts(counter: Counter) -> dict:
+    return {"PRIMARY": counter["PRIMARY"], "CONTROL": counter["CONTROL"], "total": sum(counter.values())}
 
+
+def _phase_b_progress(root: Path, cohort_id: str, cohort: dict) -> dict:
+    """Where the cohort stands: days sent, outcomes frozen, predictions resolved and unresolved (D-278).
+
+    A prediction is *resolved* when its frozen outcome is RESOLVED; it is
+    *unresolved* while its T+20 has not been frozen, or when its frozen outcome
+    could not be resolved (a session without a bar). Unresolved predictions are
+    not failures and are in no denominator. The cohort is *final* only when all
+    its business days are sent and every one of their outcomes is frozen.
+    """
+
+    target = cohort["target_business_days"]
+    sent, frozen, pending, excluded = [], [], [], []
+    counts = {key: Counter() for key in ("sent", "resolved", "awaiting_t_plus_20", "missing_data")}
+    for day in phase_b.day_dates(root, cohort_id):
+        store = phase_b.day_store(root, cohort_id, day)
+        if not store.exists("stage-run.json"):
+            stop = _latest(store, "run-stopped") or _latest(store, "day-stopped")
+            reason = (stop or {}).get("stopped") or (stop or {}).get("reason") if stop else "not sent"
+            excluded.append({"s0": day.isoformat(), "reason": str(reason)[:300]})
+            continue
+        sent.append(day)
+        cohorts = {r["sample_id"]: r["cohort"] for r in store.read_jsonl("population.jsonl")}
+        main = [r["sample_id"] for r in store.read_jsonl("requests.jsonl") if r["variant"] == "main"]
+        counts["sent"].update(cohorts[i] for i in main)
+        if store.exists("stage-outcomes.json"):
+            frozen.append(day)
+            resolution = {o["sample_id"]: o["resolution"] for o in _outcome_rows(store)}
+            for i in main:
+                counts["resolved" if resolution.get(i) == "RESOLVED" else "missing_data"][cohorts[i]] += 1
+        else:
+            pending.append(day)
+            counts["awaiting_t_plus_20"].update(cohorts[i] for i in main)
+    unresolved = counts["awaiting_t_plus_20"] + counts["missing_data"]
+    return {
+        "status": "final" if len(sent) >= target and not pending else "partial",
+        "target_business_days": target,
+        "days_sent_in_full": len(sent),
+        "days_with_outcomes": len(frozen),
+        "collection_rate": len(sent) / target,
+        "cohort_completion_rate": len(frozen) / target,
+        "predictions": {
+            "sent": _counts(counts["sent"]),
+            "resolved": _counts(counts["resolved"]),
+            "unresolved": {"awaiting_t_plus_20": _counts(counts["awaiting_t_plus_20"]),
+                           "missing_data": _counts(counts["missing_data"]), "total": _counts(unresolved)},
+        },
+        "days": {"with_outcomes": [d.isoformat() for d in frozen],
+                 "awaiting_t_plus_20": [{"s0": d.isoformat(),
+                                         "t_plus_20_by_calendar": jpx_calendar.business_day_after(d, HORIZON)
+                                         .isoformat()} for d in pending],
+                 "excluded": excluded},
+        "rules": {"unresolved": "unresolved predictions are not failures and are in no denominator",
+                  "final": f"final only once all {target} business days are sent and every outcome of them is "
+                           "frozen"},
+    }
+
+
+def _report_digest(root: Path, cohort_id: str, progress: dict) -> str:
+    """What a rolling report is computed from: the days with frozen outcomes and their stage records."""
+
+    items = [(day, hashlib.sha256((phase_b.day_store(root, cohort_id, date.fromisoformat(day)).path /
+                                   "stage-outcomes.json").read_bytes()).hexdigest())
+             for day in progress["days"]["with_outcomes"]]
+    return hashlib.sha256(json.dumps(items).encode("utf-8")).hexdigest()
+
+
+def _latest_report(store: RunStore) -> dict | None:
+    if store.exists(FINAL_REPORT):
+        report_ = store.read_json(FINAL_REPORT)
+    else:
+        report_ = _latest(store, "report")
+    if report_ is None:
+        return None
+    return {"file": report_.get("file"), "status": report_.get("status"),
+            "inputs_digest": report_.get("inputs_digest"), "reported_at": report_.get("cohort", {}).get("reported_at")}
+
+
+def phase_b_report(root: Path, cohort_id: str, *, clock: Clock | None = None, lock_held: bool = False) -> dict:
+    """The cohort's report: ``status = partial`` while anything is outstanding, ``final`` once nothing is (D-278).
+
+    Metrics read only predictions whose outcome is RESOLVED; how many are
+    resolved, how many unresolved (awaiting T+20, or unresolvable) and how
+    complete the cohort is are stated with every report. A partial report is
+    ``report-<n>.json``; the final one is ``report-final.json``, written once.
+    Every artifact read is verified against its stage record first.
+    """
+
+    if not lock_held:
+        try:
+            with JobLock(phase_b.job_lock_path(root, cohort_id)):
+                return phase_b_report(root, cohort_id, clock=clock, lock_held=True)
+        except JobLockHeld as exc:
+            raise EvaluationError(f"not reporting: {exc}") from exc
     cohort = load_cohort(root, cohort_id, allow_stopped=True)
     store = phase_b.cohort_store(root, cohort_id)
+    progress = _phase_b_progress(root, cohort_id, cohort)
+    final = progress["status"] == "final"
+    if final and store.exists(FINAL_REPORT):
+        raise StoreError(f"{cohort_id} has its final report; it is written once")
     predictions, outcomes, planned = [], [], 0
-    included, pending, excluded = [], [], []
-    for day in phase_b.day_dates(root, cohort_id):
-        day_run = phase_b.day_store(root, cohort_id, day)
-        if not day_run.exists("stage-run.json"):
-            excluded.append({"s0": day.isoformat(), "reason": "not sent in full (stopped or not run)"})
-            continue
-        _verify_stage(day_run, "run")
-        if not day_run.exists("stage-outcomes.json"):
-            pending.append(day.isoformat())
-            continue
-        _verify_stage(day_run, "outcomes")
-        rows = _prediction_rows(day_run)
-        deadline = phase_b.send_deadline(day)
-        late = [r for r in rows if r["sent_at"] and datetime.fromisoformat(r["sent_at"]) >= deadline]
-        if late:
-            excluded.append({"s0": day.isoformat(), "reason": f"{len(late)} answers sent after S1 could open"})
-            continue
-        predictions += rows
-        outcomes += day_run.read_jsonl("outcomes.jsonl")
-        planned += len(day_run.read_jsonl("requests.jsonl"))
-        included.append(day.isoformat())
+    try:
+        for day in phase_b.completed_days(root, cohort_id):
+            day_run = phase_b.day_store(root, cohort_id, day)
+            for stage in ("plan", "build", "run"):
+                _verify_stage(day_run, stage)
+            if not day_run.exists("stage-outcomes.json"):
+                continue
+            _verify_stage(day_run, "outcomes")
+            rows = _prediction_rows(day_run)
+            deadline = phase_b.send_deadline(day)
+            late = [r for r in rows if r["sent_at"] and datetime.fromisoformat(r["sent_at"]) >= deadline]
+            if late:
+                raise OutcomeStopped("integrity", f"{day}: {len(late)} answers were sent after S1 could open")
+            predictions += rows
+            outcomes += _outcome_rows(day_run)
+            planned += len(day_run.read_jsonl("requests.jsonl"))
+    except (StoreError, EvaluationError) as exc:
+        if isinstance(exc, OutcomeStopped):
+            raise
+        raise OutcomeStopped("integrity", str(exc)) from exc
     result = build_report({"run_id": cohort_id, "phase": "B", "model": cohort["requested_model"]}, predictions,
                           outcomes, planned=planned, budget=cohort["budget"])
+    name = FINAL_REPORT if final else _next_name(store, "report")
+    result = {"status": progress["status"], "file": name, **result, "progress": progress,
+              "inputs_digest": _report_digest(root, cohort_id, progress)}
     result["cohort"] = {
         "cohort_id": cohort_id, "frozen_fingerprint": cohort["frozen_fingerprint"],
         "experiment_seed": cohort["experiment_seed"], "prospective_start": cohort["prospective_start"],
-        "days_included": included, "days_pending_outcomes": pending, "days_excluded": excluded,
         "stops": phase_b.cohort_stops(root, cohort_id), "spent_usd": str(phase_b.cohort_spend(root, cohort_id)),
         "cap_usd": cohort["budget"]["global_hard_cap_usd"], "reported_at": _now(clock).isoformat(),
     }
     result["report_code"] = code_version()
-    name = _next_name(store, "report")
     store.write_json(name, result)
     store.write_bytes(name.replace(".json", ".md"), render_markdown(result).encode("utf-8"))
     return result
+
+
+def _refresh_report(root: Path, cohort_id: str, cohort: dict, *, clock: Clock | None) -> dict | None:
+    """A new report only when there is something new to report; None otherwise (a no-op, D-278).
+
+    The final report when the cohort is complete and has none yet; else a
+    rolling (partial) report when the frozen outcomes differ from what the
+    latest report was computed from. Before any outcome is frozen there is
+    nothing to report.
+    """
+
+    store = phase_b.cohort_store(root, cohort_id)
+    if store.exists(FINAL_REPORT):
+        return None
+    progress = _phase_b_progress(root, cohort_id, cohort)
+    if progress["status"] != "final":
+        if not progress["days"]["with_outcomes"]:
+            return None
+        latest = _latest(store, "report")
+        if latest is not None and latest.get("inputs_digest") == _report_digest(root, cohort_id, progress):
+            return None
+    written = phase_b_report(root, cohort_id, clock=clock, lock_held=True)
+    return {"file": written["file"], "status": written["status"],
+            "resolved": written["progress"]["predictions"]["resolved"]["total"],
+            "unresolved": written["progress"]["predictions"]["unresolved"]["total"]["total"],
+            "cohort_completion_rate": written["progress"]["cohort_completion_rate"]}
 
 
 # ----------------------------------------------------------------- Phase B: the scheduled job (D-277)
@@ -1840,12 +2030,19 @@ def phase_b_scheduled(root: Path, cohort_id: str, *, expect_repo: Path | None = 
     ``scheduler/runs/``.
     """
 
-    record = {"started_at": _now(clock).isoformat(), "pid": os.getpid(), "cohort_id": cohort_id,
+    return _recorded("prediction", root, cohort_id, expect_commit, clock, lambda: _scheduled(
+        root, cohort_id, expect_repo=expect_repo, expect_commit=expect_commit, clock=clock, sleep=sleep, yahoo=yahoo,
+        fetch_issues=fetch_issues, yanoshin=yanoshin, transport=transport, pacer=pacer,
+        max_wait_seconds=max_wait_seconds))
+
+
+def _recorded(job: str, root: Path, cohort_id: str, expect_commit: str | None, clock: Clock | None, body) -> dict:
+    """Run one scheduled job and leave its record under the cohort's ``scheduler/runs/``, whatever happened."""
+
+    record = {"job": job, "started_at": _now(clock).isoformat(), "pid": os.getpid(), "cohort_id": cohort_id,
               "code": {"repo": str(REPO_ROOT), "head": _git("rev-parse", "HEAD"), "expected_commit": expect_commit}}
     try:
-        record.update(_scheduled(root, cohort_id, expect_repo=expect_repo, expect_commit=expect_commit, clock=clock,
-                                 sleep=sleep, yahoo=yahoo, fetch_issues=fetch_issues, yanoshin=yanoshin,
-                                 transport=transport, pacer=pacer, max_wait_seconds=max_wait_seconds))
+        record.update(body())
     except Exception as exc:  # noqa: BLE001 - whatever happened, the record says so and the exit code shows it
         record.update({"status": "error", "exit_code": 1, "detail": f"{type(exc).__name__}: {exc}"[:600],
                        "traceback": traceback.format_exc()[-3000:]})
@@ -1853,10 +2050,106 @@ def phase_b_scheduled(root: Path, cohort_id: str, *, expect_repo: Path | None = 
     try:
         runs = phase_b.cohort_store(root, cohort_id)
         stamp = datetime.fromisoformat(record["started_at"]).astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")
-        runs.write_json(f"scheduler/runs/{stamp}-{os.getpid()}.json", record)
+        runs.write_json(f"scheduler/runs/{stamp}-{job}-{os.getpid()}.json", record)
     except (OSError, StoreError, phase_b.PhaseBError):
         pass  # the exit code still says what happened
     return record
+
+
+# ----------------------------------------------------------------- Phase B: the outcome job (D-278)
+
+
+def _outcome_scheduled(root: Path, cohort_id: str, *, expect_repo: Path | None, expect_commit: str | None,
+                       clock: Clock | None, sleep, yahoo) -> dict:
+    problem = _frozen_worktree_problem(expect_repo, expect_commit)
+    if problem:
+        return {"status": "not_the_frozen_worktree", "exit_code": 2, "detail": problem}
+    lock = JobLock(phase_b.job_lock_path(root, cohort_id))
+    try:
+        lock.acquire()
+    except JobLockHeld as exc:
+        return {"status": "locked", "exit_code": 0, "detail": str(exc)}
+    try:
+        try:
+            # Outcomes of days answered before a cohort stop stay valid; a changed protocol does not.
+            cohort = load_cohort(root, cohort_id, allow_stopped=True)
+        except EvaluationError as exc:
+            return {"status": "cohort_refused", "exit_code": 2, "detail": str(exc)}
+        now = _now(clock)
+        today = now.astimezone(JST).date()
+        closed = jpx_calendar.closed_reason(today)
+        if closed:
+            return {"status": "closed_day", "exit_code": 0, "today": today.isoformat(), "closed": closed}
+        if phase_b.cohort_store(root, cohort_id).exists(FINAL_REPORT):
+            return {"status": "cohort_final", "exit_code": 0, "detail": "the final report exists"}
+        # Read-only: every day sent and every outcome frozen must still be what its stage record says.
+        broken = {}
+        for day in phase_b.completed_days(root, cohort_id):
+            day_run = phase_b.day_store(root, cohort_id, day)
+            try:
+                _verify_stage(day_run, "run")
+                if day_run.exists("stage-outcomes.json"):
+                    _verify_stage(day_run, "outcomes")
+            except (StoreError, EvaluationError) as exc:
+                broken[day.isoformat()] = str(exc)[:300]
+        if broken:
+            return {"status": "stopped", "exit_code": 2, "integrity": broken}
+        due = [day for day in phase_b.completed_days(root, cohort_id)
+               if not phase_b.day_store(root, cohort_id, day).exists("stage-outcomes.json")
+               and now >= phase_b.close_confirmed_at(jpx_calendar.business_day_after(day, HORIZON))]
+        results = {}
+        for day in due:
+            try:
+                frozen = freeze_outcomes(phase_b.day_store(root, cohort_id, day), clock=clock, yahoo=yahoo,
+                                         sleep=sleep, lock_held=True)
+                results[day.isoformat()] = {"status": "frozen", "attempt": frozen["attempt"],
+                                            "t_plus_20": frozen["t_plus_20"], "resolution": frozen["resolution"]}
+            except OutcomeNotDue as exc:
+                results[day.isoformat()] = {"status": "not_due", "detail": str(exc)[:300]}
+            except OutcomeStopped as exc:
+                results[day.isoformat()] = {"status": "stopped", "kind": exc.kind, "detail": str(exc)[:600]}
+            except (EvaluationError, StoreError) as exc:
+                results[day.isoformat()] = {"status": "stopped", "kind": "integrity", "detail": str(exc)[:600]}
+        stopped = sorted(d for d, r in results.items() if r["status"] == "stopped")
+        try:
+            refreshed = _refresh_report(root, cohort_id, cohort, clock=clock)
+        except (EvaluationError, StoreError) as exc:
+            return {"status": "stopped", "exit_code": 2, "outcomes": results,
+                    "report": {"stopped": f"{type(exc).__name__}: {exc}"[:600]}}
+        if stopped:
+            status = "stopped"
+        elif any(r["status"] == "frozen" for r in results.values()):
+            status = "outcomes_frozen"
+        else:
+            status = "no_targets"
+        return {"status": status, "exit_code": 2 if stopped else 0, "due": [d.isoformat() for d in due],
+                "outcomes": results, "report": refreshed}
+    finally:
+        lock.release()
+
+
+def phase_b_outcome_scheduled(root: Path, cohort_id: str, *, expect_repo: Path | None = None,
+                              expect_commit: str | None = None, clock: Clock | None = None, sleep=time.sleep,
+                              yahoo=None) -> dict:
+    """What Task Scheduler runs every weekday at 18:00 JST: outcomes that have come due, then the report (D-278).
+
+    In order: the frozen worktree at the registered commit; the cohort's lock,
+    shared with the prediction job (a second job writes nothing); the cohort's
+    protocol; the JPX business day (a closed day is a no-op); the final report
+    (once it exists there is nothing more to do). Then every day sent in full
+    whose outcome is not frozen and whose T+20 has closed by JPX's calendar is
+    frozen once - by the frozen outcome code, from Yahoo prices read now - and
+    the rolling report is written if the frozen outcomes changed, or the final
+    one once the cohort is complete. It never calls Jev and needs no key.
+
+    ``exit_code``: 0 frozen, or nothing due (no-op); 2 a day did not verify or
+    its prices could not all be read - it is tried again on the next business
+    day, a frozen outcome never is; 1 an error.
+    """
+
+    return _recorded("outcome", root, cohort_id, expect_commit, clock, lambda: _outcome_scheduled(
+        root, cohort_id, expect_repo=expect_repo, expect_commit=expect_commit, clock=clock, sleep=sleep,
+        yahoo=yahoo))
 
 
 def check_calendar(*, fetch=None) -> dict:
@@ -1926,6 +2219,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--cohort-id", required=True)
     p.add_argument("--expect-repo", type=Path, default=None, help="the frozen worktree the task was registered for")
     p.add_argument("--expect-commit", default=None, help="the commit that worktree must be at, clean")
+    p = sub.add_parser("phase-b-outcome-scheduled", help="the outcome job Task Scheduler runs (D-278)")
+    p.add_argument("--cohort-id", required=True)
+    p.add_argument("--expect-repo", type=Path, default=None, help="the frozen worktree the task was registered for")
+    p.add_argument("--expect-commit", default=None, help="the commit that worktree must be at, clean")
     sub.add_parser("check-calendar", help="compare JPX's published closed days with the job's calendar")
     args = parser.parse_args(argv)
     root = args.root or default_root()
@@ -1949,6 +2246,11 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "phase-b-scheduled":
         result = phase_b_scheduled(root, args.cohort_id, expect_repo=args.expect_repo,
                                    expect_commit=args.expect_commit)
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        return int(result["exit_code"])
+    elif args.command == "phase-b-outcome-scheduled":
+        result = phase_b_outcome_scheduled(root, args.cohort_id, expect_repo=args.expect_repo,
+                                           expect_commit=args.expect_commit)
         print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
         return int(result["exit_code"])
     elif args.command == "check-calendar":

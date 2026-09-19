@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import html
 import re
-from datetime import date
+from datetime import date, timedelta
 
 CALENDAR_VERSION = "jpx-closed-days-2026-02-06"
 SOURCE_URL = "https://www.jpx.co.jp/corporate/about-jpx/calendar/index.html"
@@ -93,6 +93,19 @@ def is_business_day(day: date) -> bool:
     return closed_reason(day) is None
 
 
+def business_day_after(day: date, n: int) -> date:
+    """The ``n``-th TSE business day after ``day``: when T+n falls by this calendar (the outcome job's due date)."""
+
+    if n < 1:
+        raise ValueError("n counts business days after the day, from 1")
+    current, count = day, 0
+    while count < n:
+        current += timedelta(days=1)
+        if is_business_day(current):
+            count += 1
+    return current
+
+
 def parse_closed_days(page: str) -> dict[date, str]:
     """The closed days in JPX's 休業日一覧 page: each ``YYYY/MM/DD（曜）`` cell and the name in the next cell.
 
@@ -123,4 +136,5 @@ def diff_against_page(page: str) -> dict:
 
 
 __all__ = ["CALENDAR_VERSION", "CLOSED_DAYS", "COVERED_YEARS", "SOURCE_SHA256", "SOURCE_UPDATED", "SOURCE_URL",
-           "CalendarUnknown", "closed_reason", "diff_against_page", "is_business_day", "parse_closed_days"]
+           "CalendarUnknown", "business_day_after", "closed_reason", "diff_against_page", "is_business_day",
+           "parse_closed_days"]

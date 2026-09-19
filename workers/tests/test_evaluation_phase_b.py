@@ -7,6 +7,7 @@ answers are made up here. No network, no model request, no database.
 from __future__ import annotations
 
 import ast
+import copy
 import hashlib
 import inspect
 import json
@@ -14,6 +15,7 @@ import random
 import socket
 import subprocess
 import sys
+import threading
 from collections import Counter
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -22,7 +24,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from surge.evaluation import phase_b
+from surge.evaluation import jpx_calendar, phase_b
 from surge.evaluation.cost import Budget, BudgetExceeded, record_credit_snapshot
 from surge.evaluation.method import REPO_ROOT
 from surge.evaluation.pacing import Pacer
@@ -49,6 +51,7 @@ from test_evaluation import (
     business_days,
     chart,
     history,
+    stamp,
     walk,
 )
 
@@ -254,9 +257,11 @@ class _PinnedTransport:
         return 200, {"x-typesafe-request-id": f"req_{n}"}, json.dumps(body).encode("utf-8")
 
 
-def _universe(n: int, *, until: date = S0):
+def _universe(n: int, *, until: date = S0, holidays: bool = False):
     codes = [str(3000 + i) for i in range(n)]
     days = business_days(date(2025, 8, 1), until)
+    if holidays:  # no bars on JPX's closed days, as the real market (the calendar covers 2026 on)
+        days = [d for d in days if d.year < 2026 or jpx_calendar.is_business_day(d)]
     charts = {f"{c}.T": chart(days, walk(len(days), start=300.0 + (i * 37) % 2000, seed=i),
                               volumes=[50_000 + 1000 * (i % 17)] * len(days)) for i, c in enumerate(codes)}
     issues = [ListedIssue(c, f"銘柄{c}株式会社", "PRIME", SECTORS[i % len(SECTORS)], "TOPIX Small 1")
@@ -264,8 +269,8 @@ def _universe(n: int, *, until: date = S0):
     return codes, charts, issues
 
 
-def _setup(tmp_path, monkeypatch, *, n=40, seed=SEED):
-    codes, charts, issues = _universe(n)
+def _setup(tmp_path, monkeypatch, *, n=40, seed=SEED, until=S0, holidays=False):
+    codes, charts, issues = _universe(n, until=until, holidays=holidays)
     real_screen = jev_eval.screen
 
     def screen_with_known_routes(h, s0):
@@ -598,34 +603,55 @@ def test_phase_b_is_frozen_once_its_cohort_exists(tmp_path, monkeypatch):
         _plan(env)
 
 
-def test_outcomes_after_t_plus_20_and_the_report_by_route_d_subgroup(tmp_path, monkeypatch):
-    env = _setup(tmp_path, monkeypatch)
-    store = _planned_and_built(env)
-    pacer, clock = _paced(EVENING)
-    jev_eval.preflight(store, budget=DAY_BUDGET, clock=clock)
+def _evening(day: date) -> datetime:
+    return datetime(day.year, day.month, day.day, 17, 0, tzinfo=JST)
+
+
+def _send_day(env, s0: date = S0):
+    """Plan, build and send one day on its evening, every answer from jev-1.13.0."""
+
+    jev_eval.plan_day(env.root, COHORT, s0, clock=lambda: _evening(s0), yahoo=_FakeYahoo(env.charts),
+                      fetch_issues=lambda: (env.issues, "f" * 64), sleep=lambda _s: None)
+    store = phase_b.day_store(env.root, COHORT, s0)
+    jev_eval.build(store, yanoshin=_FakeYanoshinRecent())
+    pacer, clock = _paced(_evening(s0))
+    assert jev_eval.preflight(store, budget=DAY_BUDGET, clock=clock)["ready_to_send"]
     assert jev_eval.run(store, budget=DAY_BUDGET, pacer=pacer, transport=_PinnedTransport(), clock=clock)[
         "stopped"] is None
+    return store
 
-    # Read again after T+20: the same prices up to S0, and the sessions after it.
-    _, later_charts, _ = _universe(len(env.codes), until=date(2026, 10, 30))
-    t20 = business_days(date(2026, 9, 25), date(2026, 10, 30))[19]
-    with pytest.raises(jev_eval.EvaluationError, match="has not closed"):
-        _, short, _ = _universe(len(env.codes), until=date(2026, 10, 15))
-        jev_eval.freeze_outcomes(store, clock=lambda: datetime(2026, 10, 15, 17, 0, tzinfo=JST),
+
+def test_outcomes_after_t_plus_20_and_the_report_by_route_d_subgroup(tmp_path, monkeypatch):
+    env = _setup(tmp_path, monkeypatch, until=date(2026, 11, 30), holidays=True)
+    store = _send_day(env)
+
+    # T+20 of 2026-09-24 by JPX's calendar is 10-23 (10-12 is closed); not before its close is final.
+    for when in (datetime(2026, 10, 22, 17, 0, tzinfo=JST), datetime(2026, 10, 23, 12, 0, tzinfo=JST)):
+        with pytest.raises(jev_eval.OutcomeNotDue, match="by JPX's calendar"):
+            jev_eval.freeze_outcomes(store, clock=lambda w=when: w, yahoo=_FakeYahoo(env.charts),
+                                     sleep=lambda _s: None)
+    # Due by the calendar, but the prices read lack a session (an unscheduled closure): not frozen either.
+    _, short, _ = _universe(len(env.codes), until=date(2026, 10, 22), holidays=True)
+    with pytest.raises(jev_eval.OutcomeNotDue, match="in the prices read"):
+        jev_eval.freeze_outcomes(store, clock=lambda: datetime(2026, 10, 23, 17, 0, tzinfo=JST),
                                  yahoo=_FakeYahoo(short), sleep=lambda _s: None)
-    with pytest.raises(jev_eval.EvaluationError, match="final from"):
-        jev_eval.freeze_outcomes(store, clock=lambda: datetime(t20.year, t20.month, t20.day, 12, 0, tzinfo=JST),
-                                 yahoo=_FakeYahoo(later_charts), sleep=lambda _s: None)
-    frozen = jev_eval.freeze_outcomes(store, clock=lambda: datetime(t20.year, t20.month, t20.day, 17, 0, tzinfo=JST),
-                                      yahoo=_FakeYahoo(later_charts), sleep=lambda _s: None)
-    assert frozen["t_plus_20"] == t20.isoformat() and frozen["answers_read"] is False
-    outcomes = store.read_jsonl("outcomes.jsonl")
+    assert not (store.path / "outcome-attempts").exists()
+    frozen = jev_eval.freeze_outcomes(store, clock=lambda: datetime(2026, 10, 23, 17, 0, tzinfo=JST),
+                                      yahoo=_FakeYahoo(env.charts), sleep=lambda _s: None)
+    assert frozen["t_plus_20"] == "2026-10-23" and frozen["answers_read"] is False and frozen["attempt"] == 1
+    outcomes = store.read_jsonl(frozen["outcomes_file"])
+    assert frozen["outcomes_file"] == "outcome-attempts/1/outcomes.jsonl"
     assert len(outcomes) == len(store.read_jsonl("population.jsonl"))
-    assert all(o["teacher_admissible"] is False and o["window_first"] == "2026-09-25" for o in outcomes)
+    for o in outcomes:
+        assert o["teacher_admissible"] is False and o["window_first"] == "2026-09-25"
+        assert o["window_last"] == "2026-10-23" and "success_label" not in o
+        assert {f"ret_t{n}" for n in (1, 3, 5, 10, 20)} | {"hit_20_high", "hit_20_close", "max_upside_high",
+                                                            "max_upside_close", "max_drawdown_low",
+                                                            "max_drawdown_close"} <= set(o)
 
-    result = jev_eval.phase_b_report(env.root, COHORT, clock=clock)
+    result = jev_eval.phase_b_report(env.root, COHORT, clock=lambda: datetime(2026, 10, 23, 18, 0, tzinfo=JST))
     assert result["phase"] == "B" and "not connected to production" in result["banner"]
-    assert result["cohort"]["days_included"] == ["2026-09-24"]
+    assert result["status"] == "partial" and result["progress"]["days"]["with_outcomes"] == ["2026-09-24"]
     groups = result["route_d_subgroups"]
     primary = [s for s in store.read_jsonl("population.jsonl") if s["cohort"] == "PRIMARY"]
     joined = result["pipeline"]["outcome_join"]["by_cohort"]["PRIMARY"]
@@ -639,9 +665,10 @@ def test_outcomes_after_t_plus_20_and_the_report_by_route_d_subgroup(tmp_path, m
     assert "reaches_target_calibration" in d_only["hit_20_high"]
     assert result["teacher_admissible"] is False
     assert (env.root / "evaluation" / "jev" / COHORT / "report-1.md").exists()
-    status = jev_eval.phase_b_status(env.root, COHORT, clock=clock)
+    status = jev_eval.phase_b_status(env.root, COHORT, clock=lambda: datetime(2026, 10, 23, 18, 0, tzinfo=JST))
     assert status["days_sent"] == 1 and status["frozen_protocol"] == "holds"
     assert status["answered"]["PRIMARY"] + status["answered"]["CONTROL"] == len(store.read_jsonl("population.jsonl"))
+    assert status["latest_report"]["status"] == "partial"
 
 
 def test_nothing_in_the_evaluation_can_write_to_a_database():
@@ -870,3 +897,186 @@ def test_the_scheduled_job_ends_quietly_once_the_cohort_has_its_25_days(tmp_path
         phase_b.day_store(env.root, COHORT, day).write_json("stage-run.json", {"stage": "run"})
     record = _scheduled(env, datetime(2026, 11, 2, 16, 20, tzinfo=JST))
     assert (record["status"], record["exit_code"]) == ("cohort_complete", 0)
+
+
+# ----------------------------------------------------------------- the outcome job and the reports (D-278)
+
+
+def _outcome_run(env, when: datetime, *, yahoo=None):
+    return jev_eval.phase_b_outcome_scheduled(env.root, COHORT, clock=lambda: when, sleep=lambda _s: None,
+                                              yahoo=yahoo or _FakeYahoo(env.charts))
+
+
+def _at(month: int, day: int, hour: int = 18, minute: int = 0) -> datetime:
+    return datetime(2026, month, day, hour, minute, tzinfo=JST)
+
+
+def _without_bar(result: dict, day: date) -> dict:
+    """A Yahoo chart with one session's bar missing."""
+
+    changed = copy.deepcopy(result)
+    i = changed["timestamp"].index(stamp(day))
+    del changed["timestamp"][i]
+    for values in changed["indicators"]["quote"][0].values():
+        del values[i]
+    return changed
+
+
+def _refuse_jev(monkeypatch):
+    from surge.evaluation import providers
+
+    def never(*_args, **_kwargs):
+        raise AssertionError("the outcome job called Jev")
+
+    monkeypatch.setattr(providers.TypeSafeDirect, "call", never)
+    monkeypatch.setattr(providers, "urllib_transport", never)
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+
+
+def test_the_outcome_job_freezes_a_day_once_when_its_t_plus_20_has_closed(tmp_path, monkeypatch):
+    env = _setup(tmp_path, monkeypatch, until=date(2026, 11, 30), holidays=True)
+    store = _send_day(env)
+    _refuse_jev(monkeypatch)  # from here on nothing may reach Jev, and there is no key to reach it with
+    cohort_dir = env.root / "evaluation" / "jev" / COHORT
+
+    # Nothing due - the evening of S0, the day before T+20, T+20 before 16:10: no-ops that write nothing.
+    for when in (_at(9, 24), _at(10, 22), _at(10, 23, 12)):
+        record = _outcome_run(env, when)
+        assert (record["status"], record["exit_code"], record["due"]) == ("no_targets", 0, [])
+    assert not (store.path / "outcome-attempts").exists() and not list(cohort_dir.glob("report-*"))
+
+    frozen = _outcome_run(env, _at(10, 23))
+    assert (frozen["status"], frozen["exit_code"]) == ("outcomes_frozen", 0)
+    assert frozen["outcomes"]["2026-09-24"]["status"] == "frozen" and frozen["outcomes"]["2026-09-24"]["attempt"] == 1
+    assert frozen["report"]["file"] == "report-1.json" and frozen["report"]["status"] == "partial"
+    stage = store.read_json("stage-outcomes.json")
+    first = store.read_jsonl(stage["outcomes_file"])
+
+    # The same day again, and again later: no second outcome, no second report.
+    for when in (_at(10, 23, 18, 5), _at(10, 26)):
+        again = _outcome_run(env, when)
+        assert (again["status"], again["exit_code"], again["due"], again["report"]) == ("no_targets", 0, [], None)
+    assert sorted(p.name for p in (store.path / "outcome-attempts").iterdir()) == ["1"]
+    assert sorted(p.name for p in cohort_dir.glob("report-*.json")) == ["report-1.json"]
+    assert store.read_jsonl(stage["outcomes_file"]) == first
+
+    # Write-once: a frozen outcome is never frozen or written again.
+    with pytest.raises(StoreError, match="already frozen"):
+        jev_eval.freeze_outcomes(store, clock=lambda: _at(10, 27), yahoo=_FakeYahoo(env.charts),
+                                 sleep=lambda _s: None)
+    with pytest.raises(StoreError, match="write-once"):
+        store.write_jsonl(stage["outcomes_file"], [])
+    assert [r["job"] for r in _scheduler_records(env)][-1] == "outcome"
+
+
+def test_reports_are_partial_until_every_outcome_is_frozen_and_final_only_then(tmp_path, monkeypatch):
+    monkeypatch.setattr(phase_b, "TARGET_BUSINESS_DAYS", 2)  # a two-day cohort, to reach the end quickly
+    env = _setup(tmp_path, monkeypatch, until=date(2026, 11, 30), holidays=True)
+    first, second = _send_day(env, S0), _send_day(env, date(2026, 9, 25))
+    # One Primary security has no bar on 2026-10-05, inside the first day's window: its outcome is unresolvable.
+    outcome_charts = {**env.charts, "3000.T": _without_bar(env.charts["3000.T"], date(2026, 10, 5))}
+    missing = next(s["sample_id"] for s in first.read_jsonl("population.jsonl")
+                   if s["code"] == "3000" and s["cohort"] == "PRIMARY")
+    _refuse_jev(monkeypatch)
+    cohort_dir = env.root / "evaluation" / "jev" / COHORT
+    main = {day: len([r for r in store.read_jsonl("requests.jsonl") if r["variant"] == "main"])
+            for day, store in (("first", first), ("second", second))}
+
+    partial = _outcome_run(env, _at(10, 23), yahoo=_FakeYahoo(outcome_charts))
+    assert partial["status"] == "outcomes_frozen" and partial["report"]["status"] == "partial"
+    report_ = json.loads((cohort_dir / "report-1.json").read_text(encoding="utf-8"))
+    progress = report_["progress"]
+    assert report_["status"] == progress["status"] == "partial"
+    assert progress["predictions"]["sent"]["total"] == main["first"] + main["second"]
+    assert progress["predictions"]["resolved"]["total"] == main["first"] - 1
+    assert progress["predictions"]["unresolved"]["missing_data"] == {"PRIMARY": 1, "CONTROL": 0, "total": 1}
+    assert progress["predictions"]["unresolved"]["awaiting_t_plus_20"]["total"] == main["second"]
+    assert progress["predictions"]["unresolved"]["total"]["total"] == main["second"] + 1
+    assert (progress["collection_rate"], progress["cohort_completion_rate"]) == (1.0, 0.5)
+    assert progress["days"]["awaiting_t_plus_20"] == [{"s0": "2026-09-25", "t_plus_20_by_calendar": "2026-10-26"}]
+    # Unresolved predictions are neither failures nor in a denominator: Primary's n is its resolved ones only.
+    primary_resolved = progress["predictions"]["resolved"]["PRIMARY"]
+    assert report_["primary"]["n"] == primary_resolved == report_["pipeline"]["outcome_join"]["by_cohort"]["PRIMARY"]
+    assert report_["pipeline"]["outcome_join"]["outcome_not_resolved"] == [missing]
+    text = (cohort_dir / "report-1.md").read_text(encoding="utf-8")
+    assert "**status = partial**" in text and "unresolved predictions: " in text and "cohort completion: 50.0%" in text
+    assert not (cohort_dir / "report-final.json").exists()
+
+    # The missing 2026-10-05 bar is inside the second day's window too, where 3000 is Primary again.
+    final = _outcome_run(env, _at(10, 26), yahoo=_FakeYahoo(outcome_charts))
+    assert final["status"] == "outcomes_frozen" and final["report"] == {
+        "file": "report-final.json", "status": "final", "resolved": main["first"] + main["second"] - 2,
+        "unresolved": 2, "cohort_completion_rate": 1.0}
+    closing = json.loads((cohort_dir / "report-final.json").read_text(encoding="utf-8"))
+    assert closing["status"] == "final" and closing["progress"]["predictions"]["unresolved"]["awaiting_t_plus_20"][
+        "total"] == 0
+    assert closing["progress"]["predictions"]["unresolved"]["missing_data"] == {"PRIMARY": 2, "CONTROL": 0, "total": 2}
+    assert closing["primary"]["n"] == closing["progress"]["predictions"]["resolved"]["PRIMARY"]
+    assert "**status = final**" in (cohort_dir / "report-final.md").read_text(encoding="utf-8")
+    after = _outcome_run(env, _at(10, 27), yahoo=_FakeYahoo(outcome_charts))
+    assert (after["status"], after["exit_code"]) == ("cohort_final", 0)
+    assert sorted(p.name for p in cohort_dir.glob("report-*.json")) == ["report-1.json", "report-final.json"]
+    with pytest.raises(StoreError, match="final report"):
+        jev_eval.phase_b_report(env.root, COHORT, clock=lambda: _at(10, 27))
+
+
+def test_the_prediction_and_outcome_jobs_never_run_at_once(tmp_path, monkeypatch):
+    env = _setup(tmp_path, monkeypatch, until=date(2026, 11, 30), holidays=True)
+    _send_day(env, S0)
+    entered, release, results = threading.Event(), threading.Event(), {}
+    pinned = _PinnedTransport()
+
+    def holds_the_first_answer(url, data, headers, timeout):
+        entered.set()
+        assert release.wait(60)
+        return pinned(url, data, headers, timeout)
+
+    def predict():
+        results["prediction"] = _scheduled(env, _evening(date(2026, 9, 25)), transport=holds_the_first_answer)
+
+    worker = threading.Thread(target=predict)
+    worker.start()
+    try:
+        assert entered.wait(120)  # the prediction job is sending, under the cohort's lock
+        during = _outcome_run(env, _at(10, 23))
+        assert (during["status"], during["exit_code"]) == ("locked", 0)
+        assert "held by another process" in during["detail"]
+        assert not phase_b.day_store(env.root, COHORT, S0).exists("stage-outcomes.json")
+    finally:
+        release.set()
+        worker.join(120)
+    assert results["prediction"]["status"] == "sent"
+    assert _outcome_run(env, _at(10, 23))["status"] == "outcomes_frozen"
+
+
+def test_the_outcome_job_is_a_no_op_on_closed_days_and_stops_on_missing_prices_or_bad_artifacts(tmp_path,
+                                                                                               monkeypatch):
+    from surge.evaluation.joblock import JobLock
+
+    env = _setup(tmp_path, monkeypatch, until=date(2026, 11, 30), holidays=True)
+    store = _send_day(env)
+    closed = _outcome_run(env, _at(10, 12))
+    assert (closed["status"], closed["exit_code"], closed["closed"]) == ("closed_day", 0, "スポーツの日")
+    with JobLock(phase_b.job_lock_path(env.root, COHORT)):
+        assert _outcome_run(env, _at(10, 23))["status"] == "locked"
+
+    # Prices that cannot all be read: nothing frozen, and tried again on the next business day.
+    short = _outcome_run(env, _at(10, 23), yahoo=_FlakyYahoo(env.charts, {"3000.T"}))
+    assert (short["status"], short["exit_code"]) == ("stopped", 2)
+    assert short["outcomes"]["2026-09-24"]["kind"] == "coverage"
+    assert not store.exists("stage-outcomes.json") and not (store.path / "outcome-attempts").exists()
+    assert _outcome_run(env, _at(10, 26))["status"] == "outcomes_frozen"
+
+    # A frozen outcome changed on disk: the job stops, and keeps stopping, until it is put right.
+    frozen_file = store.path / store.read_json("stage-outcomes.json")["outcomes_file"]
+    frozen_file.write_text(frozen_file.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    broken = _outcome_run(env, _at(10, 27))
+    assert (broken["status"], broken["exit_code"]) == ("stopped", 2) and "2026-09-24" in broken["integrity"]
+
+    # A changed frozen protocol: refused.
+    monkeypatch.setattr(phase_b, "question_schema_hash", lambda: "0" * 64)
+    refused = _outcome_run(env, _at(10, 28))
+    assert (refused["status"], refused["exit_code"]) == ("cohort_refused", 2)
+    wrong = jev_eval.phase_b_outcome_scheduled(env.root, COHORT, expect_repo=tmp_path, clock=lambda: _at(10, 28))
+    assert (wrong["status"], wrong["exit_code"]) == ("not_the_frozen_worktree", 2)
+

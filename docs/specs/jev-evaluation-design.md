@@ -1,6 +1,6 @@
 # Jev 予測性能評価 設計
 
-状態: **v1.4（ユーザー確定 2026-09-19: Phase B の経路は D-275、規則は D-276 = D-272 の決定、開始条件と自動運用は D-277）** — Phase A 完了（§10）。Phase B（§11）: S0 = 2026-09-24 以降、TypeSafe 直接 API で model を `jev-1.13.0` に固定、1 営業日最大 92 request、Phase B 全体の hard cap $2.50。cohort `jev-phase-b-jp-20260924-v1` を作成し、Windows Task Scheduler（平日 16:10 JST）で自動運用する（§11-7）。**2026-09-24 16:10 JST より前には送らない**
+状態: **v1.5（ユーザー確定 2026-09-19: Phase B の経路は D-275、規則は D-276 = D-272 の決定、開始条件と自動運用は D-277、outcome と report の自動化は D-278）** — Phase A 完了（§10）。Phase B（§11）: S0 = 2026-09-24 以降、TypeSafe 直接 API で model を `jev-1.13.0` に固定、1 営業日最大 92 request、Phase B 全体の hard cap $2.50。cohort `jev-phase-b-jp-20260924-v1` を作成し、Windows Task Scheduler（平日 16:10 JST）で自動運用する（§11-7）。**2026-09-24 16:10 JST より前には送らない**
 前提: [D-267](../unresolved-decisions.md) EOD Prediction 規則（S0 確定終値・目標 ×1.20・S1 から評価・T+1/3/5/10/20・期限 T+20）/ D-269（Vercel AI Gateway 経由の Jev は技術的に適合、production default ではない）/ D-268（+20% 到達の判定基準は未決）/ D-270（本設計の確定）
 
 ## 0. 目的と範囲
@@ -313,7 +313,15 @@ plan-day と同じ読み込み・screening・抽出を、直近の session **S0 
 
 **状態（2026-09-19 20:30 JST）**: cohort 作成済み（frozen fingerprint `73cceb0d…`。Canonical・addenda 5 本・question schema の hash が MANIFEST とコードに一致し、`jev-1.13.0`・2026-09-24・25 営業日・$2.50 で固定されていることを確認）。task `surge-jev-phase-b-jev-phase-b-jp-20260924-v1`（Task Scheduler の `Surge` フォルダ）を登録済みで、repository の外に置いた専用の frozen worktree `surge-phase-b-jp-20260924-v1` を commit `e4b1bb3` に固定して動かす。次回の起動は 2026-09-21（月）16:10 で、JPX の休業日なので送信せず終了する。**最初に送信し得るのは 2026-09-24（木）16:10 JST**。登録した task を手動で 2 回起動し、土曜は `closed_day`（exit 0、何も取得・送信しない）、別の process が lock を持つ間は `locked`（exit 0）になることを確かめた。
 
-### 11-8. まだしていないこと
+### 11-8. 人の操作が残るところ
 
-- T+20 後の `freeze-outcomes` と `phase-b-report` は自動 job に入れていない（最初の日 9/24 の T+20 は 10/23）。
-- credit snapshot は 2026-10-19 00:00 UTC に失効する。そこから先はユーザーが console の残高を確かめて `record-credit` するまで送信しない。
+- credit snapshot は 2026-10-19 00:00 UTC に失効し、prediction job はそこで送信を止める。新しい monthly credit が付いたら、ユーザーが console の残高を 1 回確かめて snapshot を更新（`record-credit`）するまで再開しない。outcome job は API credit を使わないので止まらない。
+
+### 11-9. outcome と report の自動化（D-278、ユーザー決定 2026-09-19）
+
+- **prediction 側は完成扱い。9/24 まで Canonical・addenda・Routes・sampling・Jev question schema・model version・selection logic を変えない**（cohort の frozen fingerprint `73cceb0d…` はこの変更の前後で同一）。
+- **outcome job**（`phase-b-outcome-scheduled`、Task Scheduler で平日 18:00 JST）: cohort の各 S0 のうち、全件送信済み（`stage-run`）で outcome 未確定、JPX calendar で T+20 営業日の足が確定済み（T+20 の 16:10 JST 以降）のものだけを対象に、凍結済みの `compute_outcome` そのもので計算する（T+1 / T+3 / T+5 / T+10 / T+20、+20% の高値到達・終値到達、max upside、max drawdown。`success_label` とは統合しない）。価格はその時点で Yahoo から読み直し、outcome の窓は従来どおりデータ上の session（D-142）。
+- **write-once・idempotent**: 1 回の確定は新しい `outcome-attempts/<n>/` にすべてを計算し終えてから書き、最後に 1 度だけ `stage-outcomes.json` を書いてその attempt を outcome にする。確定済みの日は二度と確定しない（通常実行では上書きしない）。同じ日に何度実行しても outcome も report も二重に作らない。途中で落ちた確定は、どこからも参照されない attempt が残るだけで、次の実行が新しい attempt で確定する。
+- **report**: outcome job の後、確定済み outcome の集合が前回の report から変わったときだけ rolling report（`report-<n>.json` / `.md`）を書き直す。途中の report は必ず `status = partial` と、resolved predictions 件数・unresolved predictions 件数（T+20 待ち・データ欠損で解決不能）・cohort completion 率（outcome 確定済みの営業日 / 25）・収集率を示す。**未解決の outcome は失敗扱いしない・どの母数にも入れない**（指標は RESOLVED だけを読む）。25 営業日の収集が終わり、全 prediction の outcome が確定した時点でのみ `status = final` の `report-final.json` を 1 度だけ書く。以後の outcome job は何もしない。まだ outcome が 1 件も無い間は report も書かない。
+- **安全性**: prediction job と同じ frozen worktree・同じ cohort protocol・**同じ cohort の OS lock**（両 job が同時に artifact を書くことは無い。後から来た方は何もせず exit 0）。closed day → no-op（exit 0）、対象なし → no-op（exit 0）、frozen hash の不一致 → 停止（exit 2）、価格が全部は読めない（coverage 不足）→ その S0 を確定せず停止（exit 2、次の営業日に再び試みる。時間で失われないため）、artifact の integrity violation（毎回、送信済みの全日の `stage-run` と確定済みの `stage-outcomes` を照合）→ 停止（exit 2）。**outcome job は Jev を呼ばない**（コード上の経路が無く、wrapper も key を復号しない）。
+- **Task Scheduler**: prediction task と outcome task の両方で **WakeToRun を有効**、「ログオン中のみ実行」と StartWhenAvailable は維持（Windows 資格情報は保存しない）。ログオン済みでスリープ中なら起こして実行、遅れた起動は prediction なら送信窓の中だけ実行・窓の外は送らない、outcome は期限が無いので次の起動で処理する。スリープからの復帰は Windows の電源設定（wake timer の許可）にも依存する。

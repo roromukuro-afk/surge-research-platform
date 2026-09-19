@@ -103,21 +103,24 @@ earlier than the install marker. Otherwise a fresh machine's first gap check
 would write a month of `RUNTIME_OFFLINE` rows for days on which this system did
 not exist - and afterwards those are indistinguishable from real outages.
 
-## Jev evaluation Phase B (D-277): a separate task, registered on the user's instruction
+## Jev evaluation Phase B (D-277, D-278): two tasks, registered on the user's instruction
 
-Unlike the D-104 jobs above, this one has a live provider and the user asked
-for it to be registered (2026-09-19). It is its own task, with its own two
-scripts, and it does not go through `runner_cli`.
+Unlike the D-104 jobs above, these have a live provider and the user asked
+for them to be registered (2026-09-19). They are their own tasks, with their
+own two scripts, and they do not go through `runner_cli`: the prediction job
+(`-Job Prediction`, weekdays 16:10) and the outcome job (`-Job Outcome`,
+weekdays 18:00: outcomes whose T+20 has closed, then the rolling or final
+report; it never calls Jev and gets no key).
 
 | | |
 |---|---|
-| task | `\Surge\surge-jev-phase-b-<cohort>`, Monday-Friday 16:10 (this machine is on Tokyo time) |
-| registered by | `Register-JevPhaseBTask.ps1 -CohortId <cohort> -ExpectCommit <sha>` (`-DryRun` prints it first) |
+| tasks | `\Surge\surge-jev-phase-b-<cohort>` Monday-Friday 16:10 and `\Surge\surge-jev-phase-b-outcome-<cohort>` Monday-Friday 18:00 (this machine is on Tokyo time); both wake the machine (WakeToRun) |
+| registered by | `Register-JevPhaseBTask.ps1 [-Job Outcome] -CohortId <cohort> -ExpectCommit <sha>` (`-DryRun` prints it first) |
 | runs | `Invoke-JevPhaseB.ps1` from a **frozen worktree** - a detached git worktree at the registered commit, kept apart from the working copy; the job refuses to run from anywhere else, at another commit, or with changes |
 | as | the current user, only when logged on, ordinary run level |
 | credentials | `TYPESAFE_API_KEY` only, decrypted from its DPAPI file for the run and removed after; the other stored keys are not read. The file is Set-SurgeSecret's (`%LOCALAPPDATA%\surge\secrets`) or, for a key stored from inside the Claude desktop app, the one copy in that app's package cache (`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Local\surge\secrets`): the app's AppData writes are virtualized there and Task Scheduler runs outside the app. The path used is logged |
 | logs | `%USERPROFILE%\.surge\evaluation\jev\<cohort>\scheduler\console\` (output) and `...\scheduler\runs\` (one record per run) |
-| double start | Task Scheduler `IgnoreNew`, and the job's own lock - a byte-range lock the operating system drops when the process ends, never taken over; a second instance sends nothing |
+| double start | Task Scheduler `IgnoreNew`, and the cohort's lock, shared by both jobs - a byte-range lock the operating system drops when the process ends, never taken over; a second instance, or the other job, does nothing |
 | late start | `StartWhenAvailable`: after sleep or a restart the job runs if the day's window (16:10 JST to 09:00 JST on the next weekday) is still open, and ends without sending if it is not |
 | holidays | the trigger fires on weekdays; the job reads JPX's calendar and ends normally (exit 0) on a closed day |
 

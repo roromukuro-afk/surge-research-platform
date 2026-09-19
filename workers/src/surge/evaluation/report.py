@@ -497,6 +497,24 @@ def render_markdown(report: dict) -> str:
     lines = [f"# Jev evaluation {report['run_id']} (Phase {report['phase']})", ""]
     if report["banner"]:
         lines += [f"> **{report['banner']}**", ""]
+    progress = report.get("progress")
+    if progress:
+        predictions = progress["predictions"]
+        unresolved = predictions["unresolved"]
+        lines += [
+            f"**status = {report['status']}**",
+            "",
+            f"- resolved predictions: {predictions['resolved']['total']} (Primary {predictions['resolved']['PRIMARY']}, "
+            f"Control {predictions['resolved']['CONTROL']}) of {predictions['sent']['total']} sent",
+            f"- unresolved predictions: {unresolved['total']['total']} (awaiting T+20 "
+            f"{unresolved['awaiting_t_plus_20']['total']}, unresolvable for missing data "
+            f"{unresolved['missing_data']['total']}): {progress['rules']['unresolved']}",
+            f"- cohort completion: {progress['cohort_completion_rate']:.1%} ({progress['days_with_outcomes']} of "
+            f"{progress['target_business_days']} business days with outcomes; {progress['days_sent_in_full']} sent, "
+            f"collection {progress['collection_rate']:.1%})",
+            f"- {progress['rules']['final']}",
+            "",
+        ]
     pipe = report["pipeline"]
     req, cost, tok, lat = pipe["requests"], pipe["cost"], pipe["tokens"], pipe["latency_seconds"]
     lines += [
