@@ -1,6 +1,6 @@
 # Phase B Web shadow（Vercel）設計
 
-状態: **v0.2（2026-09-19、D-279）** — Stage 1・2 を実装し、Vercel 上で動作を確認した（§9）。Cron → 保護された production → Workflow → 完了の経路も no-op で確認済み。Stage 3（実データ・Jev なし）は未着手。**正式な Phase B は何も変わらない。**
+状態: **v0.3（2026-09-19、D-279）** — Stage 1・2 を実装し、Vercel 上で動作を確認した（§9）。Cron → 保護された production → Workflow → 完了の経路も no-op で確認済み。Stage 3（実データ・Jev なし）を実装しテストした（§8）。Vercel 上ではまだ実行していない（Blob の使用量をダッシュボードで確認してから）。**正式な Phase B は何も変わらない。**
 
 ## 0. 前提（変えないもの）
 
@@ -104,7 +104,7 @@
 |---|---|---|
 | 1 | Web UI を synthetic fixture で作る | **実装済み** |
 | 2 | Cloud artifact storage（API 送信なし） | **実装済み**（Blob の実接続は store 作成後。それまでは Blob と同じ規則の fake と local store で検証） |
-| 3 | Workflow で universe・Yahoo・screening・selection まで実データ（Jev には送らない）。PC と universe・pass 数・Primary・Control・request hash を比較 | 未着手 |
+| 3 | Workflow で universe・Yahoo・screening・selection まで実データ（Jev には送らない）。PC と universe・pass 数・Primary・Control・request hash を比較 | **実装済み**（§8。Vercel 上の実行は Blob 使用量の確認後。PC と同じ S0 での比較は S0 = 2026-09-24 から） |
 | 4 | Jev を cloud から 1 件だけ smoke | 未着手 |
 | 5 | shadow を 1 営業日実行し、Windows 版と selected cohort・request bytes・prediction・artifact を比較 | 未着手 |
 
@@ -120,7 +120,7 @@
 
 - `TYPESAFE_API_KEY`: Vercel の Environment Variables に dashboard から入力する（Sensitive）。Git・CLI の引数・ログ・artifact に出さない。Web では値を表示しない（設定されているかどうかだけ）。Stage 4 まで要らない。
 - `BLOB_READ_WRITE_TOKEN`: store を project に接続すると Vercel が設定する。
-- `CRON_SECRET`: cron の受け口の認証（Stage 3）。
+- `CRON_SECRET`: 使わない。Vercel Cron の要求は Deployment Protection（All Deployments）をシークレットなしで通過する（2026-09-19 実測、§9）。受け口は保護の内側にあり、チームのメンバー・この project の OIDC・Cron のほかは届かない。
 
 ## 7. ユーザーの判断が要るもの
 
@@ -128,7 +128,10 @@
 2. Deployment Protection（Vercel Authentication、All Deployments）の有効化。
 3. shadow の TypeSafe 支出上限（提案 $0.30）。
 
-## 8. 実装したもの（Stage 1–2）
+## 8. 実装したもの（Stage 1–3）
+
+### Stage 1–2
+
 
 - `workers/src/surge/storage/vercel_blob.py` — `ObjectStore` の Vercel Blob 実装（private、上書き不可、操作数の記録）。`SURGE_OBJECT_STORE=vercel-blob`。
 - `workers/src/surge/shadow/artifacts.py` — artifact の layout・write-once・integrity record・run record。
@@ -136,6 +139,23 @@
 - `scripts/make_shadow_fixture.py` → `apps/web/fixtures/shadow/` — 合成の cohort（40 銘柄、4 営業日、うち 1 日は coverage 92.5% で停止、2 日分の outcome、partial report 2 本）。実際の Phase B のコード（scheduled job）に偽の Yahoo・Yanoshin・TypeSafe と偽の時計を通して作る。
 - `apps/web`: `/`（Overview）・`/predictions`・`/runs`・`/outcomes`・`/reports`・`/system`。`SURGE_SHADOW_SOURCE=fixture|local:<dir>|blob`（未設定なら開発時は fixture、本番は「未設定」と表示）。Jev の確率は「Jev 自身の回答、未校正」と明記して表示する（CLAUDE.md 1-17）。
 - テスト: `workers/tests/test_shadow.py`（Blob の意味論、改ざん検出、PC と hash が一致する export、ローカルパスや Canonical 本文が出ないこと、fixture の完全性）、`apps/web/scripts/shadow-smoke.mjs`（本番ビルドで 6 画面を fixture から描画、CI の web-contracts に追加）。
+
+### Stage 3（実データ、Jev なし）— 実装済み、Vercel 上は未実行
+
+- `workers/src/surge/shadow/day.py` — PC の `plan_day` と `build` を step に分けたもの。**分けるだけ**で、判定・選定・request の組み立ては凍結コードの関数そのもの（`jev_eval._fetch_one`・`screen`・`_screening_row`・`select_day`・`build`）を呼ぶ。
+  - `day_window`: `plan_day` と同じ拒否（2026-09-24 より前、JPX の休業日、S0 の終値確定前、S1 が開き得る時刻以降）。確定の 15 分前以内に起動されたら Workflow の `sleep` で待つ。
+  - `read_chunk`: 150 銘柄/step、PC と同じ順序・同じ 0.3 s の間隔、180 s の締切を過ぎたら残りを次の step へ（1 step で最低 1 銘柄は進む）。step の出力は screen 行・route 根拠・bar のある日付・digest 2 種（読んだ chart 行の SHA-256 と、as-traded の履歴 = bars と分割の SHA-256）だけで、価格は Workflow の storage に残さない。
+  - `plan`: coverage 95%、30% のセッション規則、`select_day`。plan のファイル（manifest・sessions・universe・screening・candidates・population）は RunStore と同じ直列化で bytes にする。
+  - `reread_selected`: 選定銘柄（最大 80）を同じ `now` で読み直し、**履歴の digest** が screen したときと同じことを確かめる（違えばその日は停止）。
+  - `build`: 一時ディレクトリの RunStore に plan のファイルと選定銘柄の価格だけを置き、**凍結された `build()` をそのまま実行**する（Yanoshin の開示タイトル、request の bytes と SHA-256、o200k のトークン数）。request 本文は保存しない。
+  - `write_day` / `write_stopped_day`: `surge/phase-b-shadow/<cohort>/<S0>/` に artifact を write-once で書き、integrity record（`system: vercel-shadow`、`status: built`、`jev: not called`）を最後に書く。停止した日は PC と同じ `day_stopped` の形。run 記録は `runs/<日付>/prediction-<n>.json`。
+  - probe: 過去の営業日を読んで screen するだけ（選定も書き込みもしない）。見込みの日より前に、Yahoo への到達・step の所要時間・CPU・イベント数を Vercel 上で測るためのもの。
+- `shadow_service/flows.py` の `shadow_day` workflow（`day_open` → `day_universe` → `day_chunk` × 約 25 → `day_plan` → `day_reread` → `day_build` → `day_write`、止まるときは `day_stop`）。起動は `POST /api/shadow/stage3/probe?s0=…&confirm=stage3-probe` と `POST /api/shadow/stage3/day?[s0=…&]confirm=stage3-day`（どちらも保護の内側、手動のみで cron には入れていない）。`GET /api/shadow/runs/<id>/events` で run のイベント数を種類別に数える。`/api/shadow/health` は入力構築コードの SHA-256（PC の manifest の `code_sha256` と比べる値）も返し、`?tokenizer=1` で o200k_harmony が読み込めるかを確かめる。
+- テスト: `workers/tests/test_shadow_day.py` — PC の `plan_day` + `build` と同じ合成データで、分割版の manifest・sessions・universe・screening・candidates・population・requests・TDnet・stage 記録が **byte 単位で一致**。再取得でキー順や調整後終値が違っても履歴が同じなら続行、履歴が違えば停止。締切、coverage 不足、窓の判定。`workers/tests/test_shadow_service.py` — SDK のローカル world で workflow ごと: 160 銘柄を 150 + 10 の 2 step で読み、fake Blob に commit された artifact が PC と一致して検証も通る。probe は何も書かない。coverage 不足は停止日として記録される。
+- `workers/src/surge/shadow/compare.py` — 同じ S0 の PC の日と shadow の日を比べる（`python -m surge.shadow.compare --s0 2026-09-24`）。universe・3,000 円以下の母集団・screening の pass・route membership・Primary・Control・request hash を項目ごとに一致／不一致で示し、食い違った銘柄を列挙する。request hash は (a) shadow が記録した入力から凍結 `build` で組み直した bytes との一致（コード）と、(b) PC の hash との一致（データ）の 2 段で、(b) の不一致は価格履歴か開示タイトルかに分解する。PC の日は読むだけで、何も書かない。テストで、同じデータなら全項目一致、PC の読み取り後に出た開示は「開示タイトル」、価格の食い違いは「価格履歴」と示されることを確認。
+- **実測で分かったこと（2026-09-19、PC から Yahoo へ 7 銘柄・計 14 回）**: 同じ `period2` で同じ chart を 2 回取ると、JSON のキー順が変わることがあり、調整後終値（`adjclose`）の値も変わることがある。一方、凍結コードが使う素の OHLCV と分割から作る as-traded の履歴と、screen の判定は一致した。→ §2 の「再取得して digest と照合」は **履歴の digest** で照合する（chart 行の digest も記録するが、一致は求めない）。
+- **比較の時期**: `select_day` は 2026-09-24 より前の S0 を拒否する（凍結）。したがって PC と同じ S0 で universe・pass・Primary・Control・request hash を比べられるのは **S0 = 2026-09-24 が最初**で、shadow の day はその送信窓（9/24 16:10 JST 〜 9/25 09:00 JST）の中で動かす。開示タイトルは読んだ時刻で変わり得るので、request hash は (a) 同じ入力（PC が記録した開示と価格）から作った bytes と、(b) 独立に読んだ入力から作った bytes の両方で比べる（§4）。それまでに Vercel 上で測れるのは probe（S0 = 2026-09-18 なら、PC のリハーサルの件数と比べられる）。
+- **未実装**: 月の使用量の予算ガード（§5）。cron で自動運用する（Stage 5）前に入れる。
 
 ## 9. Vercel 上での実施記録（2026-09-19、ユーザー承認後）
 
@@ -152,6 +172,8 @@
 | 凍結コードのクラウド実行 | `/api/shadow/health` がクラウドで frozen protocol の fingerprint を再計算し **`73cceb0d…`（公式 cohort と一致）**。curl_cffi 0.16.3 は import 可（Yahoo への実通信は Stage 3） |
 | Cron → Workflow | `/api/shadow/cron/noop`（`0 14 * * *`）を `vercel crons run` で起動: Cron の要求（`x-vercel-cron-schedule` 付き）は**シークレットなしで保護を通過**し、Workflow run が起動して `completed`（preview での手動起動も 4.4 秒で完了） |
 | Stage 2（クラウド） | 自己検証 workflow が合成 fixture の 28 object を private Blob に write-once で書き込み、全日を integrity 記録と照合して読み戻し、同じ内容の再書き込みは再実行扱い・別内容は拒否・元の内容は不変を確認。Blob 操作は advanced 31・simple 26 |
+| Web 画面の Blob 読み出し | production を `SURGE_SHADOW_SOURCE=blob`・`SURGE_SHADOW_COHORT=synthetic-phase-b-fixture` にして再デプロイ（CLI から、push 済みの commit と同じ tree。project は Git 未連携）。開発用 OIDC で 7 画面（6 画面と停止日の predictions）すべて 200、integrity 照合を通って描画。直前の fixture 版と本文を比べ、違いは Blob にコピーした範囲（9/24 全体・9/28 の停止日・report-1・typesafe-1）と出典の表示だけ |
 
 - Blob の操作数（SURGE 分）は上の通り。チーム全体の月間使用量はダッシュボードでしか見えない（Stage 3 の前に確認する）。
 - 検証用の no-op cron は毎日 1 回（14:00–14:59 UTC）残している: Stage 3 の cron を入れるときに置き換える。
+- **定時の起動は 2026-09-19 には記録されなかった**（14:00–15:00 UTC のランタイムログに `/api/shadow/cron/noop` は手動の `vercel crons run` の 1 件だけ。cron は登録済み: `vercel crons ls`）。この日は 14:21 UTC に production を入れ替えている。翌日の枠（2026-09-20 14:00–14:59 UTC）で再確認する。Cron の要求が保護を通過して Workflow が完了すること自体は、Vercel の cron 起動（`x-vercel-cron-schedule` 付き）で確認済み。

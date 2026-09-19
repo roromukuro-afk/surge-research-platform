@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 
 import pytest
 
@@ -45,12 +46,21 @@ def test_health_names_the_frozen_protocol_this_code_carries():
     status, body = _call("GET", "/api/shadow/health")
     assert status == 200 and body["frozen_protocol_fingerprint"] == OFFICIAL and body["matches_official_cohort"]
     assert body["repo_root_has_prompts"] is True
+    from surge.jobs.jev_eval import code_version
+
+    assert body["input_building_code_sha256"] == code_version()["code_sha256"]  # the PC's manifests name this
 
 
 def test_unknown_routes_and_an_unconfirmed_selftest_are_refused():
     assert _call("GET", "/api/shadow/nope")[0] == 404
     assert _call("POST", "/api/shadow/selftest/stage2")[0] == 400
     assert _call("GET", "/api/shadow/runs/not-a-run")[0] == 404
+    assert _call("GET", "/api/shadow/runs/not-a-run/events")[0] == 404
+    # Stage 3 reads every listed security from Yahoo: nothing starts without the word for it.
+    assert _call("POST", "/api/shadow/stage3/probe")[0] == 400
+    assert _call("POST", "/api/shadow/stage3/probe", b"confirm=stage3-probe")[0] == 400  # a probe names its S0
+    assert _call("POST", "/api/shadow/stage3/day", b"confirm=stage3-probe")[0] == 400  # the other mode's word
+    assert _call("POST", "/api/shadow/stage3/day", b"s0=someday&confirm=stage3-day")[0] == 400
 
 
 def test_the_selftest_writes_commit_records_after_what_they_name():
@@ -118,3 +128,111 @@ def test_the_stage2_selftest_copies_verifies_and_is_refused_an_overwrite(local_w
     probe = output["write_once"]
     assert probe["first_created"] and not probe["same_bytes_again_created"]
     assert probe["different_bytes_refused"] and probe["still_the_first_bytes"]
+
+
+# ----------------------------------------------------------------- Stage 3: a day through the workflow
+
+
+@pytest.fixture()
+def pc_cohort(tmp_path, monkeypatch):
+    """The PC's cohort under the official id and seed, on 160 made-up securities: two read steps of 150."""
+
+    import test_evaluation_phase_b as pb
+    from surge.shadow import day
+
+    monkeypatch.setattr(pb, "COHORT", day.OFFICIAL.cohort_id)
+    return pb._setup(tmp_path, monkeypatch, n=160, seed=day.OFFICIAL.experiment_seed)
+
+
+def _stage3_fakes(monkeypatch, env, client, *, yahoo=None):
+    import test_evaluation_phase_b as pb
+    from surge.shadow import day
+    from surge.storage import vercel_blob
+    from test_evaluation import _FakeYahoo
+
+    fakes = {"issues": lambda: (env.issues, "f" * 64), "yahoo": yahoo or (lambda: _FakeYahoo(env.charts)),
+             "yanoshin": pb._FakeYanoshinRecent, "sleep": lambda _s: None, "monotonic": time.monotonic,
+             "now": lambda: pb.EVENING}
+    monkeypatch.setattr(day, "providers", lambda: fakes)
+    monkeypatch.setattr(vercel_blob.VercelBlobObjectStore, "from_env", classmethod(lambda cls, env=None: cls(client)))
+    return vercel_blob.VercelBlobObjectStore(client)
+
+
+def test_the_workflow_reads_150_securities_a_step():
+    from shadow_service import flows
+
+    from surge.shadow import day
+
+    assert flows.CHUNK_SIZE == day.CHUNK_SIZE == 150
+
+
+def test_stage3_the_day_through_the_workflow_is_the_pc_s_day_committed_in_blob(local_world, pc_cohort, monkeypatch):
+    from shadow_service.flows import shadow_day
+
+    import test_evaluation_phase_b as pb
+    from surge.shadow import day
+    from surge.shadow.artifacts import DAY_COMMIT, jsonl_bytes, read_commit, read_verified, verify_committed
+    from surge.shadow.export import _parquet_rows
+    from test_shadow import FakeBlobClient
+
+    client = FakeBlobClient()
+    blob = _stage3_fakes(monkeypatch, pc_cohort, client)
+    pc = pb._planned_and_built(pc_cohort).path  # the PC's day, in one process
+    output = _run(shadow_day, "2026-09-24", "day", "test", "2026-09-24T08:00:00+00:00")
+
+    assert output["written"]["written"] and output["summary"]["selected"]["primary"] == 60
+    assert len(output["steps"]["chunks"]) == 2  # 160 securities: 150, then 10
+    prefix = f"surge/phase-b-shadow/{day.OFFICIAL.cohort_id}/2026-09-24"
+    commit = read_commit(blob, prefix, DAY_COMMIT)
+    assert (commit["status"], commit["system"], commit["official"]) == ("built", "vercel-shadow", False)
+    assert "not called" in commit["jev"] and verify_committed(blob, prefix, commit) == []
+    for artifact, pc_file in (("manifest.json", "manifest.json"), ("sessions.json", "sessions.json"),
+                              ("inputs/universe.json.gz", "inputs/universe.json"),
+                              ("candidates.jsonl.gz", "candidates.jsonl"), ("population.jsonl", "population.jsonl"),
+                              ("requests.jsonl", "requests.jsonl")):
+        assert read_verified(blob, prefix, commit, artifact) == (pc / pc_file).read_bytes(), artifact
+    screening = read_verified(blob, prefix, commit, "screening.jsonl.gz")
+    assert screening == jsonl_bytes(_parquet_rows(pc / "screening.parquet"))
+    run = json.loads(read_verified(blob, prefix, commit, "run.json"))
+    assert [c["attempted"] for c in run["shadow"]["steps"]["chunks"]] == [150, 10]
+    assert set(run["stages"]) == {"plan", "build"}
+    base = f"surge/phase-b-shadow/{day.OFFICIAL.cohort_id}"
+    assert json.loads(client.objects[f"{base}/cohort.json"])["frozen_fingerprint"] == day.OFFICIAL.frozen_fingerprint
+    record = json.loads(client.objects[f"{base}/runs/2026-09-24/prediction-1.json"])
+    assert (record["status"], record["system"], record["s0"]) == ("built", "vercel-shadow", "2026-09-24")
+    assert not any("/requests/" in key for key in client.objects)  # request bodies are never stored
+
+
+def test_stage3_a_probe_reads_and_screens_and_writes_nothing(local_world, pc_cohort, monkeypatch):
+    from shadow_service.flows import shadow_day
+
+    from test_shadow import FakeBlobClient
+
+    client = FakeBlobClient()
+    _stage3_fakes(monkeypatch, pc_cohort, client)
+    output = _run(shadow_day, "2026-09-24", "probe", "test", "2026-09-24T08:00:00+00:00")
+    summary = output["summary"]
+    assert summary["issues"] == summary["histories_read"] == 160 and summary["s0_is_session"]
+    assert summary["passing"] > 0 and len(output["steps"]["chunks"]) == 2
+    assert client.objects == {}
+
+
+def test_stage3_a_universe_not_read_almost_whole_stops_the_day_as_the_pc_stops_it(local_world, pc_cohort,
+                                                                                  monkeypatch):
+    from shadow_service.flows import shadow_day
+
+    import test_evaluation_phase_b as pb
+    from surge.shadow import day
+    from surge.shadow.artifacts import DAY_COMMIT, read_commit, read_verified
+    from test_shadow import FakeBlobClient
+
+    failing = {f"{3000 + i}.T" for i in range(9)}  # 151 of 160: 94.4%
+    client = FakeBlobClient()
+    blob = _stage3_fakes(monkeypatch, pc_cohort, client, yahoo=lambda: pb._FlakyYahoo(pc_cohort.charts, failing))
+    output = _run(shadow_day, "2026-09-24", "day", "test", "2026-09-24T08:00:00+00:00")
+    assert output["refused"]["kind"] == "coverage"
+    prefix = f"surge/phase-b-shadow/{day.OFFICIAL.cohort_id}/2026-09-24"
+    commit = read_commit(blob, prefix, DAY_COMMIT)
+    assert commit["status"] == "stopped" and set(commit["artifacts"]) == {"run.json"}
+    stopped = json.loads(read_verified(blob, prefix, commit, "run.json"))["day_stopped"]
+    assert "below 95%" in stopped[0]["reason"] and stopped[0]["detail"]["kind"] == "coverage"

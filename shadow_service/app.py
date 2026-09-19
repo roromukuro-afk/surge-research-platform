@@ -5,11 +5,17 @@ Authentication, All Deployments): a request reaches it only as the project's own
 cron, a signed-in member of the team, or a caller holding this project's OIDC
 token (Trusted Sources). There is no key in this service and none is read.
 
-    GET  /api/shadow/health                 versions, and the frozen protocol this bundle carries
+    GET  /api/shadow/health[?tokenizer=1]   versions, the frozen protocol and input-building code this bundle
+                                            carries; with tokenizer=1, whether o200k_harmony loads here
     GET  /api/shadow/cron/noop              the no-op workflow (the cron path, D-279)
     POST /api/shadow/selftest/stage2?confirm=stage2-synthetic
                                             Stage 2 in the cloud with synthetic artifacts
+    POST /api/shadow/stage3/probe?s0=YYYY-MM-DD&confirm=stage3-probe
+                                            Stage 3: a past business day read and screened; nothing written
+    POST /api/shadow/stage3/day?[s0=YYYY-MM-DD&]confirm=stage3-day
+                                            Stage 3: a Phase B day built and written to Blob; nothing sent
     GET  /api/shadow/runs/<run id>          a workflow run's status, and its output once completed
+    GET  /api/shadow/runs/<run id>/events   how many events the run wrote, by type
 """
 
 from __future__ import annotations
@@ -42,10 +48,10 @@ def _version(distribution: str) -> str | None:
         return None
 
 
-async def health(_request: dict) -> tuple[int, bytes]:
+async def health(request: dict) -> tuple[int, bytes]:
     from surge.evaluation import phase_b
     from surge.evaluation.method import load_method
-    from surge.jobs.jev_eval import EVALUATION_VERSION
+    from surge.jobs.jev_eval import EVALUATION_VERSION, code_version
 
     try:
         import curl_cffi  # noqa: F401 - whether the Yahoo transport imports here at all
@@ -62,8 +68,19 @@ async def health(_request: dict) -> tuple[int, bytes]:
         "curl_cffi_imports": curl_cffi_imports,
         "frozen_protocol_fingerprint": fingerprint,
         "matches_official_cohort": fingerprint == OFFICIAL_COHORT_FINGERPRINT,
+        "input_building_code_sha256": code_version()["code_sha256"],
         "repo_root_has_prompts": (REPO_ROOT / "docs" / "prompts" / "MANIFEST.md").exists(),
+        **(_tokenizer() if request["query"].get("tokenizer") == ["1"] else {}),
     })
+
+
+def _tokenizer() -> dict:
+    """Whether the o200k_harmony encoding loads here: the frozen build counts every request's tokens with it."""
+
+    from surge.analysis.tokenizer import exact_tokens_or_none
+
+    return {"o200k_harmony_tokens_of_a_probe": exact_tokens_or_none("SURGE shadow tokenizer probe",
+                                                                     encoding="o200k_harmony")}
 
 
 async def _started(run, wait_seconds: float) -> dict:
@@ -116,6 +133,53 @@ async def selftest_stage2(request: dict) -> tuple[int, bytes]:
     return _json(200, {"keys": len(keys), **result})
 
 
+async def stage3_start(request: dict) -> tuple[int, bytes]:
+    """Start a Stage 3 run and answer at once: a day takes about half an hour of steps."""
+
+    from datetime import date
+
+    from vercel.workflow import start
+
+    from shadow_service.flows import shadow_day
+
+    mode = request["path"].rsplit("/", 1)[-1]
+    if request["query"].get("confirm") != [f"stage3-{mode}"]:
+        return _json(400, {"refused": f"add ?confirm=stage3-{mode}: this reads every listed security from Yahoo"
+                                      + (" and writes the day to Blob" if mode == "day" else "")})
+    s0 = (request["query"].get("s0") or [None])[0]
+    if mode == "probe" and not s0:
+        return _json(400, {"refused": "a probe names its S0: ?s0=YYYY-MM-DD"})
+    if s0:
+        try:
+            date.fromisoformat(s0)
+        except ValueError:
+            return _json(400, {"refused": f"not a date: {s0!r}"})
+    run = await start(shadow_day, s0, mode, "manual", datetime.now(UTC).isoformat())
+    print(f"stage3 {mode} {run.run_id} (S0 {s0 or 'as scheduled'}): started", flush=True)
+    return _json(202, {"run_id": run.run_id, "mode": mode, "s0": s0, "status": await run.status()})
+
+
+async def run_events(request: dict) -> tuple[int, bytes]:
+    """The run's events by type: what it counts against the Workflow allowance (50,000 events a month on Hobby)."""
+
+    from collections import Counter
+
+    from vercel.workflow._internal.world import PaginationOptions, get_world
+
+    run_id = request["path"].split("/")[-2]
+    if not run_id.startswith("wrun_"):
+        return _json(404, {"error": "not a workflow run id"})
+    counts: Counter = Counter()
+    cursor = None
+    while True:
+        page = await get_world().events_list(run_id, pagination=PaginationOptions(limit=1000, cursor=cursor))
+        counts.update(event.event_type for event in page.data)
+        if not page.has_more or not page.cursor:
+            break
+        cursor = page.cursor
+    return _json(200, {"run_id": run_id, "events": sum(counts.values()), "by_type": dict(sorted(counts.items()))})
+
+
 async def run_status(request: dict) -> tuple[int, bytes]:
     from vercel.workflow import Run
 
@@ -132,13 +196,15 @@ ROUTES = {
     ("GET", "/api/shadow/health"): health,
     ("GET", "/api/shadow/cron/noop"): cron_noop,
     ("POST", "/api/shadow/selftest/stage2"): selftest_stage2,
+    ("POST", "/api/shadow/stage3/probe"): stage3_start,
+    ("POST", "/api/shadow/stage3/day"): stage3_start,
 }
 
 
 async def _dispatch(method: str, path: str, request: dict) -> tuple[int, bytes]:
     handler = ROUTES.get((method, path))
     if handler is None and method == "GET" and path.startswith("/api/shadow/runs/"):
-        handler = run_status
+        handler = run_events if path.endswith("/events") else run_status
     if handler is None:
         return _json(404, {"error": f"no route {method} {path}"})
     try:
