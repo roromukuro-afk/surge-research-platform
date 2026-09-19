@@ -211,48 +211,69 @@ def _compare(env, target):
                            compare.cloud_day(target, day.OFFICIAL.cohort_id, S0), s0=S0)
 
 
-def test_the_same_day_compares_equal_on_every_item_the_user_named(env, tmp_path):
+def _statuses(report) -> dict:
+    return {name: item["status"] for name, item in report["items"].items()}
+
+
+def test_the_same_day_is_an_exact_match_on_every_item_the_user_named(env, tmp_path):
     pb._planned_and_built(env)
     target = LocalObjectStore(tmp_path / "cloud", store_id="test")
     assert shadow_day_in_store(env, target)["written"]
     report = _compare(env, target)
-    assert report["all_match"], compare.render(report)
-    assert report["items"]["manifest"]["match"] and report["items"]["sessions"]["match"]
+    assert set(_statuses(report).values()) == {compare.EXACT}, compare.render(report)
+    assert set(report["items"]) == set(compare.ITEMS)
     assert report["items"]["primary"]["pc"] > 0 and report["items"]["control"]["pc"] > 0
+    assert report["items"]["selected_history_digests"]["securities"] > 0
     assert report["cloud_status"] == "built" and report["pc_status"] == "built"
+    assert report["stage4"]["may_be_proposed"]
 
 
 class _LaterTitle(pb._FakeYanoshinRecent):
     """The index read later: one security has a title published on S0's evening, after the PC read it."""
 
-    def __init__(self, code):
-        self.late = code
+    def __init__(self, code, *, published=datetime(2026, 9, 24, 18, 30, tzinfo=JST)):
+        self.late, self.published = code, published
 
     def fetch_for_codes(self, codes):
         result = super().fetch_for_codes(codes)
         if codes == [self.late]:
-            result.items.append(SimpleNamespace(yanoshin_id=7, pubdate=datetime(2026, 9, 24, 18, 30, tzinfo=JST),
+            result.items.append(SimpleNamespace(yanoshin_id=7, pubdate=self.published,
                                                 title="業績予想の修正に関するお知らせ",
                                                 code=SimpleNamespace(normalised=self.late)))
         return result
 
 
-def test_a_title_published_between_the_two_reads_is_a_difference_and_is_traced_to_the_titles(env, tmp_path):
+def test_a_title_published_after_the_pc_read_the_index_is_an_expected_timing_difference(env, tmp_path):
+    store = pb._planned_and_built(env)  # the PC read the index at 17:00 JST
+    late = store.read_jsonl("population.jsonl")[0]["code"]
+    target = LocalObjectStore(tmp_path / "cloud", store_id="test")
+    shadow_day_in_store(env, target, yanoshin=_LaterTitle(late))  # a title published at 18:30 JST
+    report = _compare(env, target)
+    statuses = _statuses(report)
+    assert statuses["disclosure_titles"] == statuses["request_hashes_independent_input"] == compare.TIMING
+    assert statuses["request_hashes_same_input"] == compare.EXACT  # the same input builds the same bytes
+    titles = report["items"]["disclosure_titles"]
+    assert [e["code"] for e in titles["examples"]] == [late]
+    assert titles["examples"][0]["titles_only_cloud"][0]["title"] == "業績予想の修正に関するお知らせ"
+    requests = report["items"]["request_hashes_independent_input"]
+    assert {e["code"] for e in requests["examples"]} == {late} and requests["by_status"][compare.UNEXPLAINED] == 0
+    for name in ("universe", "population_at_or_below_3000_yen", "screening_pass", "route_memberships", "primary",
+                 "control", "selected_history_digests"):
+        assert statuses[name] == compare.EXACT, name
+    assert report["stage4"]["may_be_proposed"]  # a timing difference does not block
+
+
+def test_a_title_the_cloud_saw_but_published_before_the_pc_read_is_unexplained(env, tmp_path):
     store = pb._planned_and_built(env)
     late = store.read_jsonl("population.jsonl")[0]["code"]
     target = LocalObjectStore(tmp_path / "cloud", store_id="test")
-    shadow_day_in_store(env, target, yanoshin=_LaterTitle(late))
+    # Published at 16:00 JST, before the PC read the index at 17:00: the PC should have seen it too.
+    shadow_day_in_store(env, target, yanoshin=_LaterTitle(late, published=datetime(2026, 9, 24, 16, 0, tzinfo=JST)))
     report = _compare(env, target)
-    assert not report["all_match"]
-    assert report["items"]["request_hashes_same_input"]["match"]  # the code builds the same bytes from the same input
-    independent = report["items"]["request_hashes_independent_input"]
-    assert independent["different"] >= 1
-    assert {e["code"] for e in independent["explained"]} == {late}
-    assert independent["explained"][0]["reasons"] == ["disclosure titles"]
-    assert independent["explained"][0]["titles_only_cloud"][0]["title"] == "業績予想の修正に関するお知らせ"
-    for name in ("universe", "population_at_or_below_3000_yen", "screening_pass", "route_memberships", "primary",
-                 "control"):
-        assert report["items"][name]["match"], name
+    assert _statuses(report)["disclosure_titles"] == compare.UNEXPLAINED
+    assert report["items"]["request_hashes_independent_input"]["examples"][0]["cause"] == "disclosure titles differ"
+    assert not report["stage4"]["may_be_proposed"]
+    assert report["stage4"]["unexplained_by_group"]["request_build"] == ["request_hashes_independent_input"]
 
 
 class _RevisedBar(_FakeYahoo):
@@ -264,12 +285,19 @@ class _RevisedBar(_FakeYahoo):
         super().__init__({**charts, symbol: revised})
 
 
-def test_a_history_read_differently_is_traced_to_the_prices(env, tmp_path):
+def test_a_history_read_differently_is_an_unexplained_mismatch_traced_to_the_prices(env, tmp_path):
     store = pb._planned_and_built(env)
     code = store.read_jsonl("population.jsonl")[0]["code"]
     target = LocalObjectStore(tmp_path / "cloud", store_id="test")
     shadow_day_in_store(env, target, yahoo=_RevisedBar(env.charts, f"{code}.T"))
     report = _compare(env, target)
-    assert report["items"]["request_hashes_same_input"]["match"]
-    explained = report["items"]["request_hashes_independent_input"]["explained"]
-    assert [(e["code"], e["reasons"]) for e in explained] == [(code, ["price history"])]
+    statuses = _statuses(report)
+    assert statuses["request_hashes_same_input"] == compare.EXACT
+    assert statuses["selected_history_digests"] == compare.UNEXPLAINED
+    assert report["items"]["selected_history_digests"]["examples"] == [code]
+    causes = {e["cause"] for e in report["items"]["request_hashes_independent_input"]["examples"]}
+    assert causes == {"price history differs"}
+    blocking = report["stage4"]["unexplained_by_group"]
+    assert not report["stage4"]["may_be_proposed"]
+    assert blocking["price_history_inputs"] == ["selected_history_digests"]
+    assert blocking["request_build"] == ["request_hashes_independent_input"]

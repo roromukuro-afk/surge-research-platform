@@ -5,6 +5,12 @@ the population at no more than 3,000 yen, the screening pass, the route
 memberships, Primary, Control and the request build hashes. Each is compared
 here, and each disagreement is shown, not summarized away.
 
+Each item is an exact match, an expected timing difference (a disclosure title
+published after the PC read the index: the frozen protocol reads it when the day
+is built) or an unexplained mismatch; a Stage 4 cloud Jev smoke may be proposed
+only with no unexplained mismatch in the universe, the screening, the selection,
+the price histories and the request build (the user, 2026-09-19).
+
 The request hashes are compared twice (vercel-shadow.md section 4):
 
 - **same input** - the cloud's recorded inputs (its prices, its disclosure
@@ -42,6 +48,23 @@ from surge.storage.base import ObjectStore
 
 #: How many disagreeing securities or requests a report lists for each item (the counts are always complete).
 SHOWN = 25
+
+
+EXACT = "exact_match"
+TIMING = "expected_timing_difference"
+UNEXPLAINED = "unexplained_mismatch"
+_RANK = {EXACT: 0, TIMING: 1, UNEXPLAINED: 2}
+#: What must hold no unexplained mismatch before a cloud Jev smoke (Stage 4) is proposed (the user, 2026-09-19).
+STAGE4_GATE = {
+    "universe": ("universe",),
+    "screening": ("population_at_or_below_3000_yen", "screening_pass", "route_memberships"),
+    "selection": ("primary", "control"),
+    "price_history_inputs": ("selected_history_digests",),
+    "request_build": ("request_hashes_same_input", "request_hashes_independent_input"),
+}
+ITEMS = ("universe", "population_at_or_below_3000_yen", "screening_pass", "route_memberships", "primary", "control",
+         "request_hashes_same_input", "request_hashes_independent_input", "selected_history_digests",
+         "disclosure_titles", "sessions", "manifest")
 
 
 class RecordedYanoshin:
@@ -111,6 +134,7 @@ def pc_day(root: Path, cohort_id: str, s0: date) -> dict:
         "requests": store.read_jsonl("requests.jsonl") if store.exists("requests.jsonl") else [],
         "tdnet": tdnet,
         "prices": prices,
+        "archive": archive,
         "status": "sent" if store.exists("stage-run.json") else ("built" if store.exists("stage-build.json")
                                                                   else "planned"),
     }
@@ -200,23 +224,71 @@ def _chosen_titles(record: dict | None, s0: date) -> list[dict]:
     return select_disclosures(items, s0)
 
 
-def explain_request(code: str, *, pc: dict, cloud: dict, s0: date) -> dict:
-    """Why a request's bytes differ: its price history, its disclosure titles, or neither (unexplained)."""
+def _worst(statuses) -> str:
+    return max(statuses, key=_RANK.__getitem__, default=EXACT)
 
-    reasons = []
-    pc_history = _history_digest(pc["prices"][code]) if code in pc["prices"] else None
-    cloud_history = (cloud["digests"].get("histories") or {}).get(code)
-    if pc_history != cloud_history:
-        reasons.append("price history")
-    pc_titles, cloud_titles = _chosen_titles(pc["tdnet"].get(code), s0), _chosen_titles(cloud["tdnet"].get(code), s0)
-    detail = {}
-    if pc_titles != cloud_titles:
-        reasons.append("disclosure titles")
-        pc_read = (pc["tdnet"].get(code) or {}).get("fetched_at")
-        detail["titles_only_pc"] = [t for t in pc_titles if t not in cloud_titles]
-        detail["titles_only_cloud"] = [t for t in cloud_titles if t not in pc_titles]
-        detail["read_at"] = {"pc": pc_read, "cloud": (cloud["tdnet"].get(code) or {}).get("fetched_at")}
-    return {"code": code, "reasons": reasons or ["unexplained"], **detail}
+
+def _pc_history_digests(pc: dict, codes: set[str]) -> dict[str, str]:
+    """The history each code had on the PC, from the PC's own price archive (every security it read)."""
+
+    wanted = set(codes)
+    found = {code: _history_digest(pc["prices"][code]) for code in wanted if code in pc["prices"]}
+    wanted -= set(found)
+    archive = pc.get("archive")
+    if wanted and archive is not None and archive.exists():
+        with gzip.open(archive, "rt", encoding="utf-8") as handle:
+            for line in handle:
+                payload = json.loads(line)
+                if payload["code"] in wanted:
+                    found[payload["code"]] = _history_digest(payload)
+    return found
+
+
+def _causes(codes, *, pc: dict, cloud: dict, universe: dict) -> dict[str, str]:
+    """Why a security came out differently: which side could not read it, or whose history differs."""
+
+    codes = sorted(codes)[:SHOWN]
+    pc_failed = {f["code"] for f in pc["universe"]["failures"]}
+    cloud_failed = {f["code"] for f in universe["failures"]}
+    pc_histories = _pc_history_digests(pc, set(codes))
+    cloud_histories = cloud["digests"].get("histories") or {}
+    causes = {}
+    for code in codes:
+        if code in cloud_failed:
+            causes[code] = "not read on the cloud"
+        elif code in pc_failed:
+            causes[code] = "not read on the PC"
+        elif pc_histories.get(code) != cloud_histories.get(code):
+            causes[code] = "price history differs"
+        else:
+            causes[code] = "same history, different result (unexplained)"
+    return causes
+
+
+def _keyed_item(pc_map: dict, cloud_map: dict, **extra) -> dict:
+    diff = _differences(pc_map, cloud_map)
+    return {"status": EXACT if diff.pop("match") else UNEXPLAINED, **diff, **extra}
+
+
+def _title_status(code: str, *, pc: dict, cloud: dict, s0: date) -> dict:
+    """One security's disclosure titles in the state: equal, later on the cloud only (timing), or otherwise."""
+
+    pc_record, cloud_record = pc["tdnet"].get(code), cloud["tdnet"].get(code)
+    pc_titles, cloud_titles = _chosen_titles(pc_record, s0), _chosen_titles(cloud_record, s0)
+    only_pc = [t for t in pc_titles if t not in cloud_titles]
+    only_cloud = [t for t in cloud_titles if t not in pc_titles]
+    pc_read = None if pc_record is None else datetime.fromisoformat(pc_record["fetched_at"])
+    if pc_record is None or cloud_record is None:
+        status = UNEXPLAINED
+    elif not only_pc and not only_cloud:
+        status = EXACT
+    elif not only_pc and all(datetime.fromisoformat(t["published_at"]) > pc_read for t in only_cloud):
+        status = TIMING  # published after the PC read the index: the frozen protocol reads it when the day is built
+    else:
+        status = UNEXPLAINED
+    return {"code": code, "status": status, "titles_only_pc": only_pc, "titles_only_cloud": only_cloud,
+            "read_at": {"pc": None if pc_record is None else pc_record["fetched_at"],
+                        "cloud": None if cloud_record is None else cloud_record["fetched_at"]}}
 
 
 def compare(pc: dict, cloud: dict, *, s0: date, binding: shadow_day.CohortBinding = shadow_day.OFFICIAL) -> dict:
@@ -225,76 +297,131 @@ def compare(pc: dict, cloud: dict, *, s0: date, binding: shadow_day.CohortBindin
     candidates = _jsonl(files["candidates.jsonl.gz"])
     population = _jsonl(files["population.jsonl"])
     requests = _jsonl(files["requests.jsonl"])
-
     items = {}
-    items["universe"] = {
-        **_differences({i["code"]: i for i in pc["universe"]["issues"]}, {i["code"]: i for i in universe["issues"]}),
-        "workbook_sha256": {"pc": pc["universe"]["workbook_sha256"], "cloud": universe["workbook_sha256"],
-                            "match": pc["universe"]["workbook_sha256"] == universe["workbook_sha256"]},
-        "histories_read": {"pc": pc["universe"]["histories_read"], "cloud": universe["histories_read"]},
-        "failed": {"pc": [f["code"] for f in pc["universe"]["failures"]][:SHOWN],
-                   "cloud": [f["code"] for f in universe["failures"]][:SHOWN]},
-    }
-    items["universe"]["match"] = items["universe"]["match"] and items["universe"]["workbook_sha256"]["match"]
-    items["population_at_or_below_3000_yen"] = _differences(
-        {c["code"]: c["close_as_traded"] for c in pc["candidates"]}, {c["code"]: c["close_as_traded"] for c in candidates})
-    items["screening_pass"] = _differences({c["code"]: c["passed"] for c in pc["candidates"]},
-                                           {c["code"]: c["passed"] for c in candidates})
-    items["route_memberships"] = _differences({c["code"]: c["routes"] for c in pc["candidates"]},
-                                              {c["code"]: c["routes"] for c in candidates})
+
+    same_workbook = pc["universe"]["workbook_sha256"] == universe["workbook_sha256"]
+    items["universe"] = _keyed_item(
+        {i["code"]: i for i in pc["universe"]["issues"]}, {i["code"]: i for i in universe["issues"]},
+        workbook_sha256={"pc": pc["universe"]["workbook_sha256"], "cloud": universe["workbook_sha256"],
+                         "same": same_workbook},
+        histories_read={"pc": pc["universe"]["histories_read"], "cloud": universe["histories_read"]},
+        failed={"pc": [f["code"] for f in pc["universe"]["failures"]][:SHOWN],
+                "cloud": [f["code"] for f in universe["failures"]][:SHOWN]})
+    if not same_workbook:
+        items["universe"]["status"] = UNEXPLAINED
+
+    def screening_item(field: str) -> dict:
+        pc_map = {c["code"]: c[field] for c in pc["candidates"]}
+        cloud_map = {c["code"]: c[field] for c in candidates}
+        item = _keyed_item(pc_map, cloud_map)
+        differing = (set(pc_map) ^ set(cloud_map)) | {k for k in set(pc_map) & set(cloud_map)
+                                                      if pc_map[k] != cloud_map[k]}
+        item["causes"] = _causes(differing, pc=pc, cloud=cloud, universe=universe) if differing else {}
+        return item
+
+    items["population_at_or_below_3000_yen"] = screening_item("close_as_traded")
+    items["screening_pass"] = screening_item("passed")
+    items["route_memberships"] = screening_item("routes")
 
     def cohort_rows(rows: list[dict], cohort: str) -> dict:
         keep = ("code", "route_d_subgroup", "selection_probability", "matched_to", "match_tier", "anonymized_pair",
                 "drift_repeat")
         return {r["sample_id"]: {k: r.get(k) for k in keep} for r in rows if r["cohort"] == cohort}
 
-    items["primary"] = _differences(cohort_rows(pc["population"], "PRIMARY"), cohort_rows(population, "PRIMARY"))
-    items["control"] = _differences(cohort_rows(pc["population"], "CONTROL"), cohort_rows(population, "CONTROL"))
-    items["sessions"] = {"match": pc["sessions"] == json.loads(files["sessions.json"])}
-    items["manifest"] = {"match": _manifest_view(pc["manifest"]) == _manifest_view(json.loads(files["manifest.json"])),
-                         "input_building_code_sha256": {
-                             "pc": pc["manifest"]["input_building_code"]["code_sha256"],
-                             "cloud": json.loads(files["manifest.json"])["input_building_code"]["code_sha256"]}}
+    upstream = any(items[name]["status"] != EXACT for name in ("universe", "population_at_or_below_3000_yen",
+                                                                "screening_pass", "route_memberships"))
+    for name, cohort in (("primary", "PRIMARY"), ("control", "CONTROL")):
+        items[name] = _keyed_item(cohort_rows(pc["population"], cohort), cohort_rows(population, cohort))
+        if items[name]["status"] != EXACT:
+            items[name]["cause"] = ("follows from the differences above" if upstream
+                                    else "same screening, different draw (unexplained)")
+
+    selected = {r["code"] for r in pc["population"]} | {r["code"] for r in population}
+    pc_histories = _pc_history_digests(pc, selected)
+    cloud_histories = cloud["digests"].get("histories") or {}
+    history_diff = sorted(c for c in selected if pc_histories.get(c) != cloud_histories.get(c))
+    items["selected_history_digests"] = {
+        "status": UNEXPLAINED if history_diff else EXACT, "securities": len(selected),
+        "different": len(history_diff), "examples": history_diff[:SHOWN],
+        "rule": "the as-traded history (bars and splits) each selected security was screened and built with",
+    }
+
+    in_both = sorted({r["code"] for r in pc["population"]} & {r["code"] for r in population})
+    titles = [_title_status(code, pc=pc, cloud=cloud, s0=s0) for code in in_both]
+    items["disclosure_titles"] = {
+        "status": _worst(t["status"] for t in titles), "securities": len(titles),
+        "by_status": {s: sum(t["status"] == s for t in titles) for s in (EXACT, TIMING, UNEXPLAINED)},
+        "examples": [t for t in titles if t["status"] != EXACT][:SHOWN],
+        "rule": "titles in the state (60 days to 30 minutes before the cutoff); a title only on the cloud and "
+                "published after the PC read the index is a timing difference",
+    }
+    title_status = {t["code"]: t["status"] for t in titles}
 
     rebuilt = rebuild_from_cloud_inputs(cloud, s0=s0, binding=binding)
     items["request_hashes_same_input"] = {
-        "match": rebuilt.encode("utf-8") == files["requests.jsonl"],
+        "status": EXACT if rebuilt.encode("utf-8") == files["requests.jsonl"] else UNEXPLAINED,
         "rule": "the cloud's recorded inputs built again here by the frozen build: the code, not the data",
     }
     pc_hashes = {f"{r['sample_id']}.{r['variant']}": r["sha256"] for r in pc["requests"]}
     cloud_hashes = {f"{r['sample_id']}.{r['variant']}": r["sha256"] for r in requests}
-    independent = _differences(pc_hashes, cloud_hashes)
-    codes = {row["sample_id"]: row["code"] for row in pc["population"]}
-    differing = sorted({k.rsplit(".", 1)[0] for k in set(pc_hashes) & set(cloud_hashes)
-                        if pc_hashes[k] != cloud_hashes[k]})
-    independent["explained"] = [explain_request(codes[sample], pc=pc, cloud=cloud, s0=s0)
-                                for sample in differing[:SHOWN]]
-    independent["rule"] = "the cloud's hashes against the PC's: the data (prices and disclosure titles read apart)"
-    items["request_hashes_independent_input"] = independent
+    codes = {row["sample_id"]: row["code"] for row in pc["population"] + population}
+    per_request = {}
+    for key in sorted(set(pc_hashes) | set(cloud_hashes)):
+        code = codes[key.rsplit(".", 1)[0]]
+        if pc_hashes.get(key) == cloud_hashes.get(key):
+            per_request[key] = {"status": EXACT}
+        elif key not in pc_hashes or key not in cloud_hashes:
+            per_request[key] = {"status": UNEXPLAINED, "code": code, "cause": "a request only one side built"}
+        elif code in history_diff:
+            per_request[key] = {"status": UNEXPLAINED, "code": code, "cause": "price history differs"}
+        elif title_status.get(code) == TIMING:
+            per_request[key] = {"status": TIMING, "code": code, "cause": "disclosure titles published after the "
+                                                                          "PC read the index"}
+        else:
+            per_request[key] = {"status": UNEXPLAINED, "code": code,
+                                "cause": "disclosure titles differ" if title_status.get(code) == UNEXPLAINED
+                                else "same inputs, different bytes (unexplained)"}
+    items["request_hashes_independent_input"] = {
+        "status": _worst(r["status"] for r in per_request.values()), "requests": len(per_request),
+        "by_status": {s: sum(r["status"] == s for r in per_request.values()) for s in (EXACT, TIMING, UNEXPLAINED)},
+        "examples": [{"request": k, **r} for k, r in per_request.items() if r["status"] != EXACT][:SHOWN],
+        "rule": "the cloud's hashes against the PC's: the data (prices and disclosure titles read apart)",
+    }
 
-    required = ("universe", "population_at_or_below_3000_yen", "screening_pass", "route_memberships", "primary",
-                "control", "request_hashes_same_input", "request_hashes_independent_input")
+    items["sessions"] = {"status": EXACT if pc["sessions"] == json.loads(files["sessions.json"]) else UNEXPLAINED}
+    cloud_manifest = json.loads(files["manifest.json"])
+    items["manifest"] = {
+        "status": EXACT if _manifest_view(pc["manifest"]) == _manifest_view(cloud_manifest) else UNEXPLAINED,
+        "input_building_code_sha256": {"pc": pc["manifest"]["input_building_code"]["code_sha256"],
+                                       "cloud": cloud_manifest["input_building_code"]["code_sha256"]},
+        "rule": "everything but when it started and the git checkout it ran from",
+    }
+
+    blocking = {group: [name for name in names if items[name]["status"] == UNEXPLAINED]
+                for group, names in STAGE4_GATE.items()}
     return {"s0": s0.isoformat(), "cohort_id": binding.cohort_id, "pc_status": pc["status"],
             "cloud_status": cloud["commit"]["status"], "items": items,
-            "all_match": all(items[name]["match"] for name in required),
-            "required": list(required)}
+            "stage4": {"may_be_proposed": not any(blocking.values()), "unexplained_by_group": blocking,
+                       "rule": "no unexplained mismatch in universe, screening, selection, price/history inputs "
+                               "and request build; a timing difference in disclosure titles does not block"}}
 
 
 def render(report: dict) -> str:
+    labels = {EXACT: "exact match", TIMING: "expected timing difference", UNEXPLAINED: "UNEXPLAINED MISMATCH"}
     lines = [f"S0 {report['s0']}  cohort {report['cohort_id']}  (PC: {report['pc_status']}, cloud: "
              f"{report['cloud_status']})"]
-    for name in report["required"] + ["sessions", "manifest"]:
+    for name in ITEMS:
         item = report["items"][name]
         extra = ""
-        if "pc" in item and "cloud" in item and isinstance(item["pc"], int):
+        if isinstance(item.get("pc"), int):
             extra = f"  pc {item['pc']} / cloud {item['cloud']}"
-            if not item["match"]:
-                extra += f"  only pc {len(item['only_pc'])}+, only cloud {len(item['only_cloud'])}+, " \
-                         f"different {item['different']}"
-        lines.append(f"  {'MATCH ' if item['match'] else 'DIFFER'} {name}{extra}")
-    for explained in report["items"]["request_hashes_independent_input"].get("explained", []):
-        lines.append(f"    {explained['code']}: {', '.join(explained['reasons'])}")
-    lines.append("all required items match" if report["all_match"] else "NOT all required items match: no Jev smoke")
+        for key in ("by_status", "different"):
+            if key in item and item["status"] != EXACT:
+                extra += f"  {key}: {item[key]}"
+        lines.append(f"  {labels[item['status']]:<27} {name}{extra}")
+    stage4 = report["stage4"]
+    lines.append("Stage 4 (one cloud Jev smoke) may be proposed" if stage4["may_be_proposed"]
+                 else f"Stage 4 may NOT be proposed: {stage4['unexplained_by_group']}")
     return "\n".join(lines)
 
 
@@ -315,12 +442,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         args.json.write_text(json.dumps(report, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
     print(render(report))
-    return 0 if report["all_match"] else 1
+    return 0 if report["stage4"]["may_be_proposed"] else 1
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["RecordedYanoshin", "cloud_day", "compare", "explain_request", "main", "pc_day",
-           "rebuild_from_cloud_inputs", "render"]
+__all__ = ["EXACT", "ITEMS", "STAGE4_GATE", "TIMING", "UNEXPLAINED", "RecordedYanoshin", "cloud_day", "compare",
+           "main", "pc_day", "rebuild_from_cloud_inputs", "render"]
