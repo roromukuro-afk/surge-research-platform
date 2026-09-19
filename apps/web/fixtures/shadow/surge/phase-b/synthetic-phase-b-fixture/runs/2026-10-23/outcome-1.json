@@ -1,0 +1,35 @@
+{
+  "job": "outcome",
+  "started_at": "2026-10-23T18:00:03+09:00",
+  "cohort_id": "synthetic-phase-b-fixture",
+  "code": {
+    "head": "53ef55dec9446592750c7464b3675acb7c0605e6",
+    "expected_commit": null
+  },
+  "status": "outcomes_frozen",
+  "exit_code": 0,
+  "due": [
+    "2026-09-24"
+  ],
+  "outcomes": {
+    "2026-09-24": {
+      "status": "frozen",
+      "attempt": 1,
+      "t_plus_20": "2026-10-23",
+      "resolution": {
+        "RESOLVED": 27,
+        "UNRESOLVED_MISSING_DATA": 0,
+        "PENDING": 0
+      }
+    }
+  },
+  "report": {
+    "file": "report-1.json",
+    "status": "partial",
+    "resolved": 27,
+    "unresolved": 81,
+    "cohort_completion_rate": 0.25
+  },
+  "finished_at": "2026-10-23T18:00:03+09:00",
+  "system": "synthetic-fixture"
+}

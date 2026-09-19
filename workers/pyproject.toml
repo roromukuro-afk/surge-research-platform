@@ -21,6 +21,9 @@ r2 = ["boto3>=1.35"]
 # HTTPS session (curl_cffi impersonating Chrome) as it is. Tests use fakes and
 # do not need it.
 yahoo = ["curl_cffi>=0.13,<1"]
+# The Phase B web shadow's private Vercel Blob store (D-279). Tests use a fake
+# client with Blob's semantics and do not need it.
+vercel-blob = ["vercel>=0.11.3,<1"]
 
 [build-system]
 requires = ["hatchling"]

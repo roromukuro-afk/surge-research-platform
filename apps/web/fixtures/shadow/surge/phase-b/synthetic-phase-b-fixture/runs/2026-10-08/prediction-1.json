@@ -1,0 +1,14 @@
+{
+  "job": "prediction",
+  "started_at": "2026-10-08T16:10:05+09:00",
+  "cohort_id": "synthetic-phase-b-fixture",
+  "code": {
+    "head": "53ef55dec9446592750c7464b3675acb7c0605e6",
+    "expected_commit": null
+  },
+  "status": "cohort_complete",
+  "exit_code": 0,
+  "detail": "4 business days sent (2026-09-24 to 2026-09-30)",
+  "finished_at": "2026-10-08T16:10:05+09:00",
+  "system": "synthetic-fixture"
+}

@@ -1,0 +1,162 @@
+{
+  "cohort_id": "synthetic-phase-b-fixture",
+  "phase": "B",
+  "evaluation_version": "jev-eval-1.1.0",
+  "created_at": "2026-09-19T13:07:07.336990+00:00",
+  "experiment_seed": "phase-b-test-seed",
+  "prospective_start": "2026-09-24",
+  "per_day": {
+    "primary": 60,
+    "control": 20,
+    "anonymized": 8,
+    "drift": 4,
+    "max_requests": 92
+  },
+  "target_business_days": 4,
+  "targets": {
+    "primary": 240,
+    "control": 80,
+    "main": 320
+  },
+  "provider": "typesafe-direct",
+  "requested_model": "jev-1.13.0",
+  "pinned_served_model": "jev-1.13.0",
+  "model_pinning": {
+    "requested_model": "jev-1.13.0",
+    "endpoint": "https://api.typesafe.ai/v1/systemone",
+    "upstream": "typesafe-ai (TypeSafe System One), called directly",
+    "pinning": "a version id as `model` (docs.typesafe.ai/models.md); on 2026-09-19 a request pinned to jev-1.13.0 was answered by jev-1.13.0",
+    "served": "every answer's `model` must be jev-1.13.0; any other stops the whole cohort",
+    "fallback": null
+  },
+  "gateway": "not used for the cohort: its answers carry no version, so it cannot be held to the pin",
+  "pacing": "one request every 5 seconds (surge.evaluation.pacing, typesafe-direct)",
+  "budget": {
+    "global_hard_cap_usd": "2.50",
+    "daily_budget_usd": "0.12",
+    "daily_max_requests": 92,
+    "credit": "the latest TypeSafe console snapshot less the spend recorded since, until the expiry it showed; no paid credit"
+  },
+  "send_window": "from the S0 session end plus twice Yahoo's delay (every bar final, D-262) until 09:00 JST on the next weekday (the earliest S1 can open)",
+  "frozen": {
+    "evaluation_version": "jev-eval-1.1.0",
+    "method": {
+      "canonical": {
+        "path": "docs/prompts/short-surge-v5.1.original.md",
+        "sha256": "32bf001eeec2c6a1e1bbde7256f6cb591a18f511bcae6383a9971845579f877a"
+      },
+      "addenda_newer_overrides_older": [
+        {
+          "path": "docs/prompts/addenda/v5.1-addendum-2026-09-15.md",
+          "sha256": "36eecbe64debc4688c4bf35159bdbb25ebe3b79caef556b9d9b7973646de3b36"
+        },
+        {
+          "path": "docs/prompts/addenda/v5.1-addendum-2026-09-15-phase0.1-audit.md",
+          "sha256": "e29b8f71f872523db790107423e91f852571949c1bdcc2bd0d385a3bf21c9814"
+        },
+        {
+          "path": "docs/prompts/addenda/v5.1-addendum-2026-09-15-phase0.2-audit.md",
+          "sha256": "dd9724381e41038782a50456ff896c9e508ef0f51eb43193b427e1ad54d9fbf6"
+        },
+        {
+          "path": "docs/prompts/addenda/v5.1-addendum-2026-09-15-phase0.2-final-patch.md",
+          "sha256": "10b0b6186cfacd26fc7a68417123f58a61d314ede78c385d12c6db13b486f249"
+        },
+        {
+          "path": "docs/prompts/addenda/v5.1-addendum-2026-09-18-eod-prediction.md",
+          "sha256": "c709d3f98cc2e2afb2358a9747718d402c8a3b9efb82fdc598bf10cbdd40227a"
+        }
+      ]
+    },
+    "question_schema_hash": "e500a1c57a343e3ac45fdb869c826db550ba92f5414a0f061ba99da21e52d617",
+    "state_version": "eval-state-1",
+    "screener": {
+      "definition": "Routes A-H (route-1.0.0) on features-1.0.0, replayed point-in-time at S0; material routes M1-M6 and Stage 2 are not replayed",
+      "route_version": "route-1.0.0",
+      "feature_version": "features-1.0.0",
+      "price_limit_jpy": "3000",
+      "history_lookback_days": 400
+    },
+    "selection": {
+      "version": "phase-b-selection-1.0.0",
+      "prospective_start": "2026-09-24",
+      "per_day": {
+        "primary": 60,
+        "control": 20,
+        "anonymized": 8,
+        "drift": 4,
+        "max_requests": 92
+      }
+    },
+    "outcome": {
+      "version": "eval-outcome-1.0.0",
+      "definition": {
+        "version": "eval-outcome-1.0.0",
+        "base": "S0 close as traded (split restatement undone)",
+        "window": "S1..S20, T+n = n-th market session after S0",
+        "share_basis": "prices after S0 restated to S0's share count",
+        "hit_20_high": "some intraday high in S1..S20 >= base x 1.20",
+        "hit_20_close": "some close in S1..S20 >= base x 1.20",
+        "returns": "close(T+n) / base - 1 for n in 1, 3, 5, 10, 20",
+        "max_upside": "max high (and max close) in S1..S20 / base - 1",
+        "max_drawdown": "min low (and min close) in S1..S20 / base - 1",
+        "missing": "a session without a bar makes the outcome UNRESOLVED_MISSING_DATA; nothing is filled in",
+        "label_status": "neither hit definition is the label (D-268); not merged with success_label"
+      }
+    },
+    "decision_interpretation": {
+      "version": "jev-answer-reading-1.0.0",
+      "decision": "answers.decision.choice as returned (ENTRY / WATCH_BREAKOUT / WATCH_PULLBACK / WATCH_OTHER / REJECT); no code-side override",
+      "reaches_target": "answers.reaches_target.noul as returned, the probability of yes; no probability threshold",
+      "upside": "answers.upside_band.score and its probabilities as returned",
+      "basis": "answers.basis_*.noul as returned",
+      "confidence": "recorded as returned; no confidence threshold, never used to filter or re-weight",
+      "repeats": "one answer per sample; drift repeats are measured apart and never averaged into it",
+      "raw_output": "kept as it came beside each record",
+      "prediction_row_sha256": "20d597222ba16a067bb4505e551cc502d18927284529862393f40dae1b81fef1"
+    },
+    "files_sha256": {
+      "workers/src/surge/analysis/jev_questions.py": "46bdef820a4c445b58f09a7666cc56d6bd851ca3a40bdbcd325054fff8f2ac96",
+      "workers/src/surge/evaluation/state.py": "c9059e8bb7f414e0caca1aec59548dad56d7d69145b76e5dea2a427366502df4",
+      "workers/src/surge/evaluation/universe.py": "6474b92eff0a73fe5a14aca23c8820baf9a5f8e975ccef1287f62fca5d43b4c4",
+      "workers/src/surge/evaluation/population.py": "a7b2fba3f5b7139bac8a15c00a7b38d433eae842061ae1a1cedcbea3e381ea9e",
+      "workers/src/surge/evaluation/selection.py": "82fbdc236a562e274916149f70d3d9bdc90b5cc19e0ea733faec39d6d6c162e7",
+      "workers/src/surge/evaluation/outcome.py": "e3489672f12f8e6ea0b60805a48dbd7bc990ef454c7e537253ef4df5b81a611a",
+      "workers/src/surge/market/series.py": "659aa1b3a52627aa13cbbfb39fd1eabeb36bc740afa9e25ee8d8ca5b32a60a3c",
+      "workers/src/surge/features/engine.py": "806745ddfe8669de246874fc5fd1bdf5c34778f1d8e80566548327f4727023d2",
+      "workers/src/surge/features/indicators.py": "ff87cc7e46d2f07e126e12a24e13338868cfdde6b0b551665b9593c054e41a04",
+      "workers/src/surge/routes/engine.py": "a7dc13a1ba0ef2e68ecae011e953d56e90a3431db906de6d06ff94ca06dc3ecb"
+    }
+  },
+  "frozen_fingerprint": "73cceb0db1be4e3dcd3a44b5d590bdb31775fa21a712bb473bfea5b725e4bcf6",
+  "preregistered": {
+    "route_d_subgroups": {
+      "D_ONLY": "Route D is the only route that fired",
+      "D_PLUS_OTHER": "Route D fired together with at least one other route",
+      "NON_D": "at least one route fired, Route D did not"
+    },
+    "route_d_handling": "Route D's thresholds and definition are unchanged; D-only candidates are drawn like any other (no exclusion, no down-weighting); changes are considered only after Phase B",
+    "subgroup_metrics": [
+      "reaches_target calibration (10 bins, ECE) and Brier, for +20% on the high and on the close",
+      "+20% hit rate, on the high and on the close",
+      "decision distribution",
+      "upside score (mean, median)",
+      "maximum future return (max upside on the high and on the close; mean, median)",
+      "maximum drawdown (on the low and on the close; mean, median)"
+    ],
+    "cohorts_pooled": false,
+    "primary_metrics": "Brier and Brier skill, calibration, PR-AUC, hit rate by decision, score against future return (Primary only); Control is a benchmark with hit rates only"
+  },
+  "not_introduced": [
+    "a probability threshold",
+    "a confidence threshold",
+    "averaging repeated answers (3-run or any other)",
+    "a code-side override of Jev's decision",
+    "Jev in production predictions",
+    "registration in the teacher dataset"
+  ],
+  "storage": {
+    "database_writes": "none",
+    "teacher_admissible": false
+  }
+}

@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@vercel/blob": "2.8.0",
     "next": "^15.5.25",
     "pg": "8.13.1",
     "react": "19.0.0",

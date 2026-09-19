@@ -1,0 +1,22 @@
+{
+  "job": "prediction",
+  "started_at": "2026-09-28T16:10:05+09:00",
+  "cohort_id": "synthetic-phase-b-fixture",
+  "code": {
+    "head": "53ef55dec9446592750c7464b3675acb7c0605e6",
+    "expected_commit": null
+  },
+  "status": "stopped",
+  "exit_code": 2,
+  "s0": "2026-09-28",
+  "schedule": {
+    "s0": "2026-09-28",
+    "window_open": true,
+    "opens_at": "2026-09-28T07:10:00+00:00",
+    "closes_at": "2026-09-29T00:00:00+00:00"
+  },
+  "detail": "S0 2026-09-28: 37 of 40 histories read (92.5%), below 95%; the day is not drawn from",
+  "marker": "day-stopped-1.json",
+  "finished_at": "2026-09-28T16:10:23+09:00",
+  "system": "synthetic-fixture"
+}

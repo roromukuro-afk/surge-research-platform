@@ -1,0 +1,22 @@
+{
+  "job": "prediction",
+  "started_at": "2026-09-21T16:10:05+09:00",
+  "cohort_id": "synthetic-phase-b-fixture",
+  "code": {
+    "head": "53ef55dec9446592750c7464b3675acb7c0605e6",
+    "expected_commit": null
+  },
+  "status": "closed_day",
+  "exit_code": 0,
+  "today": "2026-09-21",
+  "closed": "敬老の日",
+  "schedule": {
+    "s0": null,
+    "window_open": false,
+    "next_s0": "2026-09-24",
+    "opens_at": "2026-09-24T07:10:00+00:00",
+    "closes_at": "2026-09-25T00:00:00+00:00"
+  },
+  "finished_at": "2026-09-21T16:10:05+09:00",
+  "system": "synthetic-fixture"
+}

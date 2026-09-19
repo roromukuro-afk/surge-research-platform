@@ -1,0 +1,10 @@
+{
+  "provider": "typesafe-direct",
+  "confirmed_balance_usd": "5.00",
+  "confirmed_at": "2026-09-19T08:43:13+00:00",
+  "expires_at": "2026-10-19T00:00:00+00:00",
+  "displayed_expiry": "Oct 19, 2026",
+  "source": "test",
+  "recorded_at": "2026-09-19T09:00:00+00:00",
+  "file": "typesafe-1.json"
+}

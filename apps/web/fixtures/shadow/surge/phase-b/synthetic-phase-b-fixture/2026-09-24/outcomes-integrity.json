@@ -1,0 +1,39 @@
+{
+  "schema": "phase-b-shadow-artifacts-1",
+  "prefix": "surge/phase-b/synthetic-phase-b-fixture/2026-09-24",
+  "committed_at": "2026-10-27T10:30:00+00:00",
+  "system": "synthetic-fixture",
+  "official": false,
+  "cohort_id": "synthetic-phase-b-fixture",
+  "s0": "2026-09-24",
+  "stage": {
+    "stage": "outcomes",
+    "finished_at": "2026-09-19T13:07:28.309814+00:00",
+    "files_sha256": {
+      "outcome-attempts/1/prices.jsonl.gz": "cd577223d793f9cc36f1a0e41f48d06a2cb80b67cfb0b6f3826cda8276b7233e",
+      "outcome-attempts/1/sessions.json": "068b897e8175d10149d8ab241ae72842501a356c3e94194c9fb0f5c7159b969f",
+      "outcome-attempts/1/outcomes.jsonl": "0a43a623b3820b5dd3fd06f560e49f4613b8a026b4c81e2d3660c6ade4cfa79e",
+      "outcome-attempts/1/outcomes.parquet": "f3142beb0a8405d634860534f368e53fe6ee2cab32d88b86f4bd34da533198bd"
+    },
+    "frozen_at": "2026-10-23T18:00:03+09:00",
+    "t_plus_20": "2026-10-23",
+    "attempt": 1,
+    "outcomes_file": "outcome-attempts/1/outcomes.jsonl",
+    "outcome_version": "eval-outcome-1.0.0",
+    "answers_read": false,
+    "prices_read_after_t_plus_20": true,
+    "resolution": {
+      "RESOLVED": 27,
+      "UNRESOLVED_MISSING_DATA": 0,
+      "PENDING": 0
+    }
+  },
+  "teacher_admissible": false,
+  "artifacts": {
+    "outcomes.jsonl": {
+      "sha256": "0a43a623b3820b5dd3fd06f560e49f4613b8a026b4c81e2d3660c6ade4cfa79e",
+      "bytes": 18112,
+      "content_type": "application/x-ndjson"
+    }
+  }
+}

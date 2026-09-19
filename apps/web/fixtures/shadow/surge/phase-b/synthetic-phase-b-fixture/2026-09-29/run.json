@@ -1,0 +1,255 @@
+{
+  "stages": {
+    "build": {
+      "stage": "build",
+      "finished_at": "2026-09-19T13:07:19.378250+00:00",
+      "files_sha256": {
+        "inputs/tdnet/3000.json": "009c36ce3d7e54d51ca1ed83d80d9762210565fcf4cd123416e790869b05d798",
+        "inputs/tdnet/3001.json": "7ebd136a2df737a31a41af3071dea229c3e9e392238a9355210ef1cb0a331489",
+        "inputs/tdnet/3002.json": "d9de13c6ae8897fd593a810b59f4c86b3e496eab6c73e46c5505b73c41a1837d",
+        "inputs/tdnet/3004.json": "855dcdb95c450e8893d18c03a7b8b6d30e33f0e0b0eef72294dade4f3caec3ba",
+        "inputs/tdnet/3005.json": "db4ce1fcaecefa6d3335e1fd55bd1cfd2cda37c27fabc88515a14d4d3831d512",
+        "inputs/tdnet/3006.json": "29af075e5b9b1d6c655b4e4f6caa01aaf1a535f5c20d54566950b1d053d243e7",
+        "inputs/tdnet/3007.json": "34518d8dab8b96370466b11cad2d4f34e1b6526e76c07520c4ef64a75d5f1776",
+        "inputs/tdnet/3008.json": "6295a0e8fece222b669b32a7ad93be4863c69013f674d97df5e66e79baac0970",
+        "inputs/tdnet/3010.json": "8505b1bdaea1c0e9363e889c8ec6675cebb345be8a83e2887eb06cc421a0a746",
+        "inputs/tdnet/3012.json": "1b2627365589de82e2773d23e2b63505e3da0f4e0bcb9ee2db5f91e175bb9bfa",
+        "inputs/tdnet/3014.json": "d7f8d6781930c3a15b38e75375479a85adbee236d951452b1f4aeca7eb138353",
+        "inputs/tdnet/3015.json": "9ca0bf889cbc9317b42ef76f7684d1a052084c61bd6e44d5cc64504c3563bdbf",
+        "inputs/tdnet/3016.json": "355cc4fd4f51eb6a32815cc37fe696e3bc3922082bea45483b4f7ce2aaa065d3",
+        "inputs/tdnet/3017.json": "19a6d5eb7ea3f5f82566c5201af3c60f1e06e2738b843359cf5834dff4531275",
+        "inputs/tdnet/3018.json": "d60fe2f7b36a8d2f70aaf4a170a5b92918d4160e33b97c6e140c1b1f76bf7ec0",
+        "inputs/tdnet/3020.json": "e3380cfcacd30295438f6931eb35763bd00af9684a54d0e10647c896890c0999",
+        "inputs/tdnet/3022.json": "4ed3508b6bbb84599a84f480dae5c27693212fa314fa27334355cbeeedcf5e7f",
+        "inputs/tdnet/3024.json": "90a3764ffd223e98aa22dc803ec37c7522d3e84889acb5bd04f236fb6ee439f0",
+        "inputs/tdnet/3026.json": "e6f4b2a569430aaa0b19d4a2c00ffd5ff8a4b96e02ab81aa21d0a24862ccc378",
+        "inputs/tdnet/3028.json": "01ee7a333b99bc34594d7f14b78dbd1e9d18cb714c8937dc2e5a0635c312e0c4",
+        "inputs/tdnet/3030.json": "e9db70201ca20e927401616da05cddca3ed79cc7d89d3623ca437b1a02eebe02",
+        "inputs/tdnet/3032.json": "57486df4afa2542621fd4cb2d753edc5d5943df02f7b9232f2009625e132b808",
+        "inputs/tdnet/3034.json": "d33a5466794e78e42f95ffc76699ae609f14c6d6c37fff936f8238f13d3a6542",
+        "inputs/tdnet/3035.json": "fa39131242a7b3dda3eac7919172386de689236cee6c5e5756b6277ffca8d0b4",
+        "inputs/tdnet/3036.json": "183c3d6ca00c2fc2972882f4c26d86c8c15b946f62978e4985221fd8fdea874a",
+        "inputs/tdnet/3038.json": "a4d333b02f42451b67f106cd3cf64515b5f07f83c8cbbaa39a16327adc7a8ce3",
+        "inputs/tdnet/3039.json": "925cd55c29ee25492fa284f14d9bfc5984df062c2c60003c692168b364d73352",
+        "requests/5c7ef52b6a379353.main.json": "0b53f91f2adc01da65895363c0d3c1abf404674622334feb0b404d2cc3b16a1b",
+        "requests/74c0ff9a6f2d58ed.main.json": "99d3fb187d0e59b37b02ea1f4ab7fa6a898ce6a03232b31fef5cacaea1d4cc3c",
+        "requests/74c0ff9a6f2d58ed.anonymized.json": "ddea76154021c862dd8d63829538fc2097f0695a33bb47e97ef1275b12e770d9",
+        "requests/579ea040b93c2665.main.json": "c6dbbfc4e37e7d992bed2120caaca2f3852005a2458eb6c90ea16aa9575c700d",
+        "requests/405bdb0ae614070d.main.json": "11852813a76eb8ed3fd51d9b28ca0b9ce7327d02f50ea620299f3d5ec71a54f1",
+        "requests/405bdb0ae614070d.anonymized.json": "d60e574fc725de8fe78b0332f197b32cdf27c2e22d6687dfcbb3c812b38b7a54",
+        "requests/1d95169f39bd2040.main.json": "918511bf063943150955040d5fefda3e43d43ce29e0acab782141de929e62169",
+        "requests/ecfffb849d86e0a0.main.json": "4cae3af28752ac5547417e22825fc9d1ad869bbe756dad230b00d9b1d3e9b11b",
+        "requests/61b9899a279b1e7c.main.json": "5571ee16c25c8049c61981b8cbdfd2a403ff53cb5d66fc86ffc732e6c292bf75",
+        "requests/64f4a25ad8b1170d.main.json": "e785858b585b036c0335478b6701acab0c8d837b0bf136021a6cd7f29ef34873",
+        "requests/daf17e0f82d48041.main.json": "a916599afd9cf48e4027ab07c264d3040f535e48f4b8f96d1690446889a53a7a",
+        "requests/b4f007285e4565c4.main.json": "2a57cf665e0fb9464bedbd23d482f4e1edf62a3cac5cf3336d9a43e2d4a071d2",
+        "requests/16cbcf1ea31e6c0c.main.json": "9154f57c6058f2f0b34b00164919f32bca518d6089f1e941e15695ab65626dfc",
+        "requests/6b53928517a12751.main.json": "9e76a4f9b898d3706aa99f4286180385103f7ce7f354812e2b3961ab2c7cf98f",
+        "requests/322a8a62deb056b9.main.json": "ddfaefdc3fe46d08ff35486e626c3c884527c5054e7dbb5b7277e2e77769eaac",
+        "requests/51ce65119dfb2a35.main.json": "7a8dc20a17aab18342114c50465c881f9c225f436864daa868a63230edb2b162",
+        "requests/7e175bb68e357846.main.json": "7e2c56a0ccda4730bd215072037cff9fae777a5d549a6451c005cebc503af7f0",
+        "requests/27c694bcb9f4bc96.main.json": "13bfe34fa1891813cb830a9dd48850a3fc51ad282a76a3733448e466db1282ab",
+        "requests/33cde47a4b59726f.main.json": "e0f91af18065fdfbb17c35941aae6d8ab2473ba02d4fdbcde66f6db6885b5312",
+        "requests/c4892d1c6becea6a.main.json": "f290dcaece18e782c50ed597f076de0c40f40040f767644397268e9790f81f90",
+        "requests/c6c2aabee3519401.main.json": "b6c9548372121134bfd79adf620bd8e64e1099fbcda03b05efefd9dde83f61f3",
+        "requests/d277241b3c080772.main.json": "927d66522fd81cc024908390b6e02e4bad7b2992a79f950a5b1d5d3dbcc5bb70",
+        "requests/ee547e6bf2ba47fa.main.json": "bbd65d3543ac9d704bc099d53feba4960fde5ba0c92434263d3051a7b4524d1f",
+        "requests/2d2b43a02ba69a19.main.json": "5718a891e9033f4ae7c9117d1a08928e228a73d7ddf0799a9df0dce18872a8cb",
+        "requests/ef4e3b1a615f13c0.main.json": "571cbfe2ae881ca7b086be71c7eefcf0a6072c78f03f4a1d8c5e249633aa72b4",
+        "requests/74761804e29e8744.main.json": "8b58c1bacb289bd7ec1a085c3a36e14057ecc424648a05704a0d0ae2a7e9d929",
+        "requests/367d8c9bfe13568b.main.json": "b110d55ba7c04ac5343f6810e4346538937f3a46a4b735d2c67478bf66994183",
+        "requests/cea8784cc21f8bf6.main.json": "517b43556292240bc61286fed6b358a80078df045f170e1bd3babc464501f8d3",
+        "requests/9f79f9f619306764.main.json": "5462479a15f38a48ecd61dc15c2787a5004f2b3af72dcf37e086cb90a1c382da",
+        "requests.jsonl": "77899b7bfbe937ee2ba306685f0312e1a2a571d9f26217e26c2ab7895203a6d8"
+      },
+      "requests": 30,
+      "by_variant": {
+        "main": 27,
+        "anonymized": 2,
+        "drift": 1
+      },
+      "o200k_tokens": {
+        "min": 11721,
+        "max": 11779,
+        "mean": 11752
+      },
+      "estimated_usd_total": "0.019990446",
+      "disclosure_coverage": {
+        "COMPLETE": 27,
+        "INCOMPLETE": 0
+      }
+    },
+    "plan": {
+      "stage": "plan",
+      "finished_at": "2026-09-19T13:07:18.493895+00:00",
+      "files_sha256": {
+        "inputs/prices.jsonl.gz": "855a25b9bc7df9a9b514a641c397723d545acc1d91a16940ab380df30fd8ef66",
+        "inputs/universe.json": "5498ded2131ea068572f92ffc16c2549e7650753791f1bfd22337acf5a810c13",
+        "sessions.json": "949201ae1566737090fd948feb3b11f280c3f1e0d6d41914c2bbe17fe1d778ff",
+        "screening.parquet": "7fbb59c1fa36a6a48d7b3bd18f0fb2d03c86f589a55e4aed8256ff12ffd5cd3b",
+        "candidates.jsonl": "2d20ba322a869b16f71155b3eaf37439303d8f91bb3fd2c4e195f0387f4b7f56",
+        "candidates.parquet": "280b1a367823e00ffc9304c4203c64144f5b82cd43f04dedc1ed283b16b31616",
+        "population.jsonl": "15ff46ebd625ca89d3110e86b798696e66c39f78a3258ac9848ff7f06c79a8c4",
+        "population.parquet": "8a9c5a8761e3e811a159ee27ccfd8718dc9a2f6a44c2d11444f5b1f882ea1340",
+        "manifest.json": "adb429404eafe6541902ecb7e97348d2a66444de1f248da3584e1b858b605fcf"
+      },
+      "s0": "2026-09-29",
+      "issues": 40,
+      "histories_read": 40,
+      "failed": 0,
+      "coverage": 1.0,
+      "eligible": 40,
+      "passing": 20,
+      "not_passing": 20,
+      "passing_share": 0.5,
+      "route_membership_among_passing": {
+        "A": 6,
+        "B": 3,
+        "C": 0,
+        "D": 11,
+        "E": 0,
+        "F": 0,
+        "G": 0,
+        "H": 3
+      },
+      "route_d_subgroups_among_passing": {
+        "D_ONLY": 8,
+        "D_PLUS_OTHER": 3,
+        "NON_D": 9
+      },
+      "route_d_subgroups_selected": {
+        "D_ONLY": 8,
+        "D_PLUS_OTHER": 3,
+        "NON_D": 9
+      },
+      "primary_selection_probability": 1.0,
+      "selected": {
+        "primary": 20,
+        "control": 7,
+        "anonymized": 2,
+        "drift": 1
+      },
+      "requests": 30,
+      "control_match_tiers": {
+        "PRICE+LIQUIDITY": 7
+      }
+    },
+    "run": {
+      "stage": "run",
+      "finished_at": "2026-09-19T13:07:20.896802+00:00",
+      "files_sha256": {
+        "predictions.jsonl": "ff2b6342534db1b1edb8a113941af24bcd71ba2ac480f0014dbb7ad606ecf675",
+        "predictions.parquet": "5a339ffcc5f3d3bad37b698aa4a8d07e081d931aa378cfc6ce417c0624c1d768",
+        "paired_anonymized.parquet": "9036fc1f133a7b4d8d654b5762ff00496b9ad258d729f12ddc1b01192a76abdb",
+        "drift.parquet": "c5b99db07e60824dd77b1cf0f02bffc2546aae47469b869fde0dd78a80068173"
+      },
+      "provider": "typesafe-direct",
+      "served_model": "jev-1.13.0",
+      "sent_this_time": 30,
+      "requests_answered": 30,
+      "spent_usd": "0.017755080",
+      "stopped": null,
+      "estimated_charges": [],
+      "credits_before": {
+        "balance": "4.964496014",
+        "confirmed_balance": "5.00",
+        "confirmed_at": "2026-09-19T08:43:13+00:00",
+        "expires_at": "2026-10-19T00:00:00+00:00",
+        "displayed_expiry": "Oct 19, 2026",
+        "spent_since_confirmation": "0.035503986",
+        "snapshot": "typesafe-1.json",
+        "source": "the operator's console snapshot less this system's recorded spend since"
+      },
+      "max_requests_in_policy_window": 12,
+      "cohort_spent_usd": "0.053259066",
+      "cohort_cap_usd": "2.50",
+      "credits_after": {
+        "balance": "4.946740934",
+        "confirmed_balance": "5.00",
+        "confirmed_at": "2026-09-19T08:43:13+00:00",
+        "expires_at": "2026-10-19T00:00:00+00:00",
+        "displayed_expiry": "Oct 19, 2026",
+        "spent_since_confirmation": "0.053259066",
+        "snapshot": "typesafe-1.json",
+        "source": "the operator's console snapshot less this system's recorded spend since"
+      },
+      "budget": {
+        "max_usd": "0.12",
+        "max_requests": 92
+      }
+    }
+  },
+  "preflight": [
+    {
+      "checked_at": "2026-09-29T16:10:17+09:00",
+      "run_id": "synthetic-phase-b-fixture/days/2026-09-29",
+      "phase": "B",
+      "cohort_id": "synthetic-phase-b-fixture",
+      "s0": "2026-09-29",
+      "provider": "typesafe-direct",
+      "requested_model": "jev-1.13.0",
+      "pinned_served_model": "jev-1.13.0",
+      "samples": {
+        "PRIMARY": 20,
+        "CONTROL": 7
+      },
+      "requests": {
+        "main": 27,
+        "anonymized": 2,
+        "drift": 1
+      },
+      "requests_total": 30,
+      "selection_reproduced": true,
+      "limit_problems": [],
+      "leakage_and_integrity": {
+        "samples_checked": 27,
+        "samples_with_violations": 0,
+        "violations": {}
+      },
+      "o200k_tokens": {
+        "min": 11721,
+        "max": 11779,
+        "mean": 11752
+      },
+      "estimated_jev_tokens_max": 15902,
+      "estimated_usd_total": "0.019990446",
+      "budget": {
+        "max_usd": "0.12",
+        "max_requests": 92
+      },
+      "global_cap": {
+        "cap_usd": "2.50",
+        "spent_before_usd": "0.035503986",
+        "day_spent_usd": "0",
+        "after_this_day_estimated_usd": "0.055494432"
+      },
+      "credits": {
+        "balance": "4.964496014",
+        "confirmed_balance": "5.00",
+        "confirmed_at": "2026-09-19T08:43:13+00:00",
+        "expires_at": "2026-10-19T00:00:00+00:00",
+        "displayed_expiry": "Oct 19, 2026",
+        "spent_since_confirmation": "0.035503986",
+        "snapshot": "typesafe-1.json",
+        "source": "the operator's console snapshot less this system's recorded spend since"
+      },
+      "budget_problems": [],
+      "send_window": {
+        "opens_at": "2026-09-29T07:10:00+00:00",
+        "closes_at": "2026-09-30T00:00:00+00:00",
+        "checked_at": "2026-09-29T16:10:17+09:00"
+      },
+      "window_problems": [],
+      "ready_to_send": true
+    }
+  ],
+  "run_started": [
+    {
+      "started_at": "2026-09-29T16:10:17+09:00",
+      "pending": 30,
+      "provider": "typesafe-direct"
+    }
+  ],
+  "run_stopped": [],
+  "day_stopped": []
+}

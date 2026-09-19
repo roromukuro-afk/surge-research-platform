@@ -55,6 +55,9 @@ htmlcov/
 *.jsonl.gz
 *.xlsx
 *.xls
+# The web shadow's fixture is made-up data (scripts/make_shadow_fixture.py, D-279), kept in the
+# shadow's own format, which compresses some artifacts.
+!apps/web/fixtures/shadow/**/*.jsonl.gz
 
 # --- database dumps ---
 *.dump

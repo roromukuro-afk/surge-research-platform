@@ -153,6 +153,11 @@ jobs:
       - name: Read every contract as the web principal
         working-directory: apps/web
         run: node scripts/contract-smoke.mjs
+      # The Phase B shadow's screens read artifacts at request time and check each
+      # against its integrity record: render them all from the synthetic fixture.
+      - name: Render the Phase B shadow screens from the fixture
+        working-directory: apps/web
+        run: node scripts/shadow-smoke.mjs
 
   secret-scan:
     runs-on: ubuntu-latest

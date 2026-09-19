@@ -1,0 +1,24 @@
+{
+  "schema": "phase-b-shadow-artifacts-1",
+  "prefix": "surge/phase-b/synthetic-phase-b-fixture/2026-09-28",
+  "committed_at": "2026-10-27T10:30:00+00:00",
+  "system": "synthetic-fixture",
+  "official": false,
+  "cohort_id": "synthetic-phase-b-fixture",
+  "s0": "2026-09-28",
+  "status": "stopped",
+  "source": {
+    "layout": "RunStore (the PC, D-277)",
+    "files_sha256": {}
+  },
+  "request_bodies": "not stored: each body's SHA-256 is in requests.jsonl, and a body is rebuilt from the stored inputs and the method at the recorded hashes (it holds Canonical v5.1 and the addenda in full)",
+  "teacher_admissible": false,
+  "database_writes": "none",
+  "artifacts": {
+    "run.json": {
+      "sha256": "36753d2c5acc2fa400466c15ef6ee017aa9725ab62a3dbd8d0fb5922de3efeb4",
+      "bytes": 290,
+      "content_type": "application/json"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "stages": {},
+  "preflight": [],
+  "run_started": [],
+  "run_stopped": [],
+  "day_stopped": [
+    {
+      "stopped_at": "2026-09-28T16:10:23+09:00",
+      "reason": "S0 2026-09-28: 37 of 40 histories read (92.5%), below 95%; the day is not drawn from",
+      "detail": null
+    }
+  ]
+}

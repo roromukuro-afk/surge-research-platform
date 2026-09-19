@@ -1,0 +1,750 @@
+{
+  "status": "partial",
+  "file": "report-2.json",
+  "report_version": "eval-report-1.0.0",
+  "run_id": "synthetic-phase-b-fixture",
+  "phase": "B",
+  "banner": "Phase B prospective shadow evaluation: Jev's raw answers, read as they came, against outcomes computed after T+20. Jev is not connected to production predictions; nothing here is teacher data (D-270, D-272).",
+  "model": "jev-1.13.0",
+  "outcome_label_status": "neither +20% definition is the label (D-268); not merged with success_label",
+  "undefined_values": "null (in markdown '-') where a statistic is undefined for these samples",
+  "pipeline": {
+    "requests": {
+      "planned": 60,
+      "sent": 60,
+      "ok": 60,
+      "errors": 0,
+      "incomplete": 0,
+      "by_variant": {
+        "main": 54,
+        "anonymized": 4,
+        "drift": 2
+      }
+    },
+    "cost": {
+      "budget": {
+        "global_hard_cap_usd": "2.50",
+        "daily_budget_usd": "0.12",
+        "daily_max_requests": 92,
+        "credit": "the latest TypeSafe console snapshot less the spend recorded since, until the expiry it showed; no paid credit"
+      },
+      "cost_usd_total": 0.035503986,
+      "cost_bases": [
+        "TypeSafe published price x input tokens (output free); TypeSafe reports no cost"
+      ],
+      "gateway_cost_usd_total": 0,
+      "requests_without_reported_cost": 0,
+      "estimated_usd_total": 0.039974172,
+      "cost_usd_mean": 0.0005917331
+    },
+    "providers": [
+      "typesafe-direct"
+    ],
+    "rate_limited_attempts": 0,
+    "tokens": {
+      "input_mean": 14088.883333333333,
+      "input_min": 14053,
+      "input_p50": 14082,
+      "input_p90": 14114,
+      "input_max": 14121,
+      "output_total": 12660,
+      "jev_to_o200k_ratio_mean": 1.1990726183552354
+    },
+    "latency_seconds": {
+      "p50": 0.0,
+      "p90": 0.0,
+      "max": 0.001
+    },
+    "served_models": [
+      "jev-1.13.0"
+    ],
+    "resolved_providers": [
+      "typesafe-ai"
+    ],
+    "outcomes": {
+      "RESOLVED": 54,
+      "UNRESOLVED_MISSING_DATA": 0,
+      "PENDING": 0
+    },
+    "outcome_join": {
+      "main_predictions": 54,
+      "complete": 54,
+      "joined_to_resolved_outcome": 54,
+      "without_outcome": [],
+      "outcome_not_resolved": [],
+      "by_cohort": {
+        "PRIMARY": 40,
+        "CONTROL": 14
+      }
+    }
+  },
+  "answers": {
+    "PRIMARY": {
+      "n": 40,
+      "decision_counts": {
+        "ENTRY": 0,
+        "WATCH_BREAKOUT": 1,
+        "WATCH_PULLBACK": 1,
+        "WATCH_OTHER": 0,
+        "REJECT": 38
+      },
+      "reaches_target": {
+        "n": 40,
+        "min": 0.05,
+        "median": 0.23,
+        "max": 0.46
+      },
+      "upside_score": {
+        "n": 40,
+        "min": 0.04,
+        "median": 0.55,
+        "max": 1.0
+      },
+      "decision_confidence": {
+        "n": 40,
+        "min": 0.26,
+        "median": 0.47,
+        "max": 0.72
+      }
+    },
+    "CONTROL": {
+      "n": 14,
+      "decision_counts": {
+        "ENTRY": 0,
+        "WATCH_BREAKOUT": 0,
+        "WATCH_PULLBACK": 0,
+        "WATCH_OTHER": 1,
+        "REJECT": 13
+      },
+      "reaches_target": {
+        "n": 14,
+        "min": 0.05,
+        "median": 0.175,
+        "max": 0.38
+      },
+      "upside_score": {
+        "n": 14,
+        "min": 0.02,
+        "median": 0.4,
+        "max": 0.96
+      },
+      "decision_confidence": {
+        "n": 14,
+        "min": 0.25,
+        "median": 0.5449999999999999,
+        "max": 0.71
+      }
+    }
+  },
+  "primary": {
+    "n": 40,
+    "hit_20_high": {
+      "positives": 0,
+      "base_rate": 0.0,
+      "brier": 0.070845,
+      "brier_reference_base_rate": 0.0,
+      "brier_skill": null,
+      "pr_auc_average_precision": null,
+      "calibration": {
+        "bins": [
+          {
+            "bin": "0.0-0.1",
+            "n": 5,
+            "mean_predicted": 0.06999999999999999,
+            "observed_rate": 0.0
+          },
+          {
+            "bin": "0.1-0.2",
+            "n": 13,
+            "mean_predicted": 0.1376923076923077,
+            "observed_rate": 0.0
+          },
+          {
+            "bin": "0.2-0.3",
+            "n": 9,
+            "mean_predicted": 0.24555555555555555,
+            "observed_rate": 0.0
+          },
+          {
+            "bin": "0.3-0.4",
+            "n": 8,
+            "mean_predicted": 0.3575,
+            "observed_rate": 0.0
+          },
+          {
+            "bin": "0.4-0.5",
+            "n": 5,
+            "mean_predicted": 0.442,
+            "observed_rate": 0.0
+          }
+        ],
+        "expected_calibration_error": 0.2355
+      }
+    },
+    "hit_20_close": {
+      "positives": 0,
+      "base_rate": 0.0,
+      "brier": 0.070845,
+      "brier_reference_base_rate": 0.0,
+      "brier_skill": null,
+      "pr_auc_average_precision": null,
+      "calibration": {
+        "bins": [
+          {
+            "bin": "0.0-0.1",
+            "n": 5,
+            "mean_predicted": 0.06999999999999999,
+            "observed_rate": 0.0
+          },
+          {
+            "bin": "0.1-0.2",
+            "n": 13,
+            "mean_predicted": 0.1376923076923077,
+            "observed_rate": 0.0
+          },
+          {
+            "bin": "0.2-0.3",
+            "n": 9,
+            "mean_predicted": 0.24555555555555555,
+            "observed_rate": 0.0
+          },
+          {
+            "bin": "0.3-0.4",
+            "n": 8,
+            "mean_predicted": 0.3575,
+            "observed_rate": 0.0
+          },
+          {
+            "bin": "0.4-0.5",
+            "n": 5,
+            "mean_predicted": 0.442,
+            "observed_rate": 0.0
+          }
+        ],
+        "expected_calibration_error": 0.2355
+      }
+    },
+    "by_decision": {
+      "ENTRY": {
+        "n": 0,
+        "hit_20_high_rate": null,
+        "hit_20_close_rate": null,
+        "mean_ret_t20": null,
+        "median_max_upside_high": null,
+        "median_max_drawdown_low": null
+      },
+      "WATCH_BREAKOUT": {
+        "n": 1,
+        "hit_20_high_rate": 0.0,
+        "hit_20_close_rate": 0.0,
+        "mean_ret_t20": -0.08017653549098934,
+        "median_max_upside_high": 0.018573004781169546,
+        "median_max_drawdown_low": -0.08017653549098934
+      },
+      "WATCH_PULLBACK": {
+        "n": 1,
+        "hit_20_high_rate": 0.0,
+        "hit_20_close_rate": 0.0,
+        "mean_ret_t20": 0.03388822829964328,
+        "median_max_upside_high": 0.05425089179548157,
+        "median_max_drawdown_low": 0.008769322235434007
+      },
+      "WATCH_OTHER": {
+        "n": 0,
+        "hit_20_high_rate": null,
+        "hit_20_close_rate": null,
+        "mean_ret_t20": null,
+        "median_max_upside_high": null,
+        "median_max_drawdown_low": null
+      },
+      "REJECT": {
+        "n": 38,
+        "hit_20_high_rate": 0.0,
+        "hit_20_close_rate": 0.0,
+        "mean_ret_t20": 0.03448465773781287,
+        "median_max_upside_high": 0.05824378619121312,
+        "median_max_drawdown_low": -0.01964401818110998
+      }
+    },
+    "score_vs_future_return_spearman": {
+      "upside_score_vs_max_upside_high": -0.12472433189571112,
+      "upside_score_vs_max_upside_close": -0.12472433189571112,
+      "upside_score_vs_ret_t20": -0.0419501703215823,
+      "reaches_target_vs_max_upside_high": 0.08192032735077945
+    }
+  },
+  "route_d_subgroups": {
+    "definition": {
+      "D_ONLY": "Route D is the only route that fired",
+      "D_PLUS_OTHER": "Route D fired together with at least one other route",
+      "NON_D": "at least one route fired, Route D did not"
+    },
+    "D_ONLY": {
+      "n": 16,
+      "hit_20_high": {
+        "positives": 0,
+        "hit_rate": 0.0,
+        "brier": 0.06434375,
+        "reaches_target_calibration": {
+          "bins": [
+            {
+              "bin": "0.0-0.1",
+              "n": 3,
+              "mean_predicted": 0.07666666666666666,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.1-0.2",
+              "n": 6,
+              "mean_predicted": 0.145,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.2-0.3",
+              "n": 3,
+              "mean_predicted": 0.2333333333333333,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.3-0.4",
+              "n": 1,
+              "mean_predicted": 0.37,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.4-0.5",
+              "n": 3,
+              "mean_predicted": 0.44,
+              "observed_rate": 0.0
+            }
+          ],
+          "expected_calibration_error": 0.21812499999999999
+        }
+      },
+      "hit_20_close": {
+        "positives": 0,
+        "hit_rate": 0.0,
+        "brier": 0.06434375,
+        "reaches_target_calibration": {
+          "bins": [
+            {
+              "bin": "0.0-0.1",
+              "n": 3,
+              "mean_predicted": 0.07666666666666666,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.1-0.2",
+              "n": 6,
+              "mean_predicted": 0.145,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.2-0.3",
+              "n": 3,
+              "mean_predicted": 0.2333333333333333,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.3-0.4",
+              "n": 1,
+              "mean_predicted": 0.37,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.4-0.5",
+              "n": 3,
+              "mean_predicted": 0.44,
+              "observed_rate": 0.0
+            }
+          ],
+          "expected_calibration_error": 0.21812499999999999
+        }
+      },
+      "mean_reaches_target": 0.218125,
+      "decision_counts": {
+        "ENTRY": 0,
+        "WATCH_BREAKOUT": 1,
+        "WATCH_PULLBACK": 1,
+        "WATCH_OTHER": 0,
+        "REJECT": 14
+      },
+      "upside_score": {
+        "mean": 0.555,
+        "median": 0.615
+      },
+      "max_upside": {
+        "high_mean": 0.052398184229877964,
+        "high_median": 0.05691394753610837,
+        "close_mean": 0.052398184229877964,
+        "close_median": 0.05691394753610837
+      },
+      "max_drawdown": {
+        "low_mean": -0.026094723570275452,
+        "low_median": -0.012149982857859815,
+        "close_mean": -0.026094723570275452,
+        "close_median": -0.012149982857859815
+      }
+    },
+    "D_PLUS_OTHER": {
+      "n": 6,
+      "hit_20_high": {
+        "positives": 0,
+        "hit_rate": 0.0,
+        "brier": 0.07716666666666668,
+        "reaches_target_calibration": {
+          "bins": [
+            {
+              "bin": "0.1-0.2",
+              "n": 2,
+              "mean_predicted": 0.135,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.2-0.3",
+              "n": 1,
+              "mean_predicted": 0.26,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.3-0.4",
+              "n": 3,
+              "mean_predicted": 0.3433333333333333,
+              "observed_rate": 0.0
+            }
+          ],
+          "expected_calibration_error": 0.26
+        }
+      },
+      "hit_20_close": {
+        "positives": 0,
+        "hit_rate": 0.0,
+        "brier": 0.07716666666666668,
+        "reaches_target_calibration": {
+          "bins": [
+            {
+              "bin": "0.1-0.2",
+              "n": 2,
+              "mean_predicted": 0.135,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.2-0.3",
+              "n": 1,
+              "mean_predicted": 0.26,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.3-0.4",
+              "n": 3,
+              "mean_predicted": 0.3433333333333333,
+              "observed_rate": 0.0
+            }
+          ],
+          "expected_calibration_error": 0.26
+        }
+      },
+      "mean_reaches_target": 0.26,
+      "decision_counts": {
+        "ENTRY": 0,
+        "WATCH_BREAKOUT": 0,
+        "WATCH_PULLBACK": 0,
+        "WATCH_OTHER": 0,
+        "REJECT": 6
+      },
+      "upside_score": {
+        "mean": 0.5750000000000001,
+        "median": 0.55
+      },
+      "max_upside": {
+        "high_mean": 0.04135633402926895,
+        "high_median": 0.05333601884250233,
+        "close_mean": 0.04135633402926895,
+        "close_median": 0.05333601884250233
+      },
+      "max_drawdown": {
+        "low_mean": -0.027028131634744712,
+        "low_median": -0.02946905535817048,
+        "close_mean": -0.027028131634744712,
+        "close_median": -0.02946905535817048
+      }
+    },
+    "NON_D": {
+      "n": 18,
+      "hit_20_high": {
+        "positives": 0,
+        "hit_rate": 0.0,
+        "brier": 0.07451666666666666,
+        "reaches_target_calibration": {
+          "bins": [
+            {
+              "bin": "0.0-0.1",
+              "n": 2,
+              "mean_predicted": 0.06,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.1-0.2",
+              "n": 5,
+              "mean_predicted": 0.13,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.2-0.3",
+              "n": 5,
+              "mean_predicted": 0.25,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.3-0.4",
+              "n": 4,
+              "mean_predicted": 0.365,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.4-0.5",
+              "n": 2,
+              "mean_predicted": 0.445,
+              "observed_rate": 0.0
+            }
+          ],
+          "expected_calibration_error": 0.2427777777777778
+        }
+      },
+      "hit_20_close": {
+        "positives": 0,
+        "hit_rate": 0.0,
+        "brier": 0.07451666666666666,
+        "reaches_target_calibration": {
+          "bins": [
+            {
+              "bin": "0.0-0.1",
+              "n": 2,
+              "mean_predicted": 0.06,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.1-0.2",
+              "n": 5,
+              "mean_predicted": 0.13,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.2-0.3",
+              "n": 5,
+              "mean_predicted": 0.25,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.3-0.4",
+              "n": 4,
+              "mean_predicted": 0.365,
+              "observed_rate": 0.0
+            },
+            {
+              "bin": "0.4-0.5",
+              "n": 2,
+              "mean_predicted": 0.445,
+              "observed_rate": 0.0
+            }
+          ],
+          "expected_calibration_error": 0.2427777777777778
+        }
+      },
+      "mean_reaches_target": 0.2427777777777778,
+      "decision_counts": {
+        "ENTRY": 0,
+        "WATCH_BREAKOUT": 0,
+        "WATCH_PULLBACK": 0,
+        "WATCH_OTHER": 0,
+        "REJECT": 18
+      },
+      "upside_score": {
+        "mean": 0.5,
+        "median": 0.5
+      },
+      "max_upside": {
+        "high_mean": 0.06935668597755643,
+        "high_median": 0.06118391743109501,
+        "close_mean": 0.06935668597755643,
+        "close_median": 0.06118391743109501
+      },
+      "max_drawdown": {
+        "low_mean": -0.032594201724408314,
+        "low_median": -0.02578164680374342,
+        "close_mean": -0.032594201724408314,
+        "close_median": -0.02578164680374342
+      }
+    },
+    "without_subgroup": 0
+  },
+  "control_benchmark": {
+    "note": "benchmark only: not pooled with Primary, no calibration computed",
+    "n": 14,
+    "decision_counts": {
+      "ENTRY": 0,
+      "WATCH_BREAKOUT": 0,
+      "WATCH_PULLBACK": 0,
+      "WATCH_OTHER": 1,
+      "REJECT": 13
+    },
+    "mean_reaches_target": 0.18714285714285714,
+    "pipeline_value": {
+      "hit_20_high": {
+        "primary_base_rate": 0.0,
+        "control_base_rate": 0.0,
+        "primary_entry_hit_rate": null,
+        "control_entry_hit_rate": null
+      },
+      "hit_20_close": {
+        "primary_base_rate": 0.0,
+        "control_base_rate": 0.0,
+        "primary_entry_hit_rate": null,
+        "control_entry_hit_rate": null
+      }
+    }
+  },
+  "anonymized_sensitivity": {
+    "n": 4,
+    "comparable": 4,
+    "decision_changed": 0,
+    "decision_change_rate": 0.0,
+    "reaches_target_abs_diff_mean": 0.2375,
+    "reaches_target_abs_diff_max": 0.31999999999999995,
+    "upside_score_abs_diff_mean": 0.43000000000000005,
+    "upside_score_abs_diff_max": 0.76,
+    "decision_probability_max_abs_diff_max": 0.23000000000000004
+  },
+  "drift": {
+    "n": 2,
+    "comparable": 2,
+    "decision_changed": 0,
+    "decision_change_rate": 0.0,
+    "reaches_target_abs_diff_mean": 0.0,
+    "reaches_target_abs_diff_max": 0.0,
+    "upside_score_abs_diff_mean": 0.0,
+    "upside_score_abs_diff_max": 0.0,
+    "decision_probability_max_abs_diff_max": 0.0
+  },
+  "teacher_admissible": false,
+  "progress": {
+    "status": "partial",
+    "target_business_days": 4,
+    "days_sent_in_full": 4,
+    "days_with_outcomes": 2,
+    "collection_rate": 1.0,
+    "cohort_completion_rate": 0.5,
+    "predictions": {
+      "sent": {
+        "PRIMARY": 80,
+        "CONTROL": 28,
+        "total": 108
+      },
+      "resolved": {
+        "PRIMARY": 40,
+        "CONTROL": 14,
+        "total": 54
+      },
+      "unresolved": {
+        "awaiting_t_plus_20": {
+          "PRIMARY": 40,
+          "CONTROL": 14,
+          "total": 54
+        },
+        "missing_data": {
+          "PRIMARY": 0,
+          "CONTROL": 0,
+          "total": 0
+        },
+        "total": {
+          "PRIMARY": 40,
+          "CONTROL": 14,
+          "total": 54
+        }
+      }
+    },
+    "days": {
+      "with_outcomes": [
+        "2026-09-24",
+        "2026-09-25"
+      ],
+      "awaiting_t_plus_20": [
+        {
+          "s0": "2026-09-29",
+          "t_plus_20_by_calendar": "2026-10-28"
+        },
+        {
+          "s0": "2026-09-30",
+          "t_plus_20_by_calendar": "2026-10-29"
+        }
+      ],
+      "excluded": [
+        {
+          "s0": "2026-09-28",
+          "reason": "S0 2026-09-28: 37 of 40 histories read (92.5%), below 95%; the day is not drawn from"
+        }
+      ]
+    },
+    "rules": {
+      "unresolved": "unresolved predictions are not failures and are in no denominator",
+      "final": "final only once all 4 business days are sent and every outcome of them is frozen"
+    }
+  },
+  "inputs_digest": "e7968b93e597d1d24d26a6db400bd39491b7ae1d92171255e64d747a24ba05d7",
+  "cohort": {
+    "cohort_id": "synthetic-phase-b-fixture",
+    "frozen_fingerprint": "73cceb0db1be4e3dcd3a44b5d590bdb31775fa21a712bb473bfea5b725e4bcf6",
+    "experiment_seed": "phase-b-test-seed",
+    "prospective_start": "2026-09-24",
+    "stops": [],
+    "spent_usd": "0.071009358",
+    "cap_usd": "2.50",
+    "reported_at": "2026-10-26T18:00:03+09:00"
+  },
+  "report_code": {
+    "git_head": "53ef55dec9446592750c7464b3675acb7c0605e6",
+    "git_dirty_in_these_files": false,
+    "code_sha256": "8158344c357b04fb039f9303873460c311519cf0193b31eba4dfef1313d3895f",
+    "files_sha256": {
+      "workers/src/surge/evaluation/__init__.py": "69c4d199a85c193f6d3d8dea6cb773a341e8720f8917583a3118661cb9b2c681",
+      "workers/src/surge/evaluation/cost.py": "02bfe4a3d4a1b04379f29d51fee606131e46850f41acf65d66fea555fc0eb25e",
+      "workers/src/surge/evaluation/leakage.py": "ec1b1186530eea24fffc7b9fa7642c7e43cb6e7c64c927b6663624c27a56fe0d",
+      "workers/src/surge/evaluation/method.py": "e9f0ea5696b85f0c29358748b6222c1840e3f55a356d9fdfad18d7763e50efad",
+      "workers/src/surge/evaluation/outcome.py": "e3489672f12f8e6ea0b60805a48dbd7bc990ef454c7e537253ef4df5b81a611a",
+      "workers/src/surge/evaluation/pacing.py": "2b34f20dc3461c198a646ba6b4d07293b0fb1d389c411858ebe92030f75ddf83",
+      "workers/src/surge/evaluation/phase_b.py": "0cc7c9547113d389b8a605e2126614329298a1716eed95cda065dcf0daf8b400",
+      "workers/src/surge/evaluation/population.py": "a7b2fba3f5b7139bac8a15c00a7b38d433eae842061ae1a1cedcbea3e381ea9e",
+      "workers/src/surge/evaluation/prices.py": "57641a0e96ca6c85bd80d931d4dbb977ab1c434e63afb27c31e7a0a7f5ac14f4",
+      "workers/src/surge/evaluation/providers.py": "c7cc3276cd5ba872fc49abb93cdde33f49c10419d0d0fa77ab8e08844d11934e",
+      "workers/src/surge/evaluation/report.py": "2a4649b08d94e681e5f0db6c6b9f77d8c637e445b823292e910bdc5066c1c598",
+      "workers/src/surge/evaluation/selection.py": "82fbdc236a562e274916149f70d3d9bdc90b5cc19e0ea733faec39d6d6c162e7",
+      "workers/src/surge/evaluation/state.py": "c9059e8bb7f414e0caca1aec59548dad56d7d69145b76e5dea2a427366502df4",
+      "workers/src/surge/evaluation/store.py": "2b127471c9531251fb5bd27df17aa486377936250795c292e5d4726d225b1896",
+      "workers/src/surge/evaluation/universe.py": "6474b92eff0a73fe5a14aca23c8820baf9a5f8e975ccef1287f62fca5d43b4c4",
+      "workers/src/surge/jobs/jev_eval.py": "120dea28d8bc6680022b4d4dfc5da48380815105cd3bee5783b0188a7f96f9ee",
+      "workers/src/surge/jobs/jev_smoke.py": "c211af48c66150a7ae9c167c6a6876d1848e51744413c977a3256aa0ed7e891d",
+      "workers/src/surge/analysis/jev_questions.py": "46bdef820a4c445b58f09a7666cc56d6bd851ca3a40bdbcd325054fff8f2ac96",
+      "workers/src/surge/providers/yahoo_finance.py": "9ccbb6015c16e08089fc0fb1afe093edf7339e213231cd2f774639c79a878db6",
+      "workers/src/surge/providers/jpx_listed.py": "e10bccfe047a7ae0e188f9b1f49113abf17c37c0f39e151aea087de76179625e",
+      "workers/src/surge/news/sources/yanoshin_tdnet.py": "a3e750f84b98aa0cdddab99d0b569547cd53df7c717c6562b5b97129fb6e8af7",
+      "workers/src/surge/market/series.py": "659aa1b3a52627aa13cbbfb39fd1eabeb36bc740afa9e25ee8d8ca5b32a60a3c",
+      "workers/src/surge/market/models.py": "5bff5786daf7e8538247b79bde1680d094642a26b193eb68d87df7d305cecd16",
+      "workers/src/surge/features/engine.py": "806745ddfe8669de246874fc5fd1bdf5c34778f1d8e80566548327f4727023d2",
+      "workers/src/surge/features/indicators.py": "ff87cc7e46d2f07e126e12a24e13338868cfdde6b0b551665b9593c054e41a04",
+      "workers/src/surge/routes/engine.py": "a7dc13a1ba0ef2e68ecae011e953d56e90a3431db906de6d06ff94ca06dc3ecb",
+      "ops/jev-gateway-runner/runner.mjs": "8cca384d73a7c9af28e94dcafaf32a74829cd2a121a5fa36f3b5e9f85244405d",
+      "ops/jev-gateway-runner/describe-error.mjs": "ebe3bd0ed300c0148763d23495144ccc894644e5545520054e15ca4f25bccb1c",
+      "ops/jev-gateway-runner/package.json": "74375444840454f01bea2d3483084dadd75a6315462b85f7dae8b02bc3f9e64a",
+      "ops/jev-gateway-runner/package-lock.json": "608ed8f6f0de874f452a0864124a495b4a968a036e0db20b58196401de8fabb9"
+    },
+    "evaluation_version": "jev-eval-1.1.0",
+    "state_version": "eval-state-1",
+    "feature_version": "features-1.0.0",
+    "route_version": "route-1.0.0",
+    "outcome_version": "eval-outcome-1.0.0",
+    "report_version": "eval-report-1.0.0",
+    "selection_version": "phase-b-selection-1.0.0",
+    "price_dataset": "YAHOO_JP_DAILY_AS_TRADED",
+    "turnover_basis": "APPROXIMATED_CLOSE_X_VOLUME"
+  }
+}

@@ -9,6 +9,11 @@ const nextConfig = {
   // lockfile and can settle on one outside the repository entirely, which makes
   // the build depend on what happens to be in the developer's home directory.
   outputFileTracingRoot: here,
+  // The Phase B shadow's synthetic fixture is read from disk at request time
+  // (SURGE_SHADOW_SOURCE=fixture), which file tracing cannot see by itself.
+  outputFileTracingIncludes: {
+    "/**": ["./fixtures/shadow/**/*"],
+  },
 };
 
 export default nextConfig;

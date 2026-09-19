@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { SHADOW_TABS } from "@/components/ShadowChrome";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -8,7 +9,7 @@ export const metadata: Metadata = {
 };
 
 const TABS = [
-  { href: "/", label: "Dashboard" },
+  { href: "/dashboard", label: "Dashboard" },
   { href: "/universe", label: "Universe" },
   { href: "/materials", label: "Materials" },
   { href: "/watch", label: "Watch & setup" },
@@ -29,6 +30,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <header className="masthead">
             <h1>Surge Research Platform</h1>
             <nav className="tabs">
+              <span className="group">Phase B shadow</span>
+              {SHADOW_TABS.map((tab) => (
+                <Link key={tab.href} href={tab.href}>
+                  {tab.label}
+                </Link>
+              ))}
+            </nav>
+            <nav className="tabs secondary">
+              <span className="group">Research platform</span>
               {TABS.map((tab) => (
                 <Link key={tab.href} href={tab.href}>
                   {tab.label}
@@ -40,7 +50,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <footer className="colophon">
             Research output. Nothing on these screens is an entry decision: end-of-day analysis stops at
             setup, watch or reject, and no state here authorises a trade. Prior highs appear as obstacles,
-            never as targets.
+            never as targets. Jev&apos;s Phase B answers are evaluated here and are not teacher data.
           </footer>
         </div>
       </body>
