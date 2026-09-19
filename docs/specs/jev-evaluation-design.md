@@ -1,6 +1,6 @@
 # Jev 予測性能評価 設計
 
-状態: **v1.1（ユーザー確定 2026-09-18、Phase A の規模と送信間隔は D-274 で変更）** — Phase A は縮小 run（24 request、5 分間隔）で end-to-end 検証中
+状態: **v1.1（ユーザー確定 2026-09-18、Phase A の規模と送信間隔は D-274 で変更）** — **Phase A 完了**（run `jev-a-20260918-05`、commit 3dcb292、24 / 24、§10）。Phase B は未着手（設計変更なし）
 前提: [D-267](../unresolved-decisions.md) EOD Prediction 規則（S0 確定終値・目標 ×1.20・S1 から評価・T+1/3/5/10/20・期限 T+20）/ D-269（Vercel AI Gateway 経由の Jev は技術的に適合、production default ではない）/ D-268（+20% 到達の判定基準は未決）/ D-270（本設計の確定）
 
 ## 0. 目的と範囲
@@ -165,3 +165,26 @@ API を送る直前まで（`preflight`）を実装・テストし、そこで�
 ### 9-5. Phase B の前に決めること（D-272）
 
 Phase A の replay では、現行 Routes A–H が適格銘柄の約 61% を通した（Route D 単独で 35%）。Phase B の前に、1 日あたりの最大 shadow prediction 数、上限を超えたときの sampling / selection、Route D の候補生成への寄与の扱いを決める。Phase A では投資ロジックと route 閾値を変えない。
+
+
+## 10. Phase A 結果（2026-09-18、**成功として完了**）
+
+**Phase A の性能値（予測精度・Brier・PR-AUC・calibration・hit rate 等）は Jev の採用判断に使わない。** ここで確定したのは「Jev と evaluation pipeline が技術的に成立する」ことまでで、予測性能は prospective の Phase B で判定する。Jev は production provider に接続しない（production default にしない）。
+
+| 項目 | 結果 |
+|---|---|
+| run | `jev-a-20260918-05`（commit 3dcb292、CI green）。正式な母集団（`-04` と同一の 100 件）から固定 seed で縮小（D-274） |
+| 送信 | **24 / 24 成功**（main 20 = Primary 15 / Control 5、匿名化 2、drift 2）、HTTP 200、停止条件 0 |
+| schema completeness | **24 / 24** |
+| main と outcome の join | **20 / 20**（Primary 15 / Control 5、混ぜていない） |
+| 匿名化 paired comparison | **2 組** |
+| drift comparison | **2 組** |
+| leakage / integrity | **違反 0**（preflight のリーク検査、stage ごとの hash 照合、送信直前の request hash 照合、応答と request の対応） |
+| 実 Gateway cost | **$0.02269008**（Gateway の報告額の合計 = 残高差）、**hard budget $0.05 以内** |
+| pacing | **5 分間隔、429 なし**（14:36:20〜16:31:20 UTC、任意の 20 分に最大 4 件） |
+| report | **report.json / report.md の生成に成功** |
+
+- 入力 22,222〜22,785 tokens（中央値 22,535、o200k の 1.175 倍）、latency 中央値 1.17 秒。
+- この 20 件は +20% 到達が高値・終値とも 0 件だったため、Brier skill と PR-AUC は未定義（null）として出力された。少数で未定義になる統計を未定義のまま扱えることの確認であり、性能の値ではない。
+- 送信間隔は Windows の monotonic clock の分解能（約 15.6 ms）の範囲で 300 秒（壁時計で 299.988〜300.030 秒）。
+- 停止済みの `-03`（約 2.2 秒間隔、6 件目で 429）と `-04`（15 秒間隔、6 件目で 429）は監査記録として残す（D-273 / D-274）。
