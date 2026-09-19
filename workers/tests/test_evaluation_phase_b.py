@@ -661,3 +661,212 @@ def test_nothing_in_the_evaluation_can_write_to_a_database():
     out = subprocess.run([sys.executable, "-c", probe], cwd=REPO_ROOT / "workers", capture_output=True, text=True,
                          check=True, env={**__import__("os").environ, "PYTHONPATH": str(REPO_ROOT / "workers" / "src")})
     assert out.stdout.strip() == "[]"
+
+
+# ----------------------------------------------------------------- the JPX calendar and the scheduled job (D-277)
+
+
+def _calendar_page(closed, *, stray_quote_on=None):
+    rows = []
+    for day, name in sorted(closed.items()):
+        weekday = "月火水木金土日"[day.weekday()]
+        cell_end = '</td">' if day == stray_quote_on else "</td>"
+        rows.append(f'<tr><td class="a-center">{day:%Y/%m/%d}（{weekday}）{cell_end}<td class="a-center">{name}</td></tr>')
+    return "<html><body><h2>休業日一覧</h2><table>" + "\r\n".join(rows) + "</table></body></html>"
+
+
+def test_the_jpx_calendar_is_weekends_and_jpx_s_closed_days_and_nothing_it_does_not_cover():
+    from surge.evaluation import jpx_calendar
+
+    assert [jpx_calendar.closed_reason(d) for d in (date(2026, 9, 21), date(2026, 9, 22), date(2026, 9, 23))] == [
+        "敬老の日", "休日※", "秋分の日"]
+    assert jpx_calendar.closed_reason(date(2026, 10, 12)) == "スポーツの日"
+    assert jpx_calendar.closed_reason(date(2026, 9, 26)) == "weekend"
+    assert jpx_calendar.is_business_day(date(2026, 9, 24)) and jpx_calendar.is_business_day(date(2026, 10, 13))
+    with pytest.raises(jpx_calendar.CalendarUnknown, match="2026, 2027"):
+        jpx_calendar.closed_reason(date(2028, 1, 4))
+
+    # The page as JPX publishes it, stray quote in the 2026/12/31 row included, reads back exactly.
+    page = _calendar_page(jpx_calendar.CLOSED_DAYS, stray_quote_on=date(2026, 12, 31))
+    assert jpx_calendar.parse_closed_days(page) == jpx_calendar.CLOSED_DAYS
+    assert jpx_calendar.diff_against_page(page) == {"added_on_page": [], "removed_from_page": [], "renamed": [],
+                                                    "years_on_page": [2026, 2027]}
+    changed = {**{d: n for d, n in jpx_calendar.CLOSED_DAYS.items() if d != date(2026, 11, 23)},
+               date(2026, 12, 30): "休業日", date(2026, 10, 12): "改称"}
+    assert jpx_calendar.diff_against_page(_calendar_page(changed)) == {
+        "added_on_page": ["2026-12-30"], "removed_from_page": ["2026-11-23"], "renamed": ["2026-10-12"],
+        "years_on_page": [2026, 2027]}
+
+    fetched = SimpleNamespace(status=200, body=page.encode("utf-8"), sha256="0" * 64)
+    result = jev_eval.check_calendar(fetch=lambda url: fetched)
+    assert result["matches"] and not result["same_as_read_on"]
+    assert not jev_eval.check_calendar(fetch=lambda url: SimpleNamespace(
+        status=200, body=_calendar_page(changed).encode("utf-8"), sha256="1" * 64))["matches"]
+
+
+def test_a_jpx_closed_day_is_never_planned(tmp_path, monkeypatch):
+    env = _setup(tmp_path, monkeypatch, n=8)
+    yahoo = _FakeYahoo(env.charts)
+    with pytest.raises(jev_eval.ClosedDay, match="スポーツの日"):
+        jev_eval.plan_day(env.root, COHORT, date(2026, 10, 12), clock=lambda: datetime(2026, 10, 12, 17, 0, tzinfo=JST),
+                          yahoo=yahoo, fetch_issues=lambda: (env.issues, "f" * 64), sleep=lambda _s: None)
+    assert yahoo.calls == 0
+
+
+def _scheduled(env, start, *, transport=None, yahoo=None, **kwargs):
+    pacer, clock = _paced(start)
+    return jev_eval.phase_b_scheduled(env.root, COHORT, clock=clock, sleep=pacer.sleep,
+                                      yahoo=yahoo or _FakeYahoo(env.charts),
+                                      fetch_issues=lambda: (env.issues, "f" * 64), yanoshin=_FakeYanoshinRecent(),
+                                      transport=transport if transport is not None else _PinnedTransport(),
+                                      pacer=pacer, **kwargs)
+
+
+def _scheduler_records(env):
+    runs = env.root / "evaluation" / "jev" / COHORT / "scheduler" / "runs"
+    return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(runs.glob("*.json"))]
+
+
+def test_the_scheduled_job_sends_nothing_before_2026_09_24_nor_on_a_closed_day(tmp_path, monkeypatch, no_network):
+    env = _setup(tmp_path, monkeypatch)
+    yahoo, transport = _FakeYahoo(env.charts), _PinnedTransport()
+    for start, closed in ((datetime(2026, 9, 19, 16, 10, tzinfo=JST), "weekend"),
+                          (datetime(2026, 9, 21, 16, 10, 5, tzinfo=JST), "敬老の日"),
+                          (datetime(2026, 9, 22, 16, 10, tzinfo=JST), "休日※"),
+                          (datetime(2026, 9, 23, 16, 10, tzinfo=JST), "秋分の日")):
+        record = _scheduled(env, start, yahoo=yahoo, transport=transport)
+        assert (record["status"], record["exit_code"], record["closed"]) == ("closed_day", 0, closed)
+        assert record["schedule"]["next_s0"] == "2026-09-24"
+    # A business day before the window opens (more than 15 minutes early): nothing either.
+    early = _scheduled(env, datetime(2026, 9, 24, 12, 0, tzinfo=JST), yahoo=yahoo, transport=transport)
+    assert (early["status"], early["exit_code"]) == ("no_window", 0)
+    assert yahoo.calls == 0 and transport.models == []
+    assert [r["status"] for r in _scheduler_records(env)] == ["closed_day"] * 4 + ["no_window"]
+    assert not (env.root / "evaluation" / "jev" / COHORT / "days").exists()
+
+
+def test_the_scheduled_job_waits_for_the_window_sends_the_day_once_and_then_leaves_it_alone(tmp_path, monkeypatch):
+    env = _setup(tmp_path, monkeypatch)
+    transport = _PinnedTransport()
+    first = _scheduled(env, datetime(2026, 9, 24, 16, 9, 30, tzinfo=JST), transport=transport)  # 30 s early
+    assert (first["status"], first["exit_code"], first["s0"]) == ("sent", 0, "2026-09-24")
+    assert first["detail"]["requests_answered"] == 30 and first["detail"]["served_model"] == "jev-1.13.0"
+    assert len(transport.models) == 30
+    store = phase_b.day_store(env.root, COHORT, S0)
+    assert store.exists("stage-run.json")
+    # Started again the same evening, or woken the next morning before 09:00: nothing is sent twice.
+    for start in (datetime(2026, 9, 24, 20, 0, tzinfo=JST), datetime(2026, 9, 25, 8, 30, tzinfo=JST)):
+        again = _scheduled(env, start, transport=transport)
+        assert (again["status"], again["exit_code"]) == ("already_sent", 0)
+    assert len(transport.models) == 30
+
+
+def test_a_late_start_inside_the_window_runs_and_outside_it_sends_nothing(tmp_path, monkeypatch):
+    inside = _setup(tmp_path / "inside", monkeypatch)
+    woke = _scheduled(inside, datetime(2026, 9, 25, 2, 0, tzinfo=JST))  # the PC slept through 16:10
+    assert (woke["status"], woke["s0"], woke["exit_code"]) == ("sent", "2026-09-24", 0)
+
+    outside = _setup(tmp_path / "outside", monkeypatch)
+    yahoo, transport = _FakeYahoo(outside.charts), _PinnedTransport()
+    late = _scheduled(outside, datetime(2026, 9, 25, 9, 5, tzinfo=JST), yahoo=yahoo, transport=transport)
+    assert (late["status"], late["exit_code"]) == ("no_window", 0)
+    assert late["schedule"]["next_s0"] == "2026-09-25" and yahoo.calls == 0 and transport.models == []
+
+
+def test_a_second_instance_sends_nothing_while_the_first_holds_the_lock(tmp_path, monkeypatch):
+    from surge.evaluation.joblock import JobLock, JobLockHeld
+
+    env = _setup(tmp_path, monkeypatch)
+    yahoo, transport = _FakeYahoo(env.charts), _PinnedTransport()
+    with JobLock(phase_b.job_lock_path(env.root, COHORT)):
+        record = _scheduled(env, EVENING, yahoo=yahoo, transport=transport)
+        assert (record["status"], record["exit_code"]) == ("locked", 0)
+        with pytest.raises(jev_eval.EvaluationError, match="held by another process"):
+            jev_eval.phase_b_day(env.root, COHORT, S0, send=True, clock=lambda: EVENING, yahoo=yahoo,
+                                 fetch_issues=lambda: (env.issues, "f" * 64), transport=transport)
+        with pytest.raises(JobLockHeld):
+            JobLock(phase_b.job_lock_path(env.root, COHORT)).acquire()
+    assert yahoo.calls == 0 and transport.models == []
+    # Released, the next start goes ahead.
+    assert _scheduled(env, EVENING, transport=transport)["status"] == "sent"
+
+
+def test_a_guard_stops_the_day_and_the_job_does_not_try_it_again(tmp_path, monkeypatch):
+    env = _setup(tmp_path, monkeypatch)
+    flaky = _FlakyYahoo(env.charts, {"3001.T", "3002.T", "3003.T"})
+    stopped = _scheduled(env, EVENING, yahoo=flaky)
+    assert (stopped["status"], stopped["exit_code"]) == ("stopped", 2) and "below 95%" in stopped["detail"]
+    calls = flaky.calls
+    again = _scheduled(env, datetime(2026, 9, 24, 18, 0, tzinfo=JST), yahoo=flaky)
+    assert (again["status"], again["exit_code"]) == ("day_stopped_earlier", 2) and flaky.calls == calls
+    # A manual run of the day leaves it alone too.
+    manual = jev_eval.phase_b_day(env.root, COHORT, S0, send=True, clock=lambda: EVENING, yahoo=flaky,
+                                  fetch_issues=lambda: (env.issues, "f" * 64))
+    assert "below 95%" in manual["stopped"]["reason"] and flaky.calls == calls
+
+
+def test_an_expired_credit_stops_the_scheduled_day_until_a_new_balance_is_recorded(tmp_path, monkeypatch):
+    env = _setup(tmp_path, monkeypatch)
+    record_credit_snapshot(env.root, balance_usd=Decimal("4.99"), confirmed_at=datetime(2026, 9, 20, tzinfo=UTC),
+                           expires_at=datetime(2026, 9, 24, 6, 0, tzinfo=UTC), displayed_expiry="test",
+                           source="test", now=datetime(2026, 9, 24, 5, 0, tzinfo=UTC))
+    transport = _PinnedTransport()
+    record = _scheduled(env, EVENING, transport=transport)
+    assert (record["status"], record["exit_code"]) == ("stopped", 2) and transport.models == []
+    assert any("confirm the new console balance once" in p for p in record["detail"]["budget_problems"])
+    assert _scheduled(env, datetime(2026, 9, 24, 19, 0, tzinfo=JST), transport=transport)["status"] == \
+        "day_stopped_earlier"
+
+
+def test_a_changed_version_stops_the_cohort_for_every_later_scheduled_day(tmp_path, monkeypatch):
+    env = _setup(tmp_path, monkeypatch)
+    transport = _PinnedTransport(served=lambda n: "jev-1.13.0" if n < 4 else "jev-1.14.0")
+    record = _scheduled(env, EVENING, transport=transport)
+    assert (record["status"], record["exit_code"]) == ("stopped", 2) and len(transport.models) == 4
+    later = _scheduled(env, datetime(2026, 9, 25, 16, 20, tzinfo=JST), transport=transport)
+    assert (later["status"], later["exit_code"]) == ("cohort_refused", 2) and "stopped" in later["detail"]
+    assert len(transport.models) == 4
+
+
+def test_an_interrupted_run_is_not_resumed(tmp_path, monkeypatch):
+    env = _setup(tmp_path, monkeypatch)
+    pinned = _PinnedTransport()
+
+    def dies_on_the_third(url, data, headers, timeout):
+        if len(pinned.models) == 2:
+            raise RuntimeError("the process was killed here")
+        return pinned(url, data, headers, timeout)
+
+    crashed = _scheduled(env, EVENING, transport=dies_on_the_third)
+    assert (crashed["status"], crashed["exit_code"]) == ("error", 1) and "killed" in crashed["detail"]
+    store = phase_b.day_store(env.root, COHORT, S0)
+    assert store.exists("run-started-1.json") and not store.exists("stage-run.json")
+    resumed = _scheduled(env, datetime(2026, 9, 24, 17, 30, tzinfo=JST), transport=pinned)
+    assert (resumed["status"], resumed["exit_code"]) == ("stopped", 2) and "interrupted" in resumed["detail"]
+    assert len(pinned.models) == 2 and store.exists("run-stopped-1.json")
+
+
+def test_without_the_typesafe_key_the_day_is_not_ready_and_nothing_starts(tmp_path, monkeypatch):
+    env = _setup(tmp_path, monkeypatch)
+    store = _planned_and_built(env)
+    monkeypatch.delenv("TYPESAFE_API_KEY")
+    checked = jev_eval.preflight(store, budget=DAY_BUDGET, clock=lambda: EVENING)
+    assert not checked["ready_to_send"] and any("TYPESAFE_API_KEY" in p for p in checked["window_problems"])
+    assert not store.exists("run-started-1.json")
+
+
+def test_the_scheduled_job_runs_only_from_the_worktree_it_was_registered_for(tmp_path, monkeypatch):
+    env = _setup(tmp_path, monkeypatch, n=8)
+    elsewhere = _scheduled(env, EVENING, expect_repo=tmp_path)
+    assert (elsewhere["status"], elsewhere["exit_code"]) == ("not_the_frozen_worktree", 2)
+    other_commit = _scheduled(env, EVENING, expect_repo=REPO_ROOT, expect_commit="0" * 40)
+    assert (other_commit["status"], other_commit["exit_code"]) == ("not_the_frozen_worktree", 2)
+    assert jev_eval._frozen_worktree_problem(REPO_ROOT, None) is None
+
+
+def test_the_scheduled_job_ends_quietly_once_the_cohort_has_its_25_days(tmp_path, monkeypatch):
+    env = _setup(tmp_path, monkeypatch, n=8)
+    for day in business_days(date(2026, 9, 24), date(2026, 12, 31))[:25]:
+        phase_b.day_store(env.root, COHORT, day).write_json("stage-run.json", {"stage": "run"})
+    record = _scheduled(env, datetime(2026, 11, 2, 16, 20, tzinfo=JST))
+    assert (record["status"], record["exit_code"]) == ("cohort_complete", 0)

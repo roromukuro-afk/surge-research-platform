@@ -27,6 +27,11 @@ Phase B, the prospective shadow cohort (``surge.evaluation.phase_b``, D-272):
     freeze-outcomes --run-id C/days/D                        after T+20, from prices read then
     phase-b-status  --cohort-id C
     phase-b-report  --cohort-id C                            every day whose outcomes are frozen
+    phase-b-scheduled --cohort-id C --expect-repo P --expect-commit SHA
+                                                             what Task Scheduler runs each weekday at
+                                                             16:10 JST (D-277): exit 0 = nothing to do
+                                                             or sent, 2 = stopped by a guard, 1 = error
+    check-calendar                                           JPX's published closed days against ours
 
 Only ``run`` (and ``phase-b-day --send``) sends model requests. ``preflight``
 reads the Gateway's credit balance through the runner, or, for TypeSafe
@@ -49,10 +54,12 @@ import gzip
 import hashlib
 import io
 import json
+import os
 import random
 import subprocess
 import sys
 import time
+import traceback
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import replace
@@ -63,7 +70,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from surge.analysis.jev_questions import GATEWAY_MODEL, MODEL, questions, to_gateway
-from surge.evaluation import phase_b
+from surge.evaluation import jpx_calendar, phase_b
 from surge.evaluation.cost import (
     CONTEXT_TOKENS,
     Budget,
@@ -76,6 +83,7 @@ from surge.evaluation.cost import (
     read_credits,
     record_credit_snapshot,
 )
+from surge.evaluation.joblock import JobLock, JobLockHeld
 from surge.evaluation.leakage import check_prospective_sample, check_sample
 from surge.evaluation.method import REPO_ROOT, MethodError, load_method
 from surge.evaluation.outcome import HORIZON, OUTCOME_DEFINITION, OUTCOME_VERSION, compute_outcome
@@ -101,6 +109,7 @@ from surge.evaluation.prices import (
     trading_sessions,
 )
 from surge.evaluation.providers import (
+    ENV_TYPESAFE_KEY,
     PROVIDER_NAMES,
     SERVED_PROVIDER,
     SERVED_VERSION,
@@ -142,6 +151,7 @@ from surge.evaluation.state import (
 from surge.evaluation.store import RunStore, StoreError, default_root
 from surge.evaluation.universe import ListedIssue
 from surge.features.engine import FEATURE_VERSION
+from surge.providers.yahoo_finance import JST
 from surge.routes.engine import ROUTE_VERSION
 
 #: 1.1.0 adds Phase B (D-272); Phase A's runs were made with 1.0.0.
@@ -237,6 +247,10 @@ class EvaluationError(RuntimeError):
 
 class SendWindowClosed(EvaluationError):
     """S1 may have opened: nothing more of the day is sent (Phase B is prospective)."""
+
+
+class ClosedDay(EvaluationError):
+    """Not a TSE business day by JPX's published calendar: nothing is planned or sent."""
 
 
 # ----------------------------------------------------------------- helpers
@@ -713,6 +727,12 @@ def plan_day(root: Path, cohort_id: str, s0: date, *, clock: Clock | None = None
         check_s0(s0)
     except SelectionError as exc:
         raise EvaluationError(str(exc)) from exc
+    try:
+        closed = jpx_calendar.closed_reason(s0)
+    except jpx_calendar.CalendarUnknown as exc:
+        raise EvaluationError(str(exc)) from exc
+    if closed:
+        raise ClosedDay(f"S0 {s0} is not a TSE business day ({closed}; {jpx_calendar.CALENDAR_VERSION})")
     if now < phase_b.close_confirmed_at(s0):
         raise EvaluationError(f"S0 {s0}: its bars are final from {phase_b.close_confirmed_at(s0).isoformat()}, "
                               "not before")
@@ -1201,6 +1221,9 @@ def _preflight_b(store: RunStore, manifest: dict, *, budget: Budget, provider: s
         window_problems.append("the day's bars are not final yet")
     if now >= phase_b.send_deadline(s0):
         window_problems.append("the send window has closed: S1 may have opened")
+    if not (os.environ.get(ENV_TYPESAFE_KEY) or "").strip():
+        window_problems.append(f"{ENV_TYPESAFE_KEY} is not in this process's environment "
+                               "(run through Invoke-JevPhaseB.ps1 or Invoke-WithSurgeSecrets.ps1)")
     tokens = [r["o200k_tokens"] for r in requests]
     result = {
         "checked_at": now.isoformat(),
@@ -1325,7 +1348,7 @@ def _rate_limit_wait(record: dict, attempt: int) -> float:
 
 
 def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER, pacer: Pacer | None = None,
-        provider: str | None = None, transport=None, clock: Clock | None = None) -> dict:
+        provider: str | None = None, transport=None, clock: Clock | None = None, lock_held: bool = False) -> dict:
     """Send the planned requests - main, then anonymized, then drift - inside the hard budget.
 
     Through the run's provider (the manifest's, or the Gateway fallback when
@@ -1342,10 +1365,23 @@ def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER, pacer: Pacer 
     Phase B day, the send window (S1's open) and the cohort's $2.50 cap. After
     every answer of a Phase B day, a served version other than the pinned one
     stops the day and the whole cohort.
+
+    A Phase B day is sent only under the cohort's lock (one sender at a time,
+    D-277). A run that was interrupted - ``run-started-*.json`` without
+    ``stage-run.json`` or ``run-stopped-*.json`` - is not resumed: a request
+    may have been sent without its record, and sending it again could charge
+    it twice.
     """
 
     _verify_stage(store, "plan")
     manifest = store.read_json("manifest.json")
+    if manifest["phase"] == "B" and not lock_held:
+        try:
+            with JobLock(phase_b.job_lock_path(store.root, manifest["cohort_id"])):
+                return run(store, budget=budget, runner=runner, pacer=pacer, provider=provider,
+                           transport=transport, clock=clock, lock_held=True)
+        except JobLockHeld as exc:
+            raise EvaluationError(f"not sending: {exc}") from exc
     is_b = manifest["phase"] == "B"
     for stage in ("plan", "build") if is_b else ("plan", "build", "outcomes"):
         _verify_stage(store, stage)
@@ -1354,6 +1390,13 @@ def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER, pacer: Pacer 
     if store.exists("run-stopped-1.json"):
         # A stop is looked at, not resumed past.
         raise EvaluationError(f"run {store.run_id} stopped earlier (run-stopped-*.json); it is not resumed")
+    if store.exists("run-started-1.json"):
+        interrupted = ("an earlier run of this day was interrupted before it finished (run-started-*.json without "
+                       "stage-run.json or run-stopped-*.json); it is not resumed")
+        store.write_json(_next_name(store, "run-stopped"), {"stopped": interrupted,
+                                                           "stopped_at": _now(clock).isoformat(),
+                                                           "run_started": _latest(store, "run-started")})
+        raise EvaluationError(f"run {store.run_id}: {interrupted}")
     checked = _latest(store, "preflight")
     if not checked or not checked["ready_to_send"]:
         raise EvaluationError("the latest preflight is missing or not ready to send")
@@ -1399,6 +1442,9 @@ def run(store: RunStore, *, budget: Budget, runner: Path = RUNNER, pacer: Pacer 
         raise EvaluationError(f"not sending: {problems}")
     expires_at = (datetime.fromisoformat(credits["expires_at"])
                   if provider == TYPESAFE_DIRECT and credits.get("expires_at") else None)
+    # From here requests may leave; if this process dies before the end, the day is not resumed.
+    store.write_json(_next_name(store, "run-started"), {"started_at": _now(clock).isoformat(), "pid": os.getpid(),
+                                                        "pending": len(pending), "provider": provider})
 
     stopped, last = None, None
     previous_success_at = None
@@ -1527,13 +1573,22 @@ def report(store: RunStore) -> dict:
 
 def phase_b_day(root: Path, cohort_id: str, s0: date | None, *, send: bool, budget: Budget | None = None,
                 clock: Clock | None = None, yahoo=None, fetch_issues=None, yanoshin=None, transport=None,
-                pacer: Pacer | None = None, sleep=time.sleep) -> dict:
+                pacer: Pacer | None = None, sleep=time.sleep, lock_held: bool = False) -> dict:
     """One business day, in order: plan-day, build, preflight and - only with ``send`` - run.
 
     ``s0=None`` takes the day whose window is open now. A stage already done
-    is not repeated; a day already sent is left alone.
+    is not repeated; a day already sent, or stopped, is left alone. Everything
+    happens under the cohort's lock.
     """
 
+    if not lock_held:
+        try:
+            with JobLock(phase_b.job_lock_path(root, cohort_id)):
+                return phase_b_day(root, cohort_id, s0, send=send, budget=budget, clock=clock, yahoo=yahoo,
+                                   fetch_issues=fetch_issues, yanoshin=yanoshin, transport=transport, pacer=pacer,
+                                   sleep=sleep, lock_held=True)
+        except JobLockHeld as exc:
+            raise EvaluationError(f"not running: {exc}") from exc
     now = _now(clock)
     if s0 is None:
         slot = phase_b.schedule(now)
@@ -1544,24 +1599,25 @@ def phase_b_day(root: Path, cohort_id: str, s0: date | None, *, send: bool, budg
     budget = budget or Budget(Decimal(cohort["budget"]["daily_budget_usd"]), cohort["budget"]["daily_max_requests"])
     store = phase_b.day_store(root, cohort_id, s0)
     result: dict = {"s0": s0.isoformat(), "run_id": store.run_id}
+    if store.exists("stage-run.json"):
+        result["already_sent"] = True
+        return result
+    for marker in ("run-stopped", "day-stopped"):
+        if store.exists(f"{marker}-1.json"):
+            result["stopped"] = _latest(store, marker)
+            return result
     if not store.exists("stage-plan.json"):
         result["plan"] = plan_day(root, cohort_id, s0, clock=clock, yahoo=yahoo, fetch_issues=fetch_issues,
                                   sleep=sleep)
     if not store.exists("stage-build.json"):
         result["build"] = build(store, yanoshin=yanoshin)
-    if store.exists("stage-run.json"):
-        result["already_sent"] = True
-        return result
-    if store.exists("run-stopped-1.json"):
-        result["stopped"] = _latest(store, "run-stopped")
-        return result
     checked = preflight(store, budget=budget, clock=clock)
     result["preflight"] = {k: checked[k] for k in ("ready_to_send", "samples", "requests", "requests_total",
                                                     "limit_problems", "budget_problems", "window_problems",
                                                     "global_cap", "estimated_usd_total")}
     result["preflight"]["violations"] = checked["leakage_and_integrity"]["samples_with_violations"]
     if send:
-        result["run"] = (run(store, budget=budget, transport=transport, pacer=pacer, clock=clock)
+        result["run"] = (run(store, budget=budget, transport=transport, pacer=pacer, clock=clock, lock_held=True)
                          if checked["ready_to_send"] else "not sent: the preflight is not ready")
     return result
 
@@ -1581,10 +1637,10 @@ def _day_status(store: RunStore) -> dict:
     preflight_latest = _latest(store, "preflight")
     return {
         "planned": store.exists("stage-plan.json"),
-        "built": store.exists("stage-build.json"),
+        "built": store.exists("stage-plan.json") and store.exists("stage-build.json"),
         "ready_to_send": bool(preflight_latest and preflight_latest["ready_to_send"]),
         "sent": store.exists("stage-run.json"),
-        "stopped": _latest(store, "run-stopped"),
+        "stopped": _latest(store, "run-stopped") or _latest(store, "day-stopped"),
         "outcomes_frozen": store.exists("stage-outcomes.json"),
         "requests_planned": len(store.read_jsonl("requests.jsonl")) if store.exists("requests.jsonl") else 0,
         "answered": dict(answered),
@@ -1621,6 +1677,8 @@ def phase_b_status(root: Path, cohort_id: str, *, clock: Clock | None = None) ->
         "remaining_usd": str(cap - spent),
         "credit": direct_credit_state(root, now=_now(clock)),
         "schedule": phase_b.schedule(_now(clock)),
+        "scheduler_runs": [json.loads(p.read_text(encoding="utf-8"))
+                           for p in sorted((store.path / "scheduler" / "runs").glob("*.json"))[-5:]],
     }
 
 
@@ -1665,6 +1723,154 @@ def phase_b_report(root: Path, cohort_id: str, *, clock: Clock | None = None) ->
     store.write_json(name, result)
     store.write_bytes(name.replace(".json", ".md"), render_markdown(result).encode("utf-8"))
     return result
+
+
+# ----------------------------------------------------------------- Phase B: the scheduled job (D-277)
+
+
+#: The task may start a little before a window opens (a clock a second early, a
+#: late wake); it then waits for the window, up to this long.
+MAX_WAIT_FOR_WINDOW_SECONDS = 900.0
+
+
+def _frozen_worktree_problem(expect_repo: Path | None, expect_commit: str | None) -> str | None:
+    """Why this code is not the frozen worktree the task was registered for; None when it is."""
+
+    if expect_repo is not None and REPO_ROOT.resolve() != Path(expect_repo).resolve():
+        return f"the code runs from {REPO_ROOT}, not from the frozen worktree {expect_repo}"
+    if expect_commit is not None:
+        head = _git("rev-parse", "HEAD")
+        if head != expect_commit:
+            return f"the worktree is at {head}, not at {expect_commit}"
+        dirty = _git("status", "--porcelain", "--untracked-files=no")
+        if dirty is None or dirty:
+            return "the worktree has changes; it must be exactly the commit it was registered at"
+    return None
+
+
+def _stop_day(store: RunStore, *, reason: str, clock: Clock | None, detail=None) -> str:
+    """Record that the scheduled job stopped this day; the job leaves it alone afterwards."""
+
+    name = _next_name(store, "day-stopped")
+    store.write_json(name, {"stopped_at": _now(clock).isoformat(), "reason": reason[:600], "detail": detail})
+    return name
+
+
+def _scheduled(root: Path, cohort_id: str, *, expect_repo: Path | None, expect_commit: str | None,
+               clock: Clock | None, sleep, yahoo, fetch_issues, yanoshin, transport, pacer,
+               max_wait_seconds: float) -> dict:
+    problem = _frozen_worktree_problem(expect_repo, expect_commit)
+    if problem:
+        return {"status": "not_the_frozen_worktree", "exit_code": 2, "detail": problem}
+    lock = JobLock(phase_b.job_lock_path(root, cohort_id))
+    try:
+        lock.acquire()
+    except JobLockHeld as exc:
+        return {"status": "locked", "exit_code": 0, "detail": str(exc)}
+    try:
+        try:
+            cohort = load_cohort(root, cohort_id)
+        except EvaluationError as exc:
+            return {"status": "cohort_refused", "exit_code": 2, "detail": str(exc)}
+        done = phase_b.completed_days(root, cohort_id)
+        if len(done) >= cohort["target_business_days"]:
+            return {"status": "cohort_complete", "exit_code": 0,
+                    "detail": f"{len(done)} business days sent ({done[0]} to {done[-1]})"}
+        now = _now(clock)
+        slot = phase_b.schedule(now)
+        if not slot["window_open"]:
+            wait = (datetime.fromisoformat(slot["opens_at"]) - now).total_seconds()
+            if 0 < wait <= max_wait_seconds:
+                sleep(wait + 1.0)
+                now = _now(clock)
+                slot = phase_b.schedule(now)
+        if not slot["window_open"]:
+            today = now.astimezone(JST).date()
+            closed = jpx_calendar.closed_reason(today)
+            return {"status": "closed_day" if closed else "no_window", "exit_code": 0, "today": today.isoformat(),
+                    "closed": closed, "schedule": slot}
+        s0 = date.fromisoformat(slot["s0"])
+        store = phase_b.day_store(root, cohort_id, s0)
+        base = {"s0": s0.isoformat(), "schedule": slot}
+        if store.exists("stage-run.json"):
+            return {"status": "already_sent", "exit_code": 0, **base}
+        for marker in ("run-stopped", "day-stopped"):
+            if store.exists(f"{marker}-1.json"):
+                return {"status": "day_stopped_earlier", "exit_code": 2, **base, "detail": _latest(store, marker)}
+        try:
+            day = phase_b_day(root, cohort_id, s0, send=True, clock=clock, yahoo=yahoo, fetch_issues=fetch_issues,
+                              yanoshin=yanoshin, transport=transport, pacer=pacer, sleep=sleep, lock_held=True)
+        except (EvaluationError, SelectionError, StoreError) as exc:
+            marker = _stop_day(store, reason=str(exc), clock=clock)
+            return {"status": "stopped", "exit_code": 2, **base, "detail": str(exc)[:600], "marker": marker}
+        if day.get("already_sent"):
+            return {"status": "already_sent", "exit_code": 0, **base}
+        if day.get("stopped"):
+            return {"status": "day_stopped_earlier", "exit_code": 2, **base, "detail": day["stopped"]}
+        checked = day["preflight"]
+        if not checked["ready_to_send"]:
+            marker = _stop_day(store, reason="the preflight is not ready to send", clock=clock, detail=checked)
+            return {"status": "stopped", "exit_code": 2, **base, "detail": checked, "marker": marker}
+        sent = day["run"]
+        summary = {k: sent.get(k) for k in ("requests_answered", "sent_this_time", "spent_usd", "served_model",
+                                              "cohort_spent_usd", "cohort_cap_usd", "stopped")}
+        if sent.get("stopped"):
+            return {"status": "stopped", "exit_code": 2, **base, "detail": summary}
+        return {"status": "sent", "exit_code": 0, **base, "detail": summary}
+    finally:
+        lock.release()
+
+
+def phase_b_scheduled(root: Path, cohort_id: str, *, expect_repo: Path | None = None,
+                      expect_commit: str | None = None, clock: Clock | None = None, sleep=time.sleep, yahoo=None,
+                      fetch_issues=None, yanoshin=None, transport=None, pacer: Pacer | None = None,
+                      max_wait_seconds: float = MAX_WAIT_FOR_WINDOW_SECONDS) -> dict:
+    """What Task Scheduler runs every weekday at 16:10 JST: at most one business day, start to finish (D-277).
+
+    In order: the code is the frozen worktree at the registered commit; the
+    cohort's lock (a second instance sends nothing); the cohort's protocol
+    and stops; the 25-day target; the send window of a JPX business day
+    (a start up to 15 minutes early waits for it; a late start inside the
+    window runs, outside it ends without sending); a day already sent or
+    stopped is left alone; then plan-day, build, preflight and run. Anything a
+    guard refuses marks the day stopped - it is not tried again automatically.
+
+    ``exit_code``: 0 nothing to do, or the day was sent; 2 a guard stopped it;
+    1 an unexpected error. Each invocation is recorded under the cohort's
+    ``scheduler/runs/``.
+    """
+
+    record = {"started_at": _now(clock).isoformat(), "pid": os.getpid(), "cohort_id": cohort_id,
+              "code": {"repo": str(REPO_ROOT), "head": _git("rev-parse", "HEAD"), "expected_commit": expect_commit}}
+    try:
+        record.update(_scheduled(root, cohort_id, expect_repo=expect_repo, expect_commit=expect_commit, clock=clock,
+                                 sleep=sleep, yahoo=yahoo, fetch_issues=fetch_issues, yanoshin=yanoshin,
+                                 transport=transport, pacer=pacer, max_wait_seconds=max_wait_seconds))
+    except Exception as exc:  # noqa: BLE001 - whatever happened, the record says so and the exit code shows it
+        record.update({"status": "error", "exit_code": 1, "detail": f"{type(exc).__name__}: {exc}"[:600],
+                       "traceback": traceback.format_exc()[-3000:]})
+    record["finished_at"] = _now(clock).isoformat()
+    try:
+        runs = phase_b.cohort_store(root, cohort_id)
+        stamp = datetime.fromisoformat(record["started_at"]).astimezone(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        runs.write_json(f"scheduler/runs/{stamp}-{os.getpid()}.json", record)
+    except (OSError, StoreError, phase_b.PhaseBError):
+        pass  # the exit code still says what happened
+    return record
+
+
+def check_calendar(*, fetch=None) -> dict:
+    """JPX's 休業日一覧 read now, against the closed days the job uses."""
+
+    from surge.http_fetch import fetch as http_fetch
+
+    response = (fetch or http_fetch)(jpx_calendar.SOURCE_URL)
+    if response.status != 200:
+        raise EvaluationError(f"JPX returned {response.status} for its calendar page")
+    diff = jpx_calendar.diff_against_page(response.body.decode("utf-8"))
+    return {"calendar_version": jpx_calendar.CALENDAR_VERSION, "source": jpx_calendar.SOURCE_URL,
+            "page_sha256": response.sha256, "same_as_read_on": response.sha256 == jpx_calendar.SOURCE_SHA256,
+            **diff, "matches": not (diff["added_on_page"] or diff["removed_from_page"] or diff["renamed"])}
 
 
 # ----------------------------------------------------------------- CLI
@@ -1716,6 +1922,11 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("phase-b-status", "phase-b-report"):
         p = sub.add_parser(name)
         p.add_argument("--cohort-id", required=True)
+    p = sub.add_parser("phase-b-scheduled", help="what Task Scheduler runs (D-277)")
+    p.add_argument("--cohort-id", required=True)
+    p.add_argument("--expect-repo", type=Path, default=None, help="the frozen worktree the task was registered for")
+    p.add_argument("--expect-commit", default=None, help="the commit that worktree must be at, clean")
+    sub.add_parser("check-calendar", help="compare JPX's published closed days with the job's calendar")
     args = parser.parse_args(argv)
     root = args.root or default_root()
 
@@ -1735,6 +1946,15 @@ def main(argv: list[str] | None = None) -> int:
         result = phase_b_status(root, args.cohort_id)
     elif args.command == "phase-b-report":
         result = phase_b_report(root, args.cohort_id)
+    elif args.command == "phase-b-scheduled":
+        result = phase_b_scheduled(root, args.cohort_id, expect_repo=args.expect_repo,
+                                   expect_commit=args.expect_commit)
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        return int(result["exit_code"])
+    elif args.command == "check-calendar":
+        result = check_calendar()
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+        return 0 if result["matches"] else 2
     else:
         store = RunStore(root, args.run_id)
         if args.command == "plan":

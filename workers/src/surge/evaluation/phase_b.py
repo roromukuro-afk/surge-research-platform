@@ -9,11 +9,12 @@ are read. A day whose code differs from its cohort in any of these is refused;
 a change means a new cohort. Everything else (fetching, pacing, budgets,
 reporting) may be fixed, and each day records the code it ran with.
 
-**A day** (S0 >= 2026-09-24, a TSE session) may start once every S0 bar is
-final - the session end plus twice Yahoo's 20-minute delay, so that even a
-thin security's last trade is its close (D-262) - and must be sent before S1
-can open: 09:00 JST on the next weekday (a holiday only moves the real S1
-later). Its requests go to TypeSafe's own API with the model pinned to
+**A day** (S0 >= 2026-09-24, a TSE business day by JPX's published
+calendar, ``surge.evaluation.jpx_calendar``, D-277) may start once every S0
+bar is final - the session end plus twice Yahoo's 20-minute delay, so that
+even a thin security's last trade is its close (D-262) - and must be sent
+before S1 can open: 09:00 JST on the next weekday (a holiday only moves the
+real S1 later). Its requests go to TypeSafe's own API with the model pinned to
 ``jev-1.13.0``; an answer from any other version stops the whole cohort, and
 the Gateway, whose answers carry no version, cannot join it.
 
@@ -36,6 +37,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from surge.evaluation.cost import BudgetExceeded, charged_usd
+from surge.evaluation.jpx_calendar import is_business_day
 from surge.evaluation.method import REPO_ROOT
 from surge.evaluation.outcome import OUTCOME_DEFINITION, OUTCOME_VERSION
 from surge.evaluation.population import PRICE_LIMIT_JPY, SCREENER_DEFINITION
@@ -132,16 +134,19 @@ def send_deadline(s0: date) -> datetime:
 
 
 def schedule(now: datetime) -> dict:
-    """Which S0's window is open at ``now`` - after its close is final and before S1 can open - or the next one."""
+    """Which business day's window is open at ``now`` - after its close is final, before S1 can open - or the next.
+
+    Business days are JPX's (weekends and its published closed days excluded).
+    """
 
     today = now.astimezone(JST).date()
     for back in range(0, 5):
         day = today - timedelta(days=back)
-        if day >= PHASE_B_START and day.weekday() < 5 and close_confirmed_at(day) <= now < send_deadline(day):
+        if day >= PHASE_B_START and is_business_day(day) and close_confirmed_at(day) <= now < send_deadline(day):
             return {"s0": day.isoformat(), "window_open": True, "opens_at": close_confirmed_at(day).isoformat(),
                     "closes_at": send_deadline(day).isoformat()}
     day = max(today, PHASE_B_START)
-    while day.weekday() >= 5 or close_confirmed_at(day) <= now:
+    while not is_business_day(day) or close_confirmed_at(day) <= now:
         day += timedelta(days=1)
     return {"s0": None, "window_open": False, "next_s0": day.isoformat(),
             "opens_at": close_confirmed_at(day).isoformat(), "closes_at": send_deadline(day).isoformat()}
@@ -258,6 +263,12 @@ def check_cap(spent: Decimal, estimate: Decimal, cap: Decimal = GLOBAL_HARD_CAP_
                              f"${cap} cap")
 
 
+def job_lock_path(root: Path, cohort_id: str) -> Path:
+    """The cohort's one lock: whatever sends for the cohort holds it (``surge.evaluation.joblock``)."""
+
+    return cohort_store(root, cohort_id).path / "scheduler" / "job.lock"
+
+
 def cohort_stops(root: Path, cohort_id: str) -> list[dict]:
     store = cohort_store(root, cohort_id)
     stops, n = [], 1
@@ -280,5 +291,6 @@ def stop_cohort(root: Path, cohort_id: str, *, s0: date, reason: str, detail: st
 __all__ = ["DAILY_BUDGET_USD", "FROZEN_FILES", "GLOBAL_HARD_CAP_USD", "HISTORY_LOOKBACK_DAYS",
            "MIN_UNIVERSE_COVERAGE", "NOT_INTRODUCED", "PINNED_MODEL", "PREREGISTERED", "TARGET_BUSINESS_DAYS",
            "PhaseBError", "check_cap", "check_cohort_id", "close_confirmed_at", "cohort_spend", "cohort_stops",
-           "cohort_store", "completed_days", "day_dates", "day_spend", "day_store", "fingerprint", "frozen_differences",
-           "frozen_protocol", "per_day", "schedule", "send_deadline", "stop_cohort"]
+           "cohort_store", "completed_days", "day_dates", "day_spend", "day_store", "fingerprint",
+           "frozen_differences", "frozen_protocol", "job_lock_path", "per_day", "schedule", "send_deadline",
+           "stop_cohort"]

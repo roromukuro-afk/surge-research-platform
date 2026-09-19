@@ -1,6 +1,6 @@
 # Jev 予測性能評価 設計
 
-状態: **v1.3（ユーザー確定 2026-09-19: Phase B の経路は D-275、Phase B の規則は D-276 = D-272 の決定）** — Phase A 完了（§10）。Phase B は**実装と synthetic test まで完了、未開始**（§11）: S0 = 2026-09-24 以降、TypeSafe 直接 API で model を `jev-1.13.0` に固定、1 営業日最大 92 request、Phase B 全体の hard cap $2.50。**cohort の作成と 2026-09-24 分の送信はユーザーの開始指示まで行わない**
+状態: **v1.4（ユーザー確定 2026-09-19: Phase B の経路は D-275、規則は D-276 = D-272 の決定、開始条件と自動運用は D-277）** — Phase A 完了（§10）。Phase B（§11）: S0 = 2026-09-24 以降、TypeSafe 直接 API で model を `jev-1.13.0` に固定、1 営業日最大 92 request、Phase B 全体の hard cap $2.50。cohort `jev-phase-b-jp-20260924-v1` を作成し、Windows Task Scheduler（平日 16:10 JST）で自動運用する（§11-7）。**2026-09-24 16:10 JST より前には送らない**
 前提: [D-267](../unresolved-decisions.md) EOD Prediction 規則（S0 確定終値・目標 ×1.20・S1 から評価・T+1/3/5/10/20・期限 T+20）/ D-269（Vercel AI Gateway 経由の Jev は技術的に適合、production default ではない）/ D-268（+20% 到達の判定基準は未決）/ D-270（本設計の確定）
 
 ## 0. 目的と範囲
@@ -289,8 +289,29 @@ plan-day と同じ読み込み・screening・抽出を、直近の session **S0 
 - Phase A の replay（61.2%）より通過率が高い日だったが、上限 92 の設計はそのまま成り立つ。
 - peak memory の計測は失敗（0 を返した）ので未計測。履歴は 1 銘柄ずつ読んで screening し、保持しない作り。
 
-### 11-7. まだしていないこと
+### 11-7. 開始条件と自動運用（D-277、ユーザー決定 2026-09-19）
 
-- cohort の作成（`phase-b-init`）と 2026-09-24 分の送信。OS の scheduler への登録もしていない（登録すると 9/24 に自動送信され得るため）。
-- 開始するときの手順: `phase-b-init --cohort-id <id> --experiment-seed <seed>` → 9/24 16:10 JST 以降に `phase-b-day --cohort-id <id> --s0 2026-09-24`（preflight まで）→ 確認して `--send`。
-- credit snapshot は記録済み（2026-09-19 08:43:13Z の console 読み取り: Credit Balance $5.00、Monthly credit、Expires (UTC) Oct 19, 2026）。10-19 00:00 UTC を跨ぐ前に新しい残高の確認が一度必要（Phase B の 17 営業日目ごろ）。
+- **cohort**: `cohort_id = jev-phase-b-jp-20260924-v1`、`experiment_seed = surge-phase-b-jp-jev-1.13.0-v1-20260924`（Phase B 終了まで変えない）。
+- **自動運用**: Windows Task Scheduler、平日 16:10 JST。手動承認は挟まない。job は 1 回の起動で、universe 取得 → Yahoo EOD → screening → candidate pool の保存 → Primary / Control の決定論的な抽出 → 匿名化 / drift の抽出 → build → prospective preflight → TypeSafe direct への送信 → artifacts / ledger の保存、を行う。
+- **営業日の判定は job 自身の JPX calendar**（`surge.evaluation.jpx_calendar`）: JPX の「営業時間・休業日一覧」（2026/02/06 更新版を 2026-09-19 に読み取り、ページの SHA-256 を記録）の 2026・2027 年の休業日と土日。**土日・祝日・非取引日は何も送らず正常終了（exit 0）**。範囲外の年は答えない（推測しない）。これは job がいつ動くかだけを決め、outcome の窓は従来どおり実際に立った session で数える（D-142）。calendar 上の営業日なのにデータに session が無い日は異常として、その日を止める。`jev_eval check-calendar` で公式ページとの差分を確かめられる。
+- **自動停止**（その日または cohort を止め、送らない）: `jev-1.13.0` 以外の回答 / 凍結ファイル・hash の不一致 / Canonical・addenda・question schema の変更 / coverage < 95% / 開始日前 / 送信窓の外 / 1 日の budget 超過 / $2.50 cap 超過 / credit snapshot の失効 / 回答 schema の不完全 / provider error / leakage・integrity violation / 25 営業日の完了（これは正常終了）。429 は TypeSafe の待機時間に従い、最大の再試行を超えたらその日を止める。
+- **credit の失効**: 2026-10-19 00:00 UTC で送信は止まる。新しい credit の後、**ユーザーが console の残高を確かめるまで再開しない**（job は snapshot を書かない。`record-credit` はユーザーの確認の後だけ）。
+- **scheduler の安全性**:
+
+| 項目 | 内容 |
+|---|---|
+| 実行 | `powershell.exe -File <frozen worktree>\ops\windows\Invoke-JevPhaseB.ps1 -CohortId … -ExpectCommit … -RepoRoot … -PythonExe … -EvaluationRoot …` → `python -m surge.jobs.jev_eval phase-b-scheduled` |
+| working directory | `<frozen worktree>\workers\src`（`surge` は pip install されていないので、ここのコードだけが import される） |
+| frozen worktree | 専用の detached git worktree を登録 commit に固定。job は別の場所・別の commit・変更ありでは何もしない（`not_the_frozen_worktree`, exit 2） |
+| 実行ユーザー | 現在のユーザー、ログオン中のみ、通常の権限 |
+| secret | `TYPESAFE_API_KEY` だけを DPAPI から復号し、その実行の環境にだけ入れて終了時に消す。ほかの保存済み key は読まない。記録にもログにも出さない。preflight は key が環境に無ければ ready にしない |
+| ログ | `~/.surge/evaluation/jev/<cohort>/scheduler/console/`（出力）と `…/scheduler/runs/`（実行ごとの記録: status・exit code・S0・理由） |
+| 二重起動 | Task Scheduler の `IgnoreNew` と、job 自身の lock（OS が process の終了で必ず外す byte-range lock。乗っ取りはしない）。2 つ目は何も送らず exit 0 |
+| 冪等性 | 送信済みの日（`stage-run.json`）は二度と送らない。止まった日（`run-stopped` / `day-stopped`）は自動で再試行しない。`run-started` だけが残った日（途中で process が落ちた日）は再開しない（記録の無い送信があり得るので、二重課金を避ける） |
+| 遅れた起動 | `StartWhenAvailable`。スリープ・再起動の後でも、その日の送信窓（16:10 JST〜翌平日 09:00 JST）の中なら実行、外なら送らずに exit 0。15 分以内の早い起動は窓が開くまで待つ |
+| exit code | 0 = 何もすることが無い・送信完了、2 = guard が止めた、1 = 想定外のエラー、3 = wrapper が job を起動できない |
+
+### 11-8. まだしていないこと
+
+- T+20 後の `freeze-outcomes` と `phase-b-report` は自動 job に入れていない（最初の日 9/24 の T+20 は 10/23）。
+- credit snapshot は 2026-10-19 00:00 UTC に失効する。そこから先はユーザーが console の残高を確かめて `record-credit` するまで送信しない。
