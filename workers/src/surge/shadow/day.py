@@ -195,7 +195,9 @@ def day_window(s0: date, now: datetime, *, probe: bool = False) -> dict:
     if now < opens:
         if probe or (opens - now).total_seconds() > MAX_WAIT_SECONDS:
             raise DayRefused("not_yet", f"S0 {s0}: its bars are final from {opens.isoformat()}, not before")
-        return {**window, "wait_until": opens.isoformat()}
+        # As the PC's scheduled job waits: until the window opens, and a second more.
+        return {**window, "wait_until": opens.isoformat(),
+                "wait_seconds": round((opens - now).total_seconds() + 1.0, 3)}
     if not probe and now >= closes:
         raise DayRefused("window_closed", f"S0 {s0}: S1 may have opened ({closes.isoformat()}); the day can no "
                                           "longer be predicted prospectively")

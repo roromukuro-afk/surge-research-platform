@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 import pytest
 
@@ -80,12 +81,14 @@ os.environ.setdefault("WORKFLOW_LOCAL_DATA_DIR", tempfile.mkdtemp(prefix="surge-
 
 
 @pytest.fixture()
-def local_world(monkeypatch):
+def local_world(monkeypatch, tmp_path):
     # The SDK keeps one world per process, bound to the event loop that first used it; each test runs its own
-    # loop, so each gets a fresh world (set_world is the SDK's reset hook), closed in the loop that made it.
+    # loop, so each gets a fresh world (set_world is the SDK's reset hook), closed in the loop that made it, and
+    # its own data: what one test's queue left behind is not another test's to deliver.
     from vercel.workflow._internal.world import set_world
 
     monkeypatch.setenv("WORKFLOW_TARGET_WORLD", "local")
+    monkeypatch.setenv("WORKFLOW_LOCAL_DATA_DIR", str(tmp_path / "workflow-data"))
     set_world(None)
     yield
     set_world(None)
@@ -236,3 +239,18 @@ def test_stage3_a_universe_not_read_almost_whole_stops_the_day_as_the_pc_stops_i
     assert commit["status"] == "stopped" and set(commit["artifacts"]) == {"run.json"}
     stopped = json.loads(read_verified(blob, prefix, commit, "run.json"))["day_stopped"]
     assert "below 95%" in stopped[0]["reason"] and stopped[0]["detail"]["kind"] == "coverage"
+
+
+def test_stage3_a_day_started_just_before_its_window_waits_for_it(tmp_path):
+    # In a process of its own (tests/shadow_wait_child.py): the local world keeps process-wide state, and a second
+    # event loop in one process does not get a workflow's sleep back. On Vercel every invocation is its own process.
+    import subprocess
+    from datetime import datetime
+
+    child = Path(__file__).with_name("shadow_wait_child.py")
+    done = subprocess.run([sys.executable, str(child), str(tmp_path)], capture_output=True, text=True, timeout=300,
+                          check=False)
+    assert done.returncode == 0, done.stderr[-3000:]
+    result = json.loads(done.stdout.strip().splitlines()[-1])
+    assert datetime.fromisoformat(result["opened_now"]) >= datetime.fromisoformat(result["opens"])
+    assert result["written"] and result["elapsed"] >= 2.5  # it slept until the window opened, then ran the day

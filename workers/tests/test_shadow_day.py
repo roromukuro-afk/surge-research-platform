@@ -168,7 +168,8 @@ def _at(day_: date, hour: int, minute: int = 0) -> datetime:
 
 def test_a_day_runs_in_the_pc_s_window_and_a_probe_only_on_a_past_business_day():
     assert day.day_window(S0, _at(S0, 17))["now"] == _at(S0, 17).isoformat()
-    assert day.day_window(S0, _at(S0, 16, 0))["wait_until"] == phase_b.close_confirmed_at(S0).isoformat()
+    early = day.day_window(S0, _at(S0, 16, 0))
+    assert early["wait_until"] == phase_b.close_confirmed_at(S0).isoformat() and early["wait_seconds"] == 601.0
     for when, kind in ((_at(S0, 15, 0), "not_yet"), (_at(date(2026, 9, 25), 9, 0), "window_closed")):
         with pytest.raises(day.DayRefused) as refused:
             day.day_window(S0, when)

@@ -304,12 +304,15 @@ async def day_stop(opened: dict, refused: dict, planned: dict | None, run: dict)
 async def shadow_day(s0: str | None, mode: str, trigger: str, requested_at: str) -> dict:
     """``mode``: ``day`` (built and written, nothing sent) or ``probe`` (a past day read and screened, nothing written)."""
 
-    from datetime import datetime
-
     opened = await day_open(s0, mode)
-    if "wait_until" in opened:
-        await sleep(datetime.fromisoformat(opened["wait_until"]))
+    for _ in range(3):  # started early: wait for the window (a step computes how long; the body only counts)
+        if "wait_seconds" not in opened:
+            break
+        await sleep(opened["wait_seconds"])
         opened = await day_open(opened["s0"], mode)
+    if "wait_seconds" in opened:
+        opened = {**opened, "refused": {"kind": "not_yet", "message": f"S0 {opened['s0']}: still not open after "
+                                                                      "three waits"}}
     run = {"mode": mode, "trigger": trigger, "requested_at": requested_at, "opened": opened, "steps": {}}
     if "refused" in opened:
         if mode == "probe":
