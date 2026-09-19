@@ -1,6 +1,6 @@
 # Phase B Web shadow（Vercel）設計
 
-状態: **v0.3（2026-09-19、D-279）** — Stage 1・2 を実装し、Vercel 上で動作を確認した（§9）。Cron → 保護された production → Workflow → 完了の経路も no-op で確認済み。Stage 3（実データ・Jev なし）を実装しテストした（§8）。Vercel 上ではまだ実行していない（Blob の使用量をダッシュボードで確認してから）。**正式な Phase B は何も変わらない。**
+状態: **v0.3（2026-09-19、D-279）** — Stage 1・2 を実装し、Vercel 上で動作を確認した（§9）。Cron → 保護された production → Workflow → 完了の経路も no-op で確認済み。Stage 3（実データ・Jev なし）を実装しテストした（§8）。Vercel 上の最初の probe（S0 = 2026-09-18）で、Workflow の step 内では Yahoo の取得が全件失敗することが分かり（SDK と C 拡張の問題、§8）、3750fc5 で直した。**修正はまだ deploy していない**（チームの Functions Storage が Hobby の上限を超えているため、ユーザー判断待ち）。**正式な Phase B は何も変わらない。**
 
 ## 0. 前提（変えないもの）
 
@@ -155,6 +155,7 @@
 - `workers/src/surge/shadow/compare.py` — 同じ S0 の PC の日と shadow の日を比べる（`python -m surge.shadow.compare --s0 2026-09-24`）。universe・3,000 円以下の母集団・screening の pass・route membership・Primary・Control・request hash を項目ごとに一致／不一致で示し、食い違った銘柄を列挙する。request hash は (a) shadow が記録した入力から凍結 `build` で組み直した bytes との一致（コード）と、(b) PC の hash との一致（データ）の 2 段で、(b) の不一致は価格履歴か開示タイトルかに分解する。PC の日は読むだけで、何も書かない。テストで、同じデータなら全項目一致、PC の読み取り後に出た開示は「開示タイトル」、価格の食い違いは「価格履歴」と示されることを確認。
 - **実測で分かったこと（2026-09-19、PC から Yahoo へ 7 銘柄・計 14 回）**: 同じ `period2` で同じ chart を 2 回取ると、JSON のキー順が変わることがあり、調整後終値（`adjclose`）の値も変わることがある。一方、凍結コードが使う素の OHLCV と分割から作る as-traded の履歴と、screen の判定は一致した。→ §2 の「再取得して digest と照合」は **履歴の digest** で照合する（chart 行の digest も記録するが、一致は求めない）。
 - **比較の時期**: `select_day` は 2026-09-24 より前の S0 を拒否する（凍結）。したがって PC と同じ S0 で universe・pass・Primary・Control・request hash を比べられるのは **S0 = 2026-09-24 が最初**で、shadow の day はその送信窓（9/24 16:10 JST 〜 9/25 09:00 JST）の中で動かす。開示タイトルは読んだ時刻で変わり得るので、request hash は (a) 同じ入力（PC が記録した開示と価格）から作った bytes と、(b) 独立に読んだ入力から作った bytes の両方で比べる（§4）。それまでに Vercel 上で測れるのは probe（S0 = 2026-09-18 なら、PC のリハーサルの件数と比べられる）。
+- **Workflow SDK と C 拡張（2026-09-19 の probe で判明、3750fc5 で修正、未 deploy）**: SDK は最初の run で `sys.modules` を独自の mapping に差し替え、その後に**初めて**読み込まれる C 拡張は step 内で `SystemError: … dictobject.c … bad argument to internal function` になる（SDK のローカル world で再現。Vercel 固有ではない）。probe では Yahoo の取得（curl_cffi）が全件これで失敗し、build のトークン数（tiktoken）も同じ理由で失敗するはずだった。workflow モジュールの先頭でホスト側に読み込み、sandbox の `passthrough_modules` に指定して解消した（ローカル world で Yahoo 取得と o200k 計数が 1 回目・2 回目とも成功、回帰テストあり）。`GET /api/shadow/selftest/extensions` が Vercel の step から Yahoo 1 件（crumb の取得を含む）と o200k 計数を確かめる。Yanoshin（TDnet の索引）を Vercel から読む経路は、まだ一度も通っていない。
 - **未実装**: 月の使用量の予算ガード（§5）。cron で自動運用する（Stage 5）前に入れる。
 
 ## 9. Vercel 上での実施記録（2026-09-19、ユーザー承認後）
@@ -175,7 +176,12 @@
 | Web 画面の Blob 読み出し | production を `SURGE_SHADOW_SOURCE=blob`・`SURGE_SHADOW_COHORT=synthetic-phase-b-fixture` にして再デプロイ（CLI から、push 済みの commit と同じ tree。project は Git 未連携）。開発用 OIDC で 7 画面（6 画面と停止日の predictions）すべて 200、integrity 照合を通って描画。直前の fixture 版と本文を比べ、違いは Blob にコピーした範囲（9/24 全体・9/28 の停止日・report-1・typesafe-1）と出典の表示だけ |
 | 入力構築コードの同一性 | `/api/shadow/health` の `input_building_code_sha256` は当初 `18a8d21b…` で、PC の凍結 worktree の `8158344c…`（9/24 の PC の manifest に入る値）と違った。ファイル別に比べると（`?files=1`）30 本中 `ops/jev-gateway-runner/package-lock.json` だけが Python の関数バンドルに入っていなかった（アップロードはされていた）。`vercel.json` の shadow service に `includeFiles: ops/jev-gateway-runner/**` を足して、30 本すべて一致（`8158344c…`）。Workflow の step 側（別バンドル）は no-op step の出力で確認する |
 | アップロードの範囲 | deployment のソース一覧に `bw.html`・CLAUDE.md・README.md と、作業ツリーの未追跡ファイル（`apps/web/.impeccable` など）が入っていた（どのサービスも使っていない）。`.vercelignore` を許可リスト（vercel.json・pyproject.toml・shadow_service・workers/src・docs/prompts・ops/jev-gateway-runner・apps/web）にし、deploy は push 済み commit の `git archive` から行う |
+| 使用量（Chrome で確認、probe 前） | ユーザー指示で私が接続済み Chrome の Usage 画面を読んだ（30 日の移動窓、チーム全体）。Blob: Storage 5.25 MB / 1 GB、Simple 811 / 10K、Advanced 125 / 2K、Transfer 363.9 MB / 10 GB。Functions: Active CPU 1h 44m / 4h（43%）、Provisioned Memory 23.4 / 360 GB-Hrs。Workflows の Events と Data Written は**表示なし / 不明**（Hobby の画面には出ない。Workflows が内部で使う Queues は出る: Sends 90）。判断基準（表示項目がすべて 50% 未満）を満たしたので probe を実行。ほかに **Functions Storage 10.98 GB / 10 GB（上限超過）**、Deployment Storage 9.56 / 10 GB |
+| Stage 3 probe（S0 = 2026-09-18、Blob への書き込みなし） | 50 step・153 events・Workflow storage 約 160 KB。universe 3,700（JPX workbook の SHA-256 は PC のリハーサルと同一）。**Yahoo は 3,700 件すべて失敗**（上記 SDK の問題。cookie/crumb の取得までも到達していない）。0 件取得のため、3,000 円以下の件数・pass 数は比較できない。読み取り step 47 本（1 本 79 銘柄、約 182 秒: 失敗後の 2 秒待ちと再試行で 180 秒の締切に達する）、読み取り step の CPU 合計 18.1 秒、最大メモリ 103 MB |
+| 使用量（probe 後） | Active CPU 1h 46m / 4h、Provisioned Memory 28.3 / 360 GB-Hrs（+4.9）、Queue Sends 249（+159）、Blob は変化なし、**Functions Storage 11.36 GB / 10 GB**（この日の deploy 分が遅れて反映され、超過が拡大） |
 
 - Blob の操作数（SURGE 分）は上の通り。チーム全体の月間使用量はダッシュボードでしか見えない（Stage 3 の前に確認する）。
 - 検証用の no-op cron は毎日 1 回（14:00–14:59 UTC）残している: Stage 3 の cron を入れるときに置き換える。
+- **Functions Storage の超過**: deploy のたびに Python の関数 2 本（約 44 MB ずつ）などが加わる。上限を超えたときの扱いは画面にも公式ドキュメントにも見当たらない。次の deploy（3750fc5）は、古い deployment の削除または保持期間の設定をユーザーが判断してから行う。
+- 9/20 の cron の確認と 9/24 の shadow day・比較は、リポジトリ外の運用スクリプトを Claude の一時 task（各 1 回限り）が実行する。9/24 は、production が 3750fc5 を動かしていて、step 内で Yahoo が読めることを確かめてからでないと起動しない。
 - **定時の起動は 2026-09-19 には記録されなかった**（14:00–15:00 UTC のランタイムログに `/api/shadow/cron/noop` は手動の `vercel crons run` の 1 件だけ。cron は登録済み: `vercel crons ls`）。この日は 14:21 UTC に production を入れ替えている。翌日の枠（2026-09-20 14:00–14:59 UTC）で再確認する。Cron の要求が保護を通過して Workflow が完了すること自体は、Vercel の cron 起動（`x-vercel-cron-schedule` 付き）で確認済み。
