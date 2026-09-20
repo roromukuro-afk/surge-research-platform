@@ -38,6 +38,7 @@ export default async function System() {
   const checks = pc?.checks.before_the_deployment.checks ?? {};
   const usage = (pc?.usage ?? {}) as Record<string, Record<string, unknown> & { used_gb?: number; limit_gb?: number }>;
   const rehearsal = (pc?.checks.rehearsal ?? {}) as Record<string, unknown>;
+  const comparison = (rehearsal.pc_comparison ?? null) as { compared: number; same: number } | null;
 
   return (
     <>
@@ -137,6 +138,22 @@ export default async function System() {
               <span className="mono">{String(rehearsal.s0 ?? "—")}</span>{" "}
               {rehearsal.status ? <span className="tag">{String(rehearsal.status)}</span> : null}{" "}
               <Link href="/runs">runs</Link>
+              {comparison ? (
+                <div className="hint">
+                  {comparison.same === comparison.compared ? (
+                    <>
+                      every count the PC&apos;s own rehearsal of the same S0 kept is the same here (
+                      {comparison.same}/{comparison.compared}: the JPX workbook, the universe, the coverage, the
+                      ¥3,000 population, the screener and every route)
+                    </>
+                  ) : (
+                    <>
+                      {comparison.same} of {comparison.compared} counts match the PC&apos;s own rehearsal of the
+                      same S0; the rest differ
+                    </>
+                  )}
+                </div>
+              ) : null}
             </Row>
           </tbody>
         </table>

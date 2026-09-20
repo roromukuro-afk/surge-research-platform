@@ -34,6 +34,7 @@ export default async function Operations() {
   const rehearsalSummary = (rehearsal.summary ?? null) as
     (Record<string, number> & { selected?: Record<string, number> }) | null;
   const drawn = rehearsalSummary?.selected ?? null;
+  const comparison = (rehearsal.pc_comparison ?? null) as { compared: number; same: number } | null;
 
   return (
     <>
@@ -101,6 +102,14 @@ export default async function Operations() {
           the routes, Primary and Control drawn, the requests built and written to Blob. No request is sent,
           and nothing of it reaches the evaluation.
         </p>
+        {comparison && comparison.same === comparison.compared ? (
+          <p className="notice">
+            Every count the PC&apos;s own rehearsal of the same day kept is the same here ({comparison.same} of{" "}
+            {comparison.compared}): the JPX workbook, the universe, the coverage, the ¥3,000 population, the
+            screener and every route. The PC&apos;s rehearsal drew no sample, so Primary and Control are not in
+            that comparison; those are compared for the first time on 2026-09-24.
+          </p>
+        ) : null}
         {rehearsalSummary ? (
           <div className="cards">
             <Stat label="S0" value={String(rehearsal.s0 ?? "—")} hint={String(rehearsal.status ?? "")} />
