@@ -158,6 +158,22 @@
 - **Workflow SDK と C 拡張（2026-09-19 の probe で判明、3750fc5 で修正、未 deploy）**: SDK は最初の run で `sys.modules` を独自の mapping に差し替え、その後に**初めて**読み込まれる C 拡張は step 内で `SystemError: … dictobject.c … bad argument to internal function` になる（SDK のローカル world で再現。Vercel 固有ではない）。probe では Yahoo の取得（curl_cffi）が全件これで失敗し、build のトークン数（tiktoken）も同じ理由で失敗するはずだった。workflow モジュールの先頭でホスト側に読み込み、sandbox の `passthrough_modules` に指定して解消した（ローカル world で Yahoo 取得と o200k 計数が 1 回目・2 回目とも成功、回帰テストあり）。`GET /api/shadow/selftest/extensions` が Vercel の step から Yahoo 1 件（crumb の取得を含む）と o200k 計数を確かめ、`GET /api/shadow/selftest/yahoo` が読み取り経路そのもの（cookie・crumb・chart・as-traded の履歴・分割）を、手で選んだ数銘柄（`?codes=`、detail）または本番と同じ 1 step 分（`?mode=chunk&universe=150`）で確かめる。どちらも Blob へは書かず、リクエストも作らない。Yanoshin（TDnet の索引）を Vercel から読む経路は、まだ一度も通っていない。
 - **未実装**: 月の使用量の予算ガード（§5）。cron で自動運用する（Stage 5）前に入れる。
 
+## 8-A. Production freeze（2026-09-21、ユーザー指示）
+
+**2026-09-24 の比較が終わるまで、production deploy を追加しない。** 現在の production は commit
+`aacac35b977af0e9a17727d4536e3882ec6c81eb`（Web UI・shadow orchestration・Yahoo provider・Features / Routes・
+selection・compare・Blob artifact 形式・凍結された input-building code `8158344c…` を含む）で、これを固定する。
+
+- 例外は**重大な不具合が見つかったときだけ**で、そのときも直さずに**停止して報告**する。
+- SURGE の deployment 12 本もそのまま維持する（10 本消しても Functions Storage は約 10.37 GB で 10 GB 未満に
+  ならず、比較の直前に不可逆な整理をする理由がない）。
+- Functions Storage 11.27 GB は**未解決のまま**維持。追加削除も `mea-stock-screener` の bundle 縮小も、
+  Stage 3 / 4 が終わってからの別タスク（調査結果は surge-shadow-ops/results に記録済み）。
+- 2026-09-21 の cron の窓（14:00–14:59 UTC）には何も deploy しない。**2026-09-22 00:10 JST の一回限りタスクが
+  cron 定時発火の最終確認**で、確認できれば verified、できなければ unresolved のまま。どちらでも 9/24 は止めない
+  （9/24 は Claude の一回限り task が明示的に起動する）。Windows 正式系から Vercel 正式系へ切り替える前には、
+  cron の実発火経路を解決する。
+
 ## 8-B. Rehearsal と運用画面（2026-09-20）
 
 ### Rehearsal（`surge/rehearsal`）
