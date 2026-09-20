@@ -17,12 +17,19 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const PORT = Number(process.env.SHADOW_SMOKE_PORT ?? 3199);
 const PAGES = [
-  { path: "/", expect: ["Synthetic fixture", "Business days", "awaiting outcomes", "73cceb0db1be4e3d"] },
-  { path: "/predictions?s0=2026-09-24", expect: [" — S0 2026-09-24", "anonymized", "jev-1.13.0"] },
-  { path: "/runs", expect: ["Scheduled invocations", "below 95%", "closed: 敬老の日"] },
-  { path: "/outcomes?s0=2026-09-24", expect: [" — S0 2026-09-24", "RESOLVED", "Awaiting T+20"] },
-  { path: "/reports", expect: ["report-2.json", "Route D subgroups", "partial"] },
-  { path: "/system", expect: ["Frozen protocol", "e500a1c57a343e3a", "not configured"] },
+  // The operational screens: with a fixture directory and no published records, they say so rather than guess.
+  { path: "/", expect: ["Phase B is prospective", "The rehearsal", "/demo"] },
+  { path: "/system", expect: ["This deployment", "Free quota", "Nothing published"] },
+  { path: "/runs", expect: ["shadow day", "rehearsal", "compare"] },
+  { path: "/compare", expect: ["The PC and the cloud, compared", "selected_history_digests", "request_hashes"] },
+  { path: "/demo", expect: ["Made-up data", "synthetic-phase-b-fixture", "Predictions"] },
+  // The cohort's own screens, on the synthetic cohort the fixture holds.
+  { path: "/cohort?cohort=demo", expect: ["Synthetic fixture", "Business days", "awaiting outcomes", "73cceb0db1be4e3d"] },
+  { path: "/cohort/predictions?s0=2026-09-24&cohort=demo", expect: [" — S0 2026-09-24", "anonymized", "jev-1.13.0"] },
+  { path: "/cohort/days?cohort=demo", expect: ["Scheduled invocations", "below 95%", "closed: 敬老の日"] },
+  { path: "/cohort/outcomes?s0=2026-09-24&cohort=demo", expect: [" — S0 2026-09-24", "RESOLVED", "Awaiting T+20"] },
+  { path: "/cohort/reports?cohort=demo", expect: ["report-2.json", "Route D subgroups", "partial"] },
+  { path: "/cohort/system?cohort=demo", expect: ["Frozen protocol", "e500a1c57a343e3a", "not configured"] },
 ];
 const FORBIDDEN = ["canonical_v5_1", "Could not read the shadow", "Application error"];
 
