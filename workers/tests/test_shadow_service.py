@@ -172,6 +172,38 @@ def test_the_workflow_reads_150_securities_a_step():
     assert flows.CHUNK_SIZE == day.CHUNK_SIZE == 150
 
 
+def test_the_read_path_probe_describes_each_security_and_writes_nothing(local_world, pc_cohort, monkeypatch):
+    """The check before a day: the read path on securities named by hand, in a step."""
+
+    from shadow_service.flows import yahoo_probe
+
+    from test_shadow import FakeBlobClient
+
+    client = FakeBlobClient()
+    _stage3_fakes(monkeypatch, pc_cohort, client)
+    codes = [issue.code for issue in pc_cohort.issues][:3]
+    detail = _run(yahoo_probe, codes, "detail", "2026-09-24", 0)
+    assert detail["universe"] is None and [r["code"] for r in detail["read"]] == codes
+    assert detail["measure"]["read"] == 3 and not detail["failures"]
+    assert all(r["bars"] > 0 and r["history_digest"] for r in detail["read"])
+    assert client.objects == {}  # a probe writes nothing, and builds no request
+
+
+def test_the_read_path_probe_reads_a_step_s_worth_of_the_universe(local_world, pc_cohort, monkeypatch):
+    """The same check at a day's size: the universe's own codes, read by the step a day uses."""
+
+    from shadow_service.flows import yahoo_probe
+
+    from test_shadow import FakeBlobClient
+
+    client = FakeBlobClient()
+    _stage3_fakes(monkeypatch, pc_cohort, client)
+    chunk = _run(yahoo_probe, [], "chunk", "2026-09-24", 5)
+    assert chunk["universe"]["issues"] == 160 and chunk["read"] == 5 and chunk["not_read"] == 0
+    assert chunk["measure"]["attempted"] == 5 and len(chunk["history_digests"]) == 5
+    assert client.objects == {}
+
+
 def test_stage3_the_day_through_the_workflow_is_the_pc_s_day_committed_in_blob(local_world, pc_cohort, monkeypatch):
     from shadow_service.flows import shadow_day
 

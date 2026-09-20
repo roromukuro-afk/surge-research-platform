@@ -24,6 +24,9 @@ when it replays this module.
   data, no model request.
 - ``extension_selftest``: one Yahoo chart read and one o200k token count inside
   a step (offline: the extensions only) - what the day's read and build need.
+- ``yahoo_probe``: the read path on a handful of securities (what each read
+  returned), or one production-sized read step, before a day is run. Nothing is
+  written and no request is built.
 - ``shadow_day``: Stage 3 (``surge.shadow.day``). A Phase B day of the PC's
   cohort read, screened and drawn in steps, the requests built by the frozen
   code and none sent; the artifacts go to Blob under ``surge/phase-b-shadow``.
@@ -358,6 +361,58 @@ async def day_stop(opened: dict, refused: dict, planned: dict | None, run: dict)
                          run["trigger"], run["requested_at"])
     key = day.record_run(store, record, started_at=datetime.fromisoformat(record["started_at"]))
     return {"written": written, "run_record": key, "blob_operations": store.operations.as_dict()}
+
+
+# ----------------------------------------------------------------- the read path, before a day
+
+
+@wf.step(max_retries=0)
+async def probe_universe(limit: int) -> dict:
+    """The universe's first ``limit`` codes: a production-shaped read step reads production's securities."""
+
+    universe = _day().read_universe()
+    return {"workbook_sha256": universe["workbook_sha256"], "issues": len(universe["issues"]),
+            "codes": [issue["code"] for issue in universe["issues"]][:limit]}
+
+
+@wf.step(max_retries=0)
+async def probe_read(codes: list[str], mode: str, s0: str) -> dict:
+    """``mode`` ``detail``: each security's read described; ``chunk``: one read step exactly as a day reads one."""
+
+    import json
+    from datetime import UTC, date, datetime, timedelta
+
+    from surge.evaluation import phase_b
+
+    day = _day()
+    began, s0_date = _stamp(), date.fromisoformat(s0)
+    start, now = s0_date - timedelta(days=phase_b.HISTORY_LOOKBACK_DAYS), datetime.now(UTC)
+    if mode == "chunk":
+        part = day.read_chunk(codes, s0=s0_date, start=start, now=now)
+        read = json.loads(part["data"])
+        result = {"mode": mode, "read": len(read["rows"]), "not_read": len(part["remaining"]),
+                  "failures": read["failures"][:10],
+                  "history_digests": dict(sorted((code, digest["history"])
+                                                 for code, digest in read["digests"].items())[:5]),
+                  "measure": part["measure"]}
+    else:
+        result = {"mode": mode, **day.probe_codes(codes, start=start, now=now)}
+    result["measure"].update(began=began, ended=_stamp(), s0=s0, start=start.isoformat(), codes=len(codes),
+                             attempt=get_step_metadata().attempt)
+    return result
+
+
+@wf.workflow
+async def yahoo_probe(codes: list[str], mode: str, s0: str, universe: int) -> dict:
+    """``universe``: read that many of the listed securities' codes first, as a day's read step would get them."""
+
+    picked = await probe_universe(universe) if universe else None
+    read = await probe_read(picked["codes"] if picked else codes, mode, s0)
+    return {"universe": None if picked is None else {"workbook_sha256": picked["workbook_sha256"],
+                                                     "issues": picked["issues"]}, **read}
+
+
+# ----------------------------------------------------------------- Stage 3: the day itself
 
 
 @wf.workflow

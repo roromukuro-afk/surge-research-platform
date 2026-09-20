@@ -268,6 +268,58 @@ def read_chunk(codes: list[str], *, s0: date, start: date, now: datetime, yahoo=
     }
 
 
+def probe_codes(codes: list[str], *, start: date, now: datetime, yahoo=None, sleep=None, monotonic=None) -> dict:
+    """A few securities read exactly as a read step reads them, with what came back described.
+
+    The check before a day, on securities chosen by hand: the cookie and the
+    crumb, the chart request, the history as traded and the splits behind it.
+    Nothing is screened, nothing is written, and ``read_chunk`` is untouched.
+    """
+
+    source = providers() if (yahoo is None or sleep is None or monotonic is None) else {}
+    yahoo = yahoo or source["yahoo"]()
+    sleep = sleep or source["sleep"]
+    monotonic = monotonic or source["monotonic"]
+    began, cpu = monotonic(), time.process_time()
+    read, failures, fetch_seconds = [], [], []
+    for code in codes:
+        fetch_began = monotonic()
+        chart, history, failure = jev_eval._fetch_one(yahoo, code, start, now, sleep)
+        seconds = round(monotonic() - fetch_began, 3)
+        fetch_seconds.append(seconds)
+        sleep(jev_eval.YAHOO_PAUSE_SECONDS)
+        if failure is not None:
+            failures.append({**failure, "seconds": seconds})
+            continue
+        last = history.bars[-1] if history.bars else None
+        read.append({
+            "code": code,
+            "symbol": history.symbol,
+            "seconds": seconds,
+            "bars": len(history.bars),
+            "first_bar": history.bars[0].trade_date.isoformat() if history.bars else None,
+            "last_bar": last.trade_date.isoformat() if last else None,
+            "last_as_traded": None if last is None else {
+                name: None if value is None else str(value)
+                for name, value in (("open", last.open), ("high", last.high), ("low", last.low),
+                                    ("close", last.close), ("volume", last.volume))},
+            "currency": last.currency if last else None,
+            "splits": [{"ex_date": action.ex_date.isoformat(), "from": str(action.split_from),
+                        "to": str(action.split_to)} for action in history.actions],
+            "notes": list(history.notes),
+            "chart_line_sha256": sha256_hex(jev_eval._chart_line(chart)),
+            "history_digest": history_digest(history),
+        })
+    return {
+        "read": read,
+        "failures": failures,
+        "measure": {"attempted": len(codes), "read": len(read), "failed": len(failures),
+                    "seconds": round(monotonic() - began, 3), "cpu_seconds": round(time.process_time() - cpu, 3),
+                    "fetch_seconds": _measure(fetch_seconds), "max_rss_mb": _max_rss_mb(),
+                    "crumb_obtained": bool(getattr(yahoo, "_crumb", None))},
+    }
+
+
 def _chunks(chunks: list[dict]) -> tuple[list[dict], dict, list[dict], dict, Counter]:
     rows, evidence, failures, digests, bar_counts = [], {}, [], {}, Counter()
     for chunk in chunks:

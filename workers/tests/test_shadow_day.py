@@ -63,6 +63,28 @@ def shadow_day(env, *, reread_yahoo=None):
     return universe, chunks, planned, reread
 
 
+def test_a_probe_describes_each_read_and_reads_the_same_history_a_step_reads(env):
+    """The check before a day: each security's read described, a failure recorded, the day's read untouched."""
+
+    codes = [i.code for i in env.issues][:3]
+    start = S0 - timedelta(days=phase_b.HISTORY_LOOKBACK_DAYS)
+    probe = day.probe_codes([*codes, "0000"], start=start, now=EVENING, yahoo=_FakeYahoo(env.charts),
+                            sleep=_quiet, monotonic=time.monotonic)
+    part = day.read_chunk(codes, s0=S0, start=start, now=EVENING, yahoo=_FakeYahoo(env.charts), sleep=_quiet,
+                          monotonic=time.monotonic)
+    digests = json.loads(part["data"])["digests"]
+
+    assert [r["code"] for r in probe["read"]] == codes
+    assert {f["code"] for f in probe["failures"]} == {"0000"}
+    assert probe["measure"]["attempted"] == 4 and probe["measure"]["read"] == 3 and probe["measure"]["failed"] == 1
+    for read in probe["read"]:
+        # The same bytes a read step would screen: the as-traded history, and the chart line the archive keeps.
+        assert read["history_digest"] == digests[read["code"]]["history"]
+        assert read["chart_line_sha256"] == digests[read["code"]]["line"]
+        assert read["bars"] > 0 and read["symbol"].endswith(".T") and read["currency"] == "JPY"
+        assert read["last_bar"] <= S0.isoformat() and read["last_as_traded"]["close"]
+
+
 def test_the_day_in_steps_writes_the_pc_s_plan_and_builds_the_pc_s_requests(env):
     store = pb._planned_and_built(env)  # the PC: plan_day, then build, in one process
     _universe, chunks, planned, reread = shadow_day(env)

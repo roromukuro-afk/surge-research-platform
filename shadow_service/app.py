@@ -13,6 +13,10 @@ token (Trusted Sources). There is no key in this service and none is read.
     POST /api/shadow/selftest/stage2?confirm=stage2-synthetic
                                             Stage 2 in the cloud with synthetic artifacts
     GET  /api/shadow/selftest/extensions   one Yahoo chart read and one o200k count inside a workflow step
+    GET  /api/shadow/selftest/yahoo?s0=YYYY-MM-DD&codes=7203[,...]
+                                            the read path on a few securities: each read described (detail), or
+                                            &mode=chunk[&universe=150]&confirm=yahoo-chunk for one read step of a
+                                            day's size. Nothing is written and no request is built
     POST /api/shadow/stage3/probe?s0=YYYY-MM-DD&confirm=stage3-probe
                                             Stage 3: a past business day read and screened; nothing written
     POST /api/shadow/stage3/day?[s0=YYYY-MM-DD&]confirm=stage3-day
@@ -154,6 +158,47 @@ async def selftest_extensions(_request: dict) -> tuple[int, bytes]:
     return _json(200, result)
 
 
+#: A detail probe reads a handful by hand; a chunk probe reads what a day's step reads (surge.shadow.day).
+DETAIL_CODES, CHUNK_CODES = 20, 150
+
+
+async def selftest_yahoo(request: dict) -> tuple[int, bytes]:
+    """The read path before a day: the cookie and crumb, the chart, the as-traded history, the splits."""
+
+    from datetime import date
+
+    from vercel.workflow import start
+
+    from shadow_service.flows import yahoo_probe
+
+    query = request["query"]
+    mode = (query.get("mode") or ["detail"])[0]
+    if mode not in ("detail", "chunk"):
+        return _json(400, {"refused": "mode is 'detail' (each read described) or 'chunk' (one read step)"})
+    s0 = (query.get("s0") or [None])[0]
+    try:
+        date.fromisoformat(s0 or "")
+    except ValueError:
+        return _json(400, {"refused": "a probe names the day whose history it reads: ?s0=YYYY-MM-DD"})
+    codes = [code.strip() for code in (query.get("codes") or [""])[0].split(",") if code.strip()]
+    universe = int((query.get("universe") or ["0"])[0] or 0)
+    if mode == "chunk" and query.get("confirm") != ["yahoo-chunk"]:
+        return _json(400, {"refused": f"add ?confirm=yahoo-chunk: this reads up to {CHUNK_CODES} securities"})
+    if universe and mode != "chunk":
+        return _json(400, {"refused": "codes from the universe are for a chunk probe"})
+    if bool(codes) == bool(universe):
+        return _json(400, {"refused": "name the securities (?codes=7203,...) or, for a chunk, ?universe=<n>"})
+    allowed = CHUNK_CODES if mode == "chunk" else DETAIL_CODES
+    if max(len(codes), universe) > allowed:
+        return _json(400, {"refused": f"a {mode} probe reads at most {allowed} securities"})
+    run = await start(yahoo_probe, codes, mode, s0, universe)
+    result = await _started(run, float((query.get("wait") or ["150"])[0]))
+    measure = ((result.get("output") or {}).get("measure")) or {}
+    print(f"yahoo probe {result['run_id']} ({mode}, {len(codes) or universe} securities): {result['status']} "
+          f"read={measure.get('read')} failed={measure.get('failed')} seconds={measure.get('seconds')}", flush=True)
+    return _json(200, {"mode": mode, "s0": s0, "codes": codes or f"universe[:{universe}]", **result})
+
+
 async def stage3_start(request: dict) -> tuple[int, bytes]:
     """Start a Stage 3 run and answer at once: a day takes about half an hour of steps."""
 
@@ -218,6 +263,8 @@ ROUTES = {
     ("GET", "/api/shadow/cron/noop"): cron_noop,
     ("POST", "/api/shadow/selftest/stage2"): selftest_stage2,
     ("GET", "/api/shadow/selftest/extensions"): selftest_extensions,
+    ("GET", "/api/shadow/selftest/yahoo"): selftest_yahoo,
+    ("POST", "/api/shadow/selftest/yahoo"): selftest_yahoo,
     ("POST", "/api/shadow/stage3/probe"): stage3_start,
     ("POST", "/api/shadow/stage3/day"): stage3_start,
 }
