@@ -291,6 +291,12 @@ export function weekdaysBetween(first: string, last: string): string[] {
   return days;
 }
 
+export function daysBetween(first: string, last: string): string[] {
+  const days: string[] = [];
+  for (let day = first; day <= last; day = addDays(day, 1)) days.push(day);
+  return days;
+}
+
 /** The n-th business day after `day` by the calendar, or null past what it covers. */
 export function businessDayAfter(calendar: Calendar, day: string, n: number): string | null {
   let current = day;
@@ -435,7 +441,8 @@ async function numbered<T>(
 export async function loadRuns(shadow: Shadow): Promise<RunRecord[]> {
   if (!shadow.cohort) return [];
   const first = jstDate(new Date(shadow.cohort.created_at));
-  const days = weekdaysBetween(first, jstDate(shadow.now));
+  // The PC's jobs run on weekdays, but a run in the cloud can be started on any day: ask for all of them.
+  const days = daysBetween(first, jstDate(shadow.now));
   const perDay = await Promise.all(
     days.flatMap((day) =>
       JOBS.map(async (job) => {
