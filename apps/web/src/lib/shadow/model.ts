@@ -23,6 +23,8 @@ import {
 export const DEFAULT_PREFIX = "surge/phase-b";
 export const OFFICIAL_COHORT = "jev-phase-b-jp-20260924-v1";
 export const JOBS = ["prediction", "outcome"] as const;
+/** How far back a rehearsal's days are looked for: it runs past days, not the cohort's prospective ones. */
+export const REHEARSAL_WINDOW_DAYS = 35;
 
 /**
  * Which cohort a screen is showing. `shadow` is the cloud's shadow of the PC's
@@ -362,7 +364,13 @@ function settled(shadow: Shadow, day: string): boolean {
 export async function loadDays(shadow: Shadow): Promise<Day[]> {
   const { cohort, calendar, source, prefix } = shadow;
   if (!cohort || !calendar) return [];
-  const candidates = weekdaysBetween(cohort.prospective_start, jstDate(shadow.now)).filter(
+  // A cohort's days start at its prospective start. A rehearsal's are past days it chose, and its cohort.json
+  // carries the frozen start like any other, so its window is the weeks behind instead.
+  const from =
+    shadow.which === "rehearsal"
+      ? addDays(jstDate(shadow.now), -REHEARSAL_WINDOW_DAYS)
+      : cohort.prospective_start;
+  const candidates = weekdaysBetween(from, jstDate(shadow.now)).filter(
     (day) => isBusinessDay(calendar, day) !== false && closeConfirmedAt(day) <= shadow.now,
   );
   const days = await Promise.all(
