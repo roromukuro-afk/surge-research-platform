@@ -43,7 +43,7 @@ export default async function System() {
     <>
       <Panel title="This deployment">
         <PublishedAt what="Written by the deployment itself on a no-op run," at={cloud?.published_at}
-                     by={cloud ? cloud.trigger : undefined} />
+                     by={cloud ? `a ${cloud.trigger} run` : undefined} />
         {cloud ? (
           <table>
             <tbody>
@@ -241,6 +241,14 @@ export default async function System() {
                 </div>
               </Row>
               <Row label="Send window"><span className="hint">{pc.phase_b.send_window}</span></Row>
+              {pc.shadow_budget ? (
+                <Row label="The shadow's own budget" hint="what a cloud Jev smoke could ever spend">
+                  <span className="mono">
+                    ${pc.shadow_budget.spent_usd} of ${pc.shadow_budget.hard_cap_usd} spent
+                  </span>
+                  <div className="hint">{pc.shadow_budget.rule}</div>
+                </Row>
+              ) : null}
             </tbody>
           </table>
         ) : (

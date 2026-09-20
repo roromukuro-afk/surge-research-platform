@@ -118,6 +118,7 @@ export interface PcStatus {
     cron: Record<string, unknown>;
   };
   usage: Record<string, unknown>;
+  shadow_budget?: { hard_cap_usd: string; spent_usd: string; rule: string };
 }
 
 /** As `surge.shadow.compare` writes it, with the two fields the publisher adds. */

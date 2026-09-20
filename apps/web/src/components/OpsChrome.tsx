@@ -63,11 +63,13 @@ export function fmtJstAgo(iso: string | null | undefined, now: Date = new Date()
   const at = new Date(iso);
   if (Number.isNaN(at.getTime())) return String(iso);
   const minutes = Math.round((now.getTime() - at.getTime()) / 60_000);
-  const ago =
-    minutes < 1 ? "just now"
-    : minutes < 60 ? `${minutes} min ago`
-    : minutes < 60 * 36 ? `${Math.round(minutes / 60)} h ago`
-    : `${Math.round(minutes / 1440)} days ago`;
+  const size = Math.abs(minutes);
+  const span =
+    size < 1 ? "just now"
+    : size < 60 ? `${size} min`
+    : size < 60 * 36 ? `${Math.round(size / 60)} h`
+    : `${Math.round(size / 1440)} days`;
+  const ago = size < 1 ? span : minutes > 0 ? `${span} ago` : `in ${span}`;
   return `${new Date(at.getTime() + 9 * 3_600_000).toISOString().replace("T", " ").slice(0, 16)} JST (${ago})`;
 }
 
