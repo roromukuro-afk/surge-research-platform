@@ -241,6 +241,40 @@ def test_stage3_the_day_through_the_workflow_is_the_pc_s_day_committed_in_blob(l
     assert not any("/requests/" in key for key in client.objects)  # request bodies are never stored
 
 
+def test_a_rehearsal_runs_a_past_day_whole_under_its_own_cohort(local_world, pc_cohort, monkeypatch):
+    """The cloud pipeline end to end on a past day: written, but never as the evaluation's cohort."""
+
+    from shadow_service.flows import shadow_day
+
+    from surge.shadow import day
+    from test_shadow import FakeBlobClient
+
+    client = FakeBlobClient()
+    _stage3_fakes(monkeypatch, pc_cohort, client)
+    output = _run(shadow_day, "2026-09-18", "rehearsal", "test", "2026-09-18T08:00:00+00:00")
+
+    assert output["mode"] == "rehearsal" and output["summary"]["s0"] == "2026-09-18"
+    assert output["requests"]["requests"] > 0 and output["written"]["written"]
+    keys = sorted(client.objects)
+    assert keys and all(k.startswith(f"{day.REHEARSAL_ROOT}/{day.REHEARSAL.cohort_id}/") for k in keys)
+    assert not any(k.startswith("surge/phase-b") for k in keys)  # never the cohort's prefix
+    base = f"{day.REHEARSAL_ROOT}/{day.REHEARSAL.cohort_id}/2026-09-18"
+    commit = json.loads(client.objects[f"{base}/integrity.json"])
+    assert commit["system"] == "vercel-rehearsal" and commit["cohort_id"] == day.REHEARSAL.cohort_id
+    assert commit["teacher_admissible"] is False and commit["not_an_evaluation_dataset"] is True
+    assert commit["official"] is False and commit["status"] == "built"
+    manifest = json.loads(client.objects[f"{base}/manifest.json"])
+    assert manifest["cohort_id"] == day.REHEARSAL.cohort_id and manifest["s0"] == "2026-09-18"
+    assert json.loads(client.objects[f"{base}/requests.jsonl"].splitlines()[0])["sample_id"]  # built, never sent
+    # The frozen rule is back as soon as the rehearsal's selection returns.
+    from datetime import date
+
+    from surge.evaluation import selection
+
+    with pytest.raises(selection.SelectionError):
+        selection.check_s0(date(2026, 9, 18))
+
+
 def test_stage3_a_probe_reads_and_screens_and_writes_nothing(local_world, pc_cohort, monkeypatch):
     from shadow_service.flows import shadow_day
 

@@ -21,6 +21,9 @@ token (Trusted Sources). There is no key in this service and none is read.
                                             Stage 3: a past business day read and screened; nothing written
     POST /api/shadow/stage3/day?[s0=YYYY-MM-DD&]confirm=stage3-day
                                             Stage 3: a Phase B day built and written to Blob; nothing sent
+    POST /api/shadow/stage3/rehearsal?s0=YYYY-MM-DD&confirm=stage3-rehearsal
+                                            the whole of a past business day under surge/rehearsal: its own
+                                            cohort, never the evaluation's, nothing sent
     GET  /api/shadow/runs/<run id>          a workflow run's status, and its output once completed
     GET  /api/shadow/runs/<run id>/events   how many events the run wrote, by type
 """
@@ -211,10 +214,10 @@ async def stage3_start(request: dict) -> tuple[int, bytes]:
     mode = request["path"].rsplit("/", 1)[-1]
     if request["query"].get("confirm") != [f"stage3-{mode}"]:
         return _json(400, {"refused": f"add ?confirm=stage3-{mode}: this reads every listed security from Yahoo"
-                                      + (" and writes the day to Blob" if mode == "day" else "")})
+                                      + (" and writes the day to Blob" if mode != "probe" else "")})
     s0 = (request["query"].get("s0") or [None])[0]
-    if mode == "probe" and not s0:
-        return _json(400, {"refused": "a probe names its S0: ?s0=YYYY-MM-DD"})
+    if mode in ("probe", "rehearsal") and not s0:
+        return _json(400, {"refused": f"a {mode} names its S0: ?s0=YYYY-MM-DD"})
     if s0:
         try:
             date.fromisoformat(s0)
@@ -267,6 +270,7 @@ ROUTES = {
     ("POST", "/api/shadow/selftest/yahoo"): selftest_yahoo,
     ("POST", "/api/shadow/stage3/probe"): stage3_start,
     ("POST", "/api/shadow/stage3/day"): stage3_start,
+    ("POST", "/api/shadow/stage3/rehearsal"): stage3_start,
 }
 
 

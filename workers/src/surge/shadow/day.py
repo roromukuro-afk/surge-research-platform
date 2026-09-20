@@ -28,6 +28,16 @@ nothing else to it:
 Nothing here sends a request to a model: Stage 3 builds the requests and stops.
 A probe reads and screens a past business day and writes nothing: it is how the
 read is measured on Vercel before a prospective day exists.
+
+A **rehearsal** is the whole of that on a past business day, written under
+``surge/rehearsal`` as its own cohort (``REHEARSAL``): a different cohort id and
+a different experiment seed, ``system`` ``vercel-rehearsal``, never teacher
+admissible, and never under the cohort's own prefix. It exists so that the
+pipeline is run once end to end before the first prospective day, and its only
+departure from a day is that the frozen rule "no S0 before Phase B's start"
+(``check_s0``) is relaxed for its own selection - the rule guards the cohort's
+sampling frame, and a rehearsal is not the cohort. The frozen code is not
+changed: the check is swapped back as soon as the call returns.
 """
 
 from __future__ import annotations
@@ -40,6 +50,7 @@ import statistics
 import tempfile
 import time
 from collections import Counter
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -70,6 +81,9 @@ from surge.storage.base import ImmutableObjectConflict, ObjectStore, sha256_hex
 
 SHADOW_ROOT = "surge/phase-b-shadow"
 SYSTEM = "vercel-shadow"
+#: Where a rehearsal goes, and what it calls itself: never the cohort's prefix, never the cohort's system.
+REHEARSAL_ROOT = "surge/rehearsal"
+REHEARSAL_SYSTEM = "vercel-rehearsal"
 CHUNK_SIZE = 150
 CHUNK_DEADLINE_SECONDS = 180.0
 #: How long a day waits for its window when it is started early (the PC's scheduled job: 15 minutes).
@@ -102,6 +116,54 @@ OFFICIAL = CohortBinding(
     evaluation_version="jev-eval-1.1.0",
     frozen_fingerprint="73cceb0db1be4e3dcd3a44b5d590bdb31775fa21a712bb473bfea5b725e4bcf6",
 )
+
+
+#: A rehearsal's own cohort: the same protocol and code, its own id and seed, and nothing of the cohort's frame.
+REHEARSAL = CohortBinding(
+    cohort_id="rehearsal-jp-vercel-v1",
+    experiment_seed="surge-rehearsal-jp-vercel-v1",
+    evaluation_version=OFFICIAL.evaluation_version,
+    frozen_fingerprint=OFFICIAL.frozen_fingerprint,
+)
+#: What a mode binds to: the cohort's prefix and system, or the rehearsal's.
+MODES = {
+    "day": (OFFICIAL, SHADOW_ROOT, SYSTEM),
+    "probe": (OFFICIAL, SHADOW_ROOT, SYSTEM),
+    "rehearsal": (REHEARSAL, REHEARSAL_ROOT, REHEARSAL_SYSTEM),
+}
+
+
+def binding_of(mode: str) -> tuple[CohortBinding, str, str]:
+    """The binding, the root and the system a mode writes as. An unknown mode is not a mode."""
+
+    if mode not in MODES:
+        raise DayRefused("mode", f"{mode!r} is not a mode ({', '.join(sorted(MODES))})")
+    return MODES[mode]
+
+
+@contextmanager
+def s0_rule_relaxed():
+    """Draw from a day before Phase B's start, for a rehearsal only.
+
+    ``selection.check_s0`` refuses an S0 before the cohort's prospective start; that rule keeps the
+    cohort's sampling frame prospective, and a rehearsal (its own id, seed, prefix and system, never
+    teacher admissible) is not the cohort. The weekend rule still holds. The frozen module is restored
+    before this returns, so nothing else ever sees a relaxed rule.
+    """
+
+    from surge.evaluation import selection as frozen_selection
+
+    original = frozen_selection.check_s0
+
+    def rehearsal_check(s0: date) -> None:
+        if s0.weekday() >= 5:
+            raise SelectionError(f"S0 {s0.isoformat()} is a weekend day")
+
+    frozen_selection.check_s0 = rehearsal_check
+    try:
+        yield
+    finally:
+        frozen_selection.check_s0 = original
 
 
 class DayRefused(RuntimeError):
@@ -388,7 +450,7 @@ def plan_manifest(*, s0: date, now: datetime, start: date, binding: CohortBindin
 
 
 def plan(universe: dict, chunks: list[dict], *, s0: date, now: datetime, start: date,
-         binding: CohortBinding = OFFICIAL) -> dict:
+         binding: CohortBinding = OFFICIAL, rehearsal: bool = False) -> dict:
     """What plan_day computes once every security is read: coverage, sessions, the sample, the plan's files."""
 
     issues = _covered(universe, chunks)
@@ -410,9 +472,10 @@ def plan(universe: dict, chunks: list[dict], *, s0: date, now: datetime, start: 
         for r in rows
     ]
     try:
-        selection = jev_eval.select_day(screens, {i.code: i for i in issues}, s0=s0,
-                                        evaluation_version=binding.evaluation_version,
-                                        experiment_seed=binding.experiment_seed)
+        with s0_rule_relaxed() if rehearsal else nullcontext():
+            selection = jev_eval.select_day(screens, {i.code: i for i in issues}, s0=s0,
+                                            evaluation_version=binding.evaluation_version,
+                                            experiment_seed=binding.experiment_seed)
     except SelectionError as exc:
         raise DayRefused("selection", str(exc)) from exc
     if not selection.samples:
@@ -512,7 +575,8 @@ def reread_selected(selected: dict, *, s0: date, start: date, now: datetime, yah
 # ----------------------------------------------------------------- the requests
 
 
-def build(planned: dict, reread: dict, *, s0: date, binding: CohortBinding = OFFICIAL, yanoshin=None) -> dict:
+def build(planned: dict, reread: dict, *, s0: date, binding: CohortBinding = OFFICIAL, yanoshin=None,
+          rehearsal: bool = False) -> dict:
     """The frozen ``build`` on a RunStore that holds the plan's files and the selected prices, and nothing else."""
 
     root = Path(tempfile.mkdtemp(prefix="surge-shadow-day-"))
@@ -538,7 +602,8 @@ def build(planned: dict, reread: dict, *, s0: date, binding: CohortBinding = OFF
                                              "files_sha256": files, **planned["summary"]})
         yanoshin = yanoshin if yanoshin is not None else providers()["yanoshin"]()
         try:
-            summary = jev_eval.build(store, yanoshin=yanoshin)
+            with s0_rule_relaxed() if rehearsal else nullcontext():
+                summary = jev_eval.build(store, yanoshin=yanoshin)
         except jev_eval.EvaluationError as exc:
             raise DayRefused("build", str(exc)) from exc
         return {
@@ -556,9 +621,10 @@ def build(planned: dict, reread: dict, *, s0: date, binding: CohortBinding = OFF
 # ----------------------------------------------------------------- the artifacts
 
 
-def _commit_record(binding: CohortBinding, s0: date, status: str, **extra) -> dict:
-    return {"system": SYSTEM, "official": False, "cohort_id": binding.cohort_id, "s0": s0.isoformat(),
-            "status": status, **extra, "jev": JEV, "teacher_admissible": False, "database_writes": "none"}
+def _commit_record(binding: CohortBinding, s0: date, status: str, system: str = SYSTEM, **extra) -> dict:
+    return {"system": system, "official": False, "cohort_id": binding.cohort_id, "s0": s0.isoformat(),
+            "status": status, **extra, "jev": JEV, "teacher_admissible": False, "database_writes": "none",
+            **({"not_an_evaluation_dataset": True, "rehearsal": True} if system == REHEARSAL_SYSTEM else {})}
 
 
 def _plan_parts(parts: ArtifactSet, planned: dict) -> None:
@@ -588,7 +654,7 @@ def ensure_cohort_records(store: ObjectStore, binding: CohortBinding, cohort_jso
 
 
 def write_day(store: ObjectStore, *, s0: date, planned: dict, reread: dict, built: dict, run: dict,
-              binding: CohortBinding = OFFICIAL, root: str = SHADOW_ROOT) -> dict:
+              binding: CohortBinding = OFFICIAL, root: str = SHADOW_ROOT, system: str = SYSTEM) -> dict:
     """A built day's artifacts and its integrity record (status ``built``: nothing was sent)."""
 
     prefix = day_prefix(binding.cohort_id, s0, root=root)
@@ -609,7 +675,7 @@ def write_day(store: ObjectStore, *, s0: date, planned: dict, reread: dict, buil
     source = {"layout": "Vercel Workflow steps (surge.shadow.day)", "workflow_run_id": run.get("workflow_run_id"),
               "files_sha256": {name: sha for stage in built["stages"].values()
                                for name, sha in (stage.get("files_sha256") or {}).items()}}
-    commit = parts.commit(DAY_COMMIT, _commit_record(binding, s0, "built", source=source,
+    commit = parts.commit(DAY_COMMIT, _commit_record(binding, s0, "built", system, source=source,
                                                      request_bodies=REQUEST_BODIES),
                           committed_at=datetime.now(UTC).isoformat())
     cohort = ensure_cohort_records(store, binding, built["cohort"], root=root)
@@ -618,7 +684,7 @@ def write_day(store: ObjectStore, *, s0: date, planned: dict, reread: dict, buil
 
 
 def write_stopped_day(store: ObjectStore, *, s0: date, refused: dict, run: dict, planned: dict | None = None,
-                      binding: CohortBinding = OFFICIAL, root: str = SHADOW_ROOT) -> dict:
+                      binding: CohortBinding = OFFICIAL, root: str = SHADOW_ROOT, system: str = SYSTEM) -> dict:
     """A day stopped after its window opened: what was planned, if anything, and why it stopped."""
 
     prefix = day_prefix(binding.cohort_id, s0, root=root)
@@ -632,21 +698,22 @@ def write_stopped_day(store: ObjectStore, *, s0: date, refused: dict, run: dict,
                                 "day_stopped": [{"stopped_at": stopped_at, "reason": refused["message"],
                                                  "detail": {"kind": refused["kind"], **(refused.get("detail") or {})}}],
                                 "shadow": run})
-    commit = parts.commit(DAY_COMMIT, _commit_record(binding, s0, "stopped", source={
+    commit = parts.commit(DAY_COMMIT, _commit_record(binding, s0, "stopped", system, source={
         "layout": "Vercel Workflow steps (surge.shadow.day)", "workflow_run_id": run.get("workflow_run_id")}),
         committed_at=stopped_at)
     return {"written": True, "prefix": prefix, "artifacts": len(parts.artifacts), "integrity_sha256": commit.sha256}
 
 
 def record_run(store: ObjectStore, record: dict, *, started_at: datetime, binding: CohortBinding = OFFICIAL,
-               root: str = SHADOW_ROOT) -> str:
+               root: str = SHADOW_ROOT, system: str = SYSTEM) -> str:
     """One record per invocation, as the PC's scheduler keeps them (job ``prediction``)."""
 
-    return put_run_record(store, binding.cohort_id, "prediction", {**record, "system": SYSTEM},
+    return put_run_record(store, binding.cohort_id, "prediction", {**record, "system": system},
                           started_at=started_at, root=root)
 
 
-__all__ = ["CHUNK_DEADLINE_SECONDS", "CHUNK_SIZE", "JEV", "OFFICIAL", "SHADOW_ROOT", "SYSTEM", "CohortBinding",
-           "DayRefused", "build", "check_binding", "day_window", "ensure_cohort_records", "history_digest", "plan",
-           "plan_manifest", "probe_summary", "providers", "read_chunk", "read_universe", "record_run",
-           "reread_selected", "scheduled_s0", "write_day", "write_stopped_day"]
+__all__ = ["CHUNK_DEADLINE_SECONDS", "CHUNK_SIZE", "JEV", "MODES", "OFFICIAL", "REHEARSAL", "REHEARSAL_ROOT",
+           "REHEARSAL_SYSTEM", "SHADOW_ROOT", "SYSTEM", "CohortBinding", "DayRefused", "binding_of", "build",
+           "check_binding", "day_window", "ensure_cohort_records", "history_digest", "plan", "plan_manifest",
+           "probe_codes", "probe_summary", "providers", "read_chunk", "read_universe", "record_run",
+           "reread_selected", "s0_rule_relaxed", "scheduled_s0", "write_day", "write_stopped_day"]

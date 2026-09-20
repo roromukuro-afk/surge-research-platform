@@ -30,7 +30,9 @@ when it replays this module.
 - ``shadow_day``: Stage 3 (``surge.shadow.day``). A Phase B day of the PC's
   cohort read, screened and drawn in steps, the requests built by the frozen
   code and none sent; the artifacts go to Blob under ``surge/phase-b-shadow``.
-  As a probe, a past business day is read and screened and nothing is written.
+  As a probe, a past business day is read and screened and nothing is written;
+  as a rehearsal, a past business day is run whole under ``surge/rehearsal``,
+  which is its own cohort and never the evaluation's.
 """
 
 from __future__ import annotations
@@ -226,12 +228,15 @@ async def day_open(s0: str | None, mode: str) -> dict:
     day = _day()
     now = day.providers()["now"]()
     try:
-        fingerprint = day.check_binding()
+        binding, root, system = day.binding_of(mode)
+        fingerprint = day.check_binding(binding)
         chosen = date.fromisoformat(s0) if s0 else date.fromisoformat(day.scheduled_s0(now)["s0"])
-        window = day.day_window(chosen, now, probe=mode == "probe")
+        # A probe and a rehearsal take a past business day: its bars are final, and no window is waited for.
+        window = day.day_window(chosen, now, probe=mode in ("probe", "rehearsal"))
     except day.DayRefused as exc:
-        return {"refused": exc.record(), "s0": s0, "checked_at": now.isoformat()}
-    return {**window, "fingerprint": fingerprint, "checked_at": now.isoformat()}
+        return {"refused": exc.record(), "s0": s0, "checked_at": now.isoformat(), "mode": mode}
+    return {**window, "fingerprint": fingerprint, "checked_at": now.isoformat(), "mode": mode,
+            "cohort_id": binding.cohort_id, "root": root, "system": system}
 
 
 @wf.step(max_retries=2)
@@ -260,14 +265,15 @@ async def day_probe(universe: dict, chunks: list[dict], s0: str) -> dict:
 
 
 @wf.step(max_retries=0)
-async def day_plan(universe: dict, chunks: list[dict], s0: str, start: str, now: str) -> dict:
+async def day_plan(universe: dict, chunks: list[dict], s0: str, start: str, now: str, mode: str) -> dict:
     from datetime import date, datetime
 
     day = _day()
+    binding, _root, _system = day.binding_of(mode)
     began = _stamp()
     try:
         planned = day.plan(universe, chunks, s0=date.fromisoformat(s0), start=date.fromisoformat(start),
-                           now=datetime.fromisoformat(now))
+                           now=datetime.fromisoformat(now), binding=binding, rehearsal=mode == "rehearsal")
     except day.DayRefused as exc:
         return {"refused": exc.record()}
     planned["measure"] = {"began": began, "ended": _stamp()}
@@ -286,14 +292,16 @@ async def day_reread(selected: dict, s0: str, start: str, now: str) -> dict:
 
 
 @wf.step(max_retries=1)
-async def day_build(planned: dict, reread: dict, s0: str) -> dict:
+async def day_build(planned: dict, reread: dict, s0: str, mode: str) -> dict:
     import time
     from datetime import date
 
     day = _day()
+    binding, _root, _system = day.binding_of(mode)
     began, cpu = _stamp(), time.process_time()
     try:
-        built = day.build(planned, reread, s0=date.fromisoformat(s0))
+        built = day.build(planned, reread, s0=date.fromisoformat(s0), binding=binding,
+                          rehearsal=mode == "rehearsal")
     except day.DayRefused as exc:
         return {"refused": exc.record()}
     built["measure"] = {"began": began, "ended": _stamp(), "cpu_seconds": round(time.process_time() - cpu, 3)}
@@ -304,8 +312,9 @@ def _run_record(opened: dict, status: str, detail: dict, trigger: str, requested
     day = _day()
     from surge.jobs import jev_eval
 
+    binding, _root, _system = day.binding_of(opened.get("mode") or "day")
     return {"job": "prediction", "started_at": opened.get("checked_at") or requested_at,
-            "cohort_id": day.OFFICIAL.cohort_id,
+            "cohort_id": binding.cohort_id,
             "code": {"head": None, "code_sha256": jev_eval.code_version()["code_sha256"]},
             "status": status, "exit_code": 0 if status in ("built", "closed_day", "not_yet") else 2,
             "s0": opened.get("s0"), "trigger": trigger,
@@ -315,7 +324,8 @@ def _run_record(opened: dict, status: str, detail: dict, trigger: str, requested
 
 @wf.step(max_retries=2)
 async def day_write(planned: dict, reread: dict, built: dict, opened: dict, run: dict) -> dict:
-    """Every artifact once, the integrity record last, then the run record."""
+    """Every artifact once, the integrity record last, then the run record. A rehearsal writes under its own
+    root, never the cohort's."""
 
     from datetime import date, datetime
 
@@ -325,16 +335,18 @@ async def day_write(planned: dict, reread: dict, built: dict, opened: dict, run:
     from surge.storage.vercel_blob import VercelBlobObjectStore
 
     day = _day()
+    binding, root, system = day.binding_of(run["mode"])
     store = VercelBlobObjectStore.from_env()
     run = {**run, "workflow_run_id": get_step_metadata().run_id}
     written = day.write_day(store, s0=date.fromisoformat(opened["s0"]), planned=planned, reread=reread, built=built,
-                            run=run)
+                            run=run, binding=binding, root=root, system=system)
     summary = built["summary"]
     record = _run_record(opened, "built", {"requests_built": summary["requests"], "by_variant": summary["by_variant"],
                                            "estimated_usd_total": summary["estimated_usd_total"], "jev": day.JEV,
                                            "workflow_run_id": run["workflow_run_id"]},
                          run["trigger"], run["requested_at"])
-    key = day.record_run(store, record, started_at=datetime.fromisoformat(record["started_at"]))
+    key = day.record_run(store, record, started_at=datetime.fromisoformat(record["started_at"]),
+                         binding=binding, root=root, system=system)
     return {"written": written, "run_record": key, "blob_operations": store.operations.as_dict()}
 
 
@@ -350,16 +362,18 @@ async def day_stop(opened: dict, refused: dict, planned: dict | None, run: dict)
     from surge.storage.vercel_blob import VercelBlobObjectStore
 
     day = _day()
+    binding, root, system = day.binding_of(run["mode"])
     store = VercelBlobObjectStore.from_env()
     run = {**run, "workflow_run_id": get_step_metadata().run_id}
     written = None
     if opened.get("now"):  # the window was open: the day is recorded as stopped, as the PC records it
         written = day.write_stopped_day(store, s0=date.fromisoformat(opened["s0"]), refused=refused, run=run,
-                                        planned=planned)
+                                        planned=planned, binding=binding, root=root, system=system)
     status = "stopped" if written else refused["kind"]
     record = _run_record(opened, status, {"refused": refused, "workflow_run_id": run["workflow_run_id"]},
                          run["trigger"], run["requested_at"])
-    key = day.record_run(store, record, started_at=datetime.fromisoformat(record["started_at"]))
+    key = day.record_run(store, record, started_at=datetime.fromisoformat(record["started_at"]),
+                         binding=binding, root=root, system=system)
     return {"written": written, "run_record": key, "blob_operations": store.operations.as_dict()}
 
 
@@ -417,7 +431,8 @@ async def yahoo_probe(codes: list[str], mode: str, s0: str, universe: int) -> di
 
 @wf.workflow
 async def shadow_day(s0: str | None, mode: str, trigger: str, requested_at: str) -> dict:
-    """``mode``: ``day`` (built and written, nothing sent) or ``probe`` (a past day read and screened, nothing written)."""
+    """``mode``: ``day`` (the cohort's day, built and written, nothing sent), ``probe`` (a past day read and
+    screened, nothing written) or ``rehearsal`` (a past day run whole under ``surge/rehearsal``)."""
 
     opened = await day_open(s0, mode)
     for _ in range(3):  # started early: wait for the window (a step computes how long; the body only counts)
@@ -450,7 +465,7 @@ async def shadow_day(s0: str | None, mode: str, trigger: str, requested_at: str)
         return {"mode": mode, "opened": opened, "summary": await day_probe(universe, chunks, opened["s0"]),
                 "steps": run["steps"]}
 
-    planned = await day_plan(universe, chunks, opened["s0"], opened["start"], opened["now"])
+    planned = await day_plan(universe, chunks, opened["s0"], opened["start"], opened["now"], mode)
     if "refused" in planned:
         return {"mode": mode, "refused": planned["refused"], **await day_stop(opened, planned["refused"], None, run)}
     run["steps"]["plan"] = planned.pop("measure")
@@ -460,7 +475,7 @@ async def shadow_day(s0: str | None, mode: str, trigger: str, requested_at: str)
         refused = {"kind": "reread", "message": "a selected security's history changed between its two reads",
                    "detail": {"problems": reread["problems"][:20]}}
         return {"mode": mode, "refused": refused, **await day_stop(opened, refused, planned, run)}
-    built = await day_build(planned, reread, opened["s0"])
+    built = await day_build(planned, reread, opened["s0"], mode)
     if "refused" in built:
         return {"mode": mode, "refused": built["refused"], **await day_stop(opened, built["refused"], planned, run)}
     run["steps"]["build"] = built.pop("measure")
