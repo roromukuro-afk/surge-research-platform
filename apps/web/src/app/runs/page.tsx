@@ -1,171 +1,113 @@
+/**
+ * Every run the cloud has done (D-279): the shadow's days, the rehearsal, the
+ * probes that checked the read path, the no-ops the cron fires, and the
+ * comparisons of the PC's day with the cloud's. One table, because an operator
+ * asks the same questions of all of them.
+ */
+
+import Link from "next/link";
 import { Empty } from "@/components/Chrome";
-import {
-  DayLink,
-  ShadowBanner,
-  ShadowNotConfigured,
-  ShadowProblem,
-  StatusTag,
-  fmtJst,
-  fmtRatio,
-  fmtUsd,
-  openConfigured,
-  shortHash,
-} from "@/components/ShadowChrome";
-import { type Day, type RunRecord, loadDays, loadRuns, stopReason } from "@/lib/shadow/model";
+import { OpsNotConfigured, fmtJstAgo, openOps } from "@/components/OpsChrome";
+import { type RunRow, loadRunRows } from "@/lib/ops/runs";
+import { type CompareStatus, newestStatus } from "@/lib/ops/status";
 
 export const dynamic = "force-dynamic";
 
-function minutes(from?: string, to?: string): string {
-  if (!from || !to) return "—";
-  const ms = Date.parse(to) - Date.parse(from);
-  return Number.isNaN(ms) ? "—" : `${(ms / 60_000).toFixed(1)}`;
+const KIND_TONE: Record<string, string> = {
+  "shadow day": "ok",
+  rehearsal: "",
+  probe: "",
+  "no-op": "",
+  compare: "warn",
+};
+
+function num(value: number | null, digits = 0): string {
+  return value === null || value === undefined ? "—" : value.toLocaleString("en-US", { maximumFractionDigits: digits });
 }
 
-function brief(record: RunRecord): string {
-  if (record.closed) return `closed: ${record.closed}`;
-  if (record.status === "outcomes_frozen" || record.status === "no_targets") {
-    const frozen = Object.entries(record.outcomes ?? {})
-      .filter(([, r]) => r.status === "frozen")
-      .map(([s0]) => s0);
-    const report = record.report?.file ? ` · ${record.report.file} (${record.report.status})` : "";
-    return frozen.length ? `froze ${frozen.join(", ")}${report}` : "nothing due";
-  }
-  const detail = record.detail;
-  if (detail && typeof detail === "object") {
-    const d = detail as Record<string, unknown>;
-    if ("requests_answered" in d) return `${d.requests_answered} answered · ${fmtUsd(d.spent_usd as string, 4)}`;
-    return JSON.stringify(detail).slice(0, 160);
-  }
-  return detail ? String(detail).slice(0, 200) : "";
+function Cell({ row }: { row: RunRow }) {
+  return (
+    <>
+      {row.href ? <Link href={row.href}>{row.what}</Link> : row.what}
+      {row.detail ? <div className="hint">{row.detail}</div> : null}
+    </>
+  );
 }
 
 export default async function Runs() {
-  const opened = await openConfigured();
-  if ("problem" in opened) return <ShadowNotConfigured problem={opened.problem} />;
-  const { shadow } = opened;
-
-  let days: Day[];
-  let runs: RunRecord[];
-  try {
-    [days, runs] = await Promise.all([loadDays(shadow), loadRuns(shadow)]);
-  } catch (error) {
-    return (
-      <>
-        <ShadowBanner shadow={shadow} />
-        <ShadowProblem error={error} />
-      </>
-    );
-  }
+  const opened = await openOps(14);
+  if ("problem" in opened) return <OpsNotConfigured problem={opened.problem} />;
+  const { ops } = opened;
+  const compare = await newestStatus<CompareStatus>(ops.source, "compare", ops.now);
+  const rows = await loadRunRows(ops.source, ops.cloudHistory, ops.pc?.record ?? null, compare);
 
   return (
     <>
-      <ShadowBanner shadow={shadow} />
-      <h2>Business days</h2>
-      <p className="lede">
-        What each day did, from the universe down to the answers: securities in JPX&apos;s list and read from
-        Yahoo, those at or under ¥3,000 as traded, those passing the screener (Routes A–H), the sample drawn,
-        and the requests sent to TypeSafe.
-      </p>
-      {days.length ? (
-        <table>
-          <thead>
-            <tr>
-              <th>S0</th>
-              <th>Status</th>
-              <th className="num">Universe</th>
-              <th className="num">Read</th>
-              <th className="num">≤ ¥3,000</th>
-              <th className="num">Screener pass</th>
-              <th className="num">Primary</th>
-              <th className="num">Control</th>
-              <th className="num">Requests</th>
-              <th className="num">Answered</th>
-              <th className="num">Failed</th>
-              <th className="num">Cost</th>
-              <th>Started</th>
-              <th>Completed</th>
-              <th>Stop reason</th>
-            </tr>
-          </thead>
-          <tbody>
-            {[...days].reverse().map((day) => {
-              const plan = day.run?.stages.plan;
-              const run = day.run?.stages.run;
-              const sent = run?.sent_this_time;
-              const answered = run?.requests_answered;
-              // The scheduler's record of the run that decided the day: when it started and ended.
-              const decided = runs.find((r) => r.job === "prediction" && r.s0 === day.s0 && r.status !== "already_sent");
-              return (
-                <tr key={day.s0}>
-                  <td>
-                    <DayLink s0={day.s0} />
-                  </td>
-                  <td>
-                    <StatusTag status={day.status} />
-                  </td>
-                  <td className="num">{plan?.issues ?? "—"}</td>
-                  <td className="num" title={plan?.coverage !== undefined ? `coverage ${fmtRatio(plan.coverage)}` : undefined}>
-                    {plan?.histories_read ?? "—"}
-                  </td>
-                  <td className="num">{plan?.eligible ?? "—"}</td>
-                  <td className="num">{plan?.passing ?? "—"}</td>
-                  <td className="num">{plan?.selected?.primary ?? "—"}</td>
-                  <td className="num">{plan?.selected?.control ?? "—"}</td>
-                  <td className="num">{plan?.requests ?? "—"}</td>
-                  <td className="num">{answered ?? "—"}</td>
-                  <td className="num">{sent !== undefined && answered !== undefined ? sent - answered : "—"}</td>
-                  <td className="num">{fmtUsd(run?.spent_usd, 4)}</td>
-                  <td className="mono">{fmtJst(decided?.started_at ?? day.run?.run_started[0]?.started_at)}</td>
-                  <td className="mono">{fmtJst(decided?.finished_at ?? run?.finished_at)}</td>
-                  <td style={{ maxWidth: 280 }}>{stopReason(day) ?? ""}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      ) : (
-        <Empty what="business days" />
-      )}
-
-      <h2>Scheduled invocations</h2>
-      <p className="lede">
-        Every start of the prediction job (weekdays 16:10 JST) and the outcome job (weekdays 18:00 JST),
-        whatever it found to do: a closed day or a day already sent is a normal, empty run.
-      </p>
-      {runs.length ? (
-        <table>
-          <thead>
-            <tr>
-              <th>Started</th>
-              <th>Job</th>
-              <th>Status</th>
-              <th className="num">Exit</th>
-              <th>S0</th>
-              <th className="num">Minutes</th>
-              <th>Detail</th>
-              <th>Code</th>
-            </tr>
-          </thead>
-          <tbody>
-            {runs.map((record) => (
-              <tr key={record.key}>
-                <td className="mono">{fmtJst(record.started_at)}</td>
-                <td>{record.job}</td>
-                <td>
-                  <StatusTag status={record.status} />
-                </td>
-                <td className="num">{record.exit_code}</td>
-                <td className="mono">{record.s0 ?? record.today ?? ""}</td>
-                <td className="num">{minutes(record.started_at, record.finished_at)}</td>
-                <td style={{ maxWidth: 360 }}>{brief(record)}</td>
-                <td className="mono">{shortHash(record.code?.head, 8)}</td>
+      <section className="panel">
+        <h2>Runs</h2>
+        <p className="hint" style={{ marginTop: 0 }}>
+          A <strong>shadow day</strong> is the cohort&apos;s day run in the cloud (from 2026-09-24); a{" "}
+          <strong>rehearsal</strong> is the same pipeline on a past day under its own cohort; a{" "}
+          <strong>probe</strong> checks the read path without writing anything; a <strong>no-op</strong> is what
+          the daily cron runs, and it is how this deployment publishes what it is; a{" "}
+          <strong>compare</strong> is the PC&apos;s day against the cloud&apos;s. No run here sends a request to
+          a model.
+        </p>
+        {rows.length === 0 ? (
+          <Empty what="runs" why="Nothing has been published or written yet." />
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Kind</th>
+                <th>What</th>
+                <th>Status</th>
+                <th>Started</th>
+                <th className="right">Elapsed</th>
+                <th className="right">Universe</th>
+                <th className="right">Coverage</th>
+                <th className="right">Passing</th>
+                <th className="right">Primary / Control</th>
+                <th className="right">Events</th>
+                <th className="right">CPU</th>
+                <th className="right">Peak</th>
+                <th>Stopped because</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      ) : (
-        <Empty what="scheduled runs" />
-      )}
+            </thead>
+            <tbody>
+              {rows.map((row, i) => (
+                <tr key={`${row.kind}-${row.what}-${i}`}>
+                  <td>
+                    <span className={KIND_TONE[row.kind] ? `tag ${KIND_TONE[row.kind]}` : "tag"}>{row.kind}</span>
+                  </td>
+                  <td><Cell row={row} /></td>
+                  <td>{row.status}</td>
+                  <td className="mono">{row.startedAt ? fmtJstAgo(row.startedAt, ops.now) : "—"}</td>
+                  <td className="right mono">{row.seconds === null ? "—" : `${num(row.seconds)}s`}</td>
+                  <td className="right mono">{num(row.universe)}</td>
+                  <td className="right mono">
+                    {row.coverage === null ? "—" : `${(row.coverage * 100).toFixed(1)}%`}
+                  </td>
+                  <td className="right mono">{num(row.passing)}</td>
+                  <td className="right mono">
+                    {row.primary === null && row.control === null ? "—" : `${num(row.primary)} / ${num(row.control)}`}
+                  </td>
+                  <td className="right mono">{num(row.events)}</td>
+                  <td className="right mono">{row.cpuSeconds === null ? "—" : `${num(row.cpuSeconds, 1)}s`}</td>
+                  <td className="right mono">{row.memoryMb === null ? "—" : `${num(row.memoryMb, 1)} MB`}</td>
+                  <td className="hint">{row.stopReason ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <p className="hint">
+        A day&apos;s own artifacts are under its cohort:{" "}
+        <Link href="/cohort?cohort=rehearsal">the rehearsal</Link>,{" "}
+        <Link href="/cohort">the shadow</Link>, and the made-up <Link href="/demo">fixture</Link>.
+      </p>
     </>
   );
 }

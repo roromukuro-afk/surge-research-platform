@@ -118,6 +118,31 @@ def test_the_noop_workflow_runs_to_completion_and_does_nothing(local_world):
     assert output["input_building_code_sha256"] == code_version()["code_sha256"]
 
 
+def test_the_noop_writes_one_status_record_the_screens_can_read(local_world, monkeypatch):
+    """The cron keeps a current record of the cloud: what it is, what code it carries, what it is bound to."""
+
+    from shadow_service.flows import noop
+
+    from surge.shadow import status as shadow_status
+    from surge.storage import vercel_blob
+    from test_shadow import FakeBlobClient
+
+    client = FakeBlobClient()
+    monkeypatch.setattr(vercel_blob.VercelBlobObjectStore, "from_env", classmethod(lambda cls, env=None: cls(client)))
+    monkeypatch.setenv("VERCEL_DEPLOYMENT_ID", "dpl_test")
+    monkeypatch.setenv(shadow_status.COMMIT_ENV, "0" * 40)
+    output = _run(noop, "cron 0 14 * * *", "2026-09-20T14:00:00+00:00")
+
+    assert output["status_problem"] is None and output["status_record"].startswith("surge/status/operations/runs/")
+    record = json.loads(client.objects[output["status_record"]])
+    assert record["kind"] == "cloud" and record["cron"] is True and record["trigger"] == "cron 0 14 * * *"
+    assert record["deployment"]["id"] == "dpl_test" and record["deployment"]["commit"] == "0" * 40
+    assert record["code"]["matches_official_cohort"] is True
+    assert record["code"]["input_building_code_sha256"] == output["input_building_code_sha256"]
+    assert set(record["cohorts"]) == {"day", "probe", "rehearsal"}
+    assert record["phase_b"]["prospective_start"] == "2026-09-24" and record["phase_b"]["next_s0"]
+
+
 def test_the_stage2_selftest_copies_verifies_and_is_refused_an_overwrite(local_world, monkeypatch):
     from shadow_service.flows import stage2_selftest
 

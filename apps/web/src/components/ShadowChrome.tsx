@@ -1,27 +1,44 @@
 /** Shared pieces of the Phase B shadow's screens (D-279). Server components only. */
 
 import Link from "next/link";
-import { type Shadow, isSynthetic, openShadow } from "@/lib/shadow/model";
+import { type CohortName, type Shadow, COHORTS, isSynthetic, openShadow } from "@/lib/shadow/model";
 import { shadowSource } from "@/lib/shadow/source";
 
-export const SHADOW_TABS = [
+/** The live system: what is running now, what has run, and how the cloud compares with the PC. */
+export const OPS_TABS = [
   { href: "/", label: "Overview" },
-  { href: "/predictions", label: "Predictions" },
-  { href: "/runs", label: "Runs" },
-  { href: "/outcomes", label: "Outcomes" },
-  { href: "/reports", label: "Reports" },
   { href: "/system", label: "System" },
+  { href: "/runs", label: "Runs" },
+  { href: "/compare", label: "Compare" },
 ];
+
+/** One cohort's own screens: the shadow's, the rehearsal's, or the synthetic fixture's. */
+export const SHADOW_TABS = [
+  { href: "/cohort", label: "Cohort" },
+  { href: "/cohort/predictions", label: "Predictions" },
+  { href: "/cohort/days", label: "Days" },
+  { href: "/cohort/outcomes", label: "Outcomes" },
+  { href: "/cohort/reports", label: "Reports" },
+  { href: "/cohort/system", label: "Protocol" },
+];
+
+/** Keep the cohort a reader is looking at when they move between its screens. */
+export function cohortHref(href: string, which: CohortName): string {
+  return which === "shadow" ? href : `${href}?cohort=${which}`;
+}
 
 export type Opened = { shadow: Shadow } | { problem: string };
 
 /** The configured source and its cohort, or why there is nothing to show. */
-export async function openConfigured(): Promise<Opened> {
+export async function openConfigured(which: CohortName = "shadow"): Promise<Opened> {
   const setting = shadowSource();
   if (!setting.source) return { problem: setting.reason };
-  const shadow = await openShadow(setting.source);
+  const shadow = await openShadow(setting.source, which);
   if (!shadow.cohort) {
-    return { problem: `no cohort ${shadow.cohortId} under ${shadow.prefix} in ${setting.source.description}` };
+    return {
+      problem: `${COHORTS[which].label} has written nothing yet: no cohort ${shadow.cohortId} under ` +
+        `${shadow.prefix} in ${setting.source.description}`,
+    };
   }
   return { shadow };
 }
@@ -144,9 +161,10 @@ export function StatusTag({ status }: { status: string }) {
   return <span className={tone ? `tag ${tone}` : "tag"}>{status}</span>;
 }
 
-export function DayLink({ s0, to = "/predictions" }: { s0: string; to?: string }) {
+export function DayLink({ s0, to = "/cohort/predictions", which = "shadow" }:
+  { s0: string; to?: string; which?: CohortName }) {
   return (
-    <Link href={`${to}?s0=${s0}`} className="mono">
+    <Link href={`${to}?s0=${s0}${which === "shadow" ? "" : `&cohort=${which}`}`} className="mono">
       {s0}
     </Link>
   );

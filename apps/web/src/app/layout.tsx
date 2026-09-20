@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { SHADOW_TABS } from "@/components/ShadowChrome";
+import { OPS_TABS, SHADOW_TABS } from "@/components/ShadowChrome";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -30,12 +30,21 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <header className="masthead">
             <h1>Surge Research Platform</h1>
             <nav className="tabs">
-              <span className="group">Phase B shadow</span>
+              <span className="group">Operations</span>
+              {OPS_TABS.map((tab) => (
+                <Link key={tab.href} href={tab.href}>
+                  {tab.label}
+                </Link>
+              ))}
+            </nav>
+            <nav className="tabs secondary">
+              <span className="group">Cohort</span>
               {SHADOW_TABS.map((tab) => (
                 <Link key={tab.href} href={tab.href}>
                   {tab.label}
                 </Link>
               ))}
+              <Link href="/demo">Demo (made up)</Link>
             </nav>
             <nav className="tabs secondary">
               <span className="group">Research platform</span>

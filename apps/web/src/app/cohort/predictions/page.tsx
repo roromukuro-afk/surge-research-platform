@@ -10,7 +10,7 @@ import {
   fmtUsd,
   openConfigured,
 } from "@/components/ShadowChrome";
-import { type Prediction, type Sample, loadDays, loadPredictions, loadSamples, sentDays } from "@/lib/shadow/model";
+import { type Prediction, type Sample, loadDays, loadPredictions, loadSamples, sentDays, cohortName } from "@/lib/shadow/model";
 
 export const dynamic = "force-dynamic";
 
@@ -21,8 +21,9 @@ function chosenProbability(row: Prediction): number | null {
   return row.decision_probabilities[row.decision] ?? null;
 }
 
-export default async function Predictions({ searchParams }: { searchParams: Promise<{ s0?: string }> }) {
-  const opened = await openConfigured();
+export default async function Predictions({ searchParams }: { searchParams: Promise<{ s0?: string; cohort?: string }> }) {
+  const { cohort: chosen } = await searchParams;
+  const opened = await openConfigured(cohortName(chosen));
   if ("problem" in opened) return <ShadowNotConfigured problem={opened.problem} />;
   const { shadow } = opened;
   const { s0: requested } = await searchParams;
@@ -69,7 +70,7 @@ export default async function Predictions({ searchParams }: { searchParams: Prom
           {available.map((day, i) => (
             <span key={day}>
               {i ? " · " : ""}
-              {day === shown ? <strong className="mono">{day}</strong> : <Link href={`/predictions?s0=${day}`} className="mono">{day}</Link>}
+              {day === shown ? <strong className="mono">{day}</strong> : <Link href={`/cohort/predictions?s0=${day}&cohort=${shadow.which}`} className="mono">{day}</Link>}
             </span>
           ))}
         </p>

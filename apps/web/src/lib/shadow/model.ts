@@ -24,6 +24,24 @@ export const DEFAULT_PREFIX = "surge/phase-b";
 export const OFFICIAL_COHORT = "jev-phase-b-jp-20260924-v1";
 export const JOBS = ["prediction", "outcome"] as const;
 
+/**
+ * Which cohort a screen is showing. `shadow` is the cloud's shadow of the PC's
+ * Phase B (nothing under it until 2026-09-24), `rehearsal` is the cloud's own
+ * run of a past day - its own cohort, never the evaluation's - and `demo` is
+ * whatever synthetic cohort the environment names, which is made-up data.
+ */
+export const COHORTS = {
+  shadow: { root: "surge/phase-b-shadow", cohortId: OFFICIAL_COHORT, label: "the shadow of the PC's Phase B" },
+  rehearsal: { root: "surge/rehearsal", cohortId: "rehearsal-jp-vercel-v1", label: "the cloud rehearsal" },
+  demo: { root: null, cohortId: null, label: "the synthetic fixture" },
+} as const;
+
+export type CohortName = keyof typeof COHORTS;
+
+export function cohortName(value: string | undefined | null): CohortName {
+  return value === "rehearsal" || value === "demo" || value === "shadow" ? value : "shadow";
+}
+
 // ----------------------------------------------------------------- shapes (as the Python side writes them)
 
 export interface Cohort {
@@ -302,6 +320,7 @@ export function nextWeekdayAt(from: Date, hour: number, minute: number): Date {
 
 export interface Shadow {
   source: ArtifactSource;
+  which: CohortName;
   prefix: string;
   cohortId: string;
   cohort: Cohort | null;
@@ -310,11 +329,13 @@ export interface Shadow {
   now: Date;
 }
 
-export async function openShadow(source: ArtifactSource): Promise<Shadow> {
-  // A directory names the cohort it holds; a Blob store holds several and the environment picks one.
+export async function openShadow(source: ArtifactSource, which: CohortName = "shadow"): Promise<Shadow> {
+  // A directory names the cohort it holds; a Blob store holds several, and each screen says which it wants.
   const directory = source.kind !== "blob" ? await readJson<FixtureMeta>(source, "fixture.json") : null;
-  const root = (process.env.SURGE_SHADOW_PREFIX ?? DEFAULT_PREFIX).replace(/^\/+|\/+$/g, "");
-  const cohortId = process.env.SURGE_SHADOW_COHORT ?? directory?.cohort_id ?? OFFICIAL_COHORT;
+  const chosen = COHORTS[which];
+  const root = (chosen.root ?? process.env.SURGE_SHADOW_PREFIX ?? DEFAULT_PREFIX).replace(/^\/+|\/+$/g, "");
+  const cohortId =
+    chosen.cohortId ?? process.env.SURGE_SHADOW_COHORT ?? directory?.cohort_id ?? OFFICIAL_COHORT;
   const prefix = `${root}/${cohortId}`;
   const [cohort, calendar, marker] = await Promise.all([
     readJson<Cohort>(source, `${prefix}/cohort.json`),
@@ -323,7 +344,8 @@ export async function openShadow(source: ArtifactSource): Promise<Shadow> {
     readJson<FixtureMeta>(source, `${prefix}/fixture.json`),
   ]);
   const fixture = marker ?? (directory?.cohort_id === cohortId ? directory : null);
-  return { source, prefix, cohortId, cohort, calendar, fixture, now: fixture ? new Date(fixture.as_of) : new Date() };
+  return { source, which, prefix, cohortId, cohort, calendar, fixture,
+           now: fixture ? new Date(fixture.as_of) : new Date() };
 }
 
 /** A key under a day this long past can no longer be written: a miss there is remembered longer. */

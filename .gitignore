@@ -81,3 +81,6 @@ logs/
 Thumbs.db
 .vscode/
 .idea/
+
+# the design hook keeps its own cache here
+.impeccable/

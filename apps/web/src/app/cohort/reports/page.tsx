@@ -10,7 +10,7 @@ import {
   fmtSigned,
   openConfigured,
 } from "@/components/ShadowChrome";
-import { type Report, loadReports } from "@/lib/shadow/model";
+import { type Report, loadReports, cohortName } from "@/lib/shadow/model";
 
 export const dynamic = "force-dynamic";
 
@@ -44,8 +44,9 @@ function ece(hit: Hit | undefined): number | null {
   return hit?.calibration?.expected_calibration_error ?? hit?.reaches_target_calibration?.expected_calibration_error ?? null;
 }
 
-export default async function Reports() {
-  const opened = await openConfigured();
+export default async function Reports({ searchParams }: { searchParams: Promise<{ cohort?: string }> }) {
+  const { cohort: chosen } = await searchParams;
+  const opened = await openConfigured(cohortName(chosen));
   if ("problem" in opened) return <ShadowNotConfigured problem={opened.problem} />;
   const { shadow } = opened;
 

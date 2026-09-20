@@ -9,7 +9,7 @@ import {
   openConfigured,
 } from "@/components/ShadowChrome";
 import {
-  type Day,
+  type CohortName,  type Day,
   type Outcome,
   type Sample,
   businessDayAfter,
@@ -17,12 +17,14 @@ import {
   loadOutcomes,
   loadSamples,
   sentDays,
+  cohortName,
 } from "@/lib/shadow/model";
 
 export const dynamic = "force-dynamic";
 
-export default async function Outcomes({ searchParams }: { searchParams: Promise<{ s0?: string }> }) {
-  const opened = await openConfigured();
+export default async function Outcomes({ searchParams }: { searchParams: Promise<{ s0?: string; cohort?: string }> }) {
+  const { cohort: chosen } = await searchParams;
+  const opened = await openConfigured(cohortName(chosen));
   if ("problem" in opened) return <ShadowNotConfigured problem={opened.problem} />;
   const { shadow } = opened;
   const { s0: requested } = await searchParams;
@@ -68,7 +70,7 @@ export default async function Outcomes({ searchParams }: { searchParams: Promise
           {frozen.map((day, i) => (
             <span key={day.s0}>
               {i ? " · " : ""}
-              {day === shown ? <strong className="mono">{day.s0}</strong> : <Link href={`/outcomes?s0=${day.s0}`} className="mono">{day.s0}</Link>}
+              {day === shown ? <strong className="mono">{day.s0}</strong> : <Link href={`/cohort/outcomes?s0=${day.s0}&cohort=${shadow.which}`} className="mono">{day.s0}</Link>}
             </span>
           ))}
         </p>

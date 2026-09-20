@@ -14,9 +14,12 @@ probe, 2026-09-19). So they are imported here, on the host, before any run, and
 the sandbox shares them (``passthrough_modules``) instead of loading them again
 when it replays this module.
 
-- ``noop``: does nothing. It proves the path the scheduled jobs will take:
+- ``noop``: does nothing to the evaluation, and writes one status record: what
+  this deployment is, what code it carries and what it is bound to
+  (``surge.shadow.status``). It proves the path the scheduled jobs will take -
   a Vercel Cron request reaches the protected production deployment, starts a
-  run, one step executes, and the run completes.
+  run, one step executes, and the run completes - and because the cron runs it
+  daily, the screens always have a current record of the cloud.
 - ``stage2_selftest``: Stage 2 in the cloud with synthetic artifacts only. It
   copies part of the committed synthetic fixture into the private Blob store
   through the write-once store, reads every copied day back against its
@@ -55,6 +58,8 @@ CHUNK_SIZE = 150
 
 @wf.step(max_retries=0)
 async def noop_step(trigger: str, requested_at: str) -> dict:
+    """Nothing is done to the evaluation; one status record is written, so the screens know this deployment."""
+
     import platform
     from datetime import UTC, datetime
 
@@ -62,12 +67,22 @@ async def noop_step(trigger: str, requested_at: str) -> dict:
 
     use_workers_src()
     from surge.jobs.jev_eval import code_version
+    from surge.shadow import status as shadow_status
 
     info = get_step_metadata()
+    record = shadow_status.cloud_record(trigger, run_id=info.run_id, workflow="noop")
+    published, problem = None, None
+    try:
+        from surge.storage.vercel_blob import VercelBlobObjectStore
+
+        published = shadow_status.publish(VercelBlobObjectStore.from_env(), record)
+    except Exception as exc:  # noqa: BLE001 - a no-op never fails over its own bookkeeping
+        problem = f"{type(exc).__name__}: {str(exc)[:200]}"
     # The steps run from their own bundle: this is the input-building code a day's manifest would name.
     return {"did": "nothing", "trigger": trigger, "requested_at": requested_at, "run_id": info.run_id,
             "step_ran_at": datetime.now(UTC).isoformat(), "attempt": info.attempt,
-            "python": platform.python_version(), "input_building_code_sha256": code_version()["code_sha256"]}
+            "python": platform.python_version(), "input_building_code_sha256": code_version()["code_sha256"],
+            "status_record": published, "status_problem": problem, "deployment": record["deployment"]}
 
 
 @wf.workflow
