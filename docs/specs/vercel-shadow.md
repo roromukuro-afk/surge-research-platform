@@ -158,6 +158,44 @@
 - **Workflow SDK と C 拡張（2026-09-19 の probe で判明、3750fc5 で修正、未 deploy）**: SDK は最初の run で `sys.modules` を独自の mapping に差し替え、その後に**初めて**読み込まれる C 拡張は step 内で `SystemError: … dictobject.c … bad argument to internal function` になる（SDK のローカル world で再現。Vercel 固有ではない）。probe では Yahoo の取得（curl_cffi）が全件これで失敗し、build のトークン数（tiktoken）も同じ理由で失敗するはずだった。workflow モジュールの先頭でホスト側に読み込み、sandbox の `passthrough_modules` に指定して解消した（ローカル world で Yahoo 取得と o200k 計数が 1 回目・2 回目とも成功、回帰テストあり）。`GET /api/shadow/selftest/extensions` が Vercel の step から Yahoo 1 件（crumb の取得を含む）と o200k 計数を確かめ、`GET /api/shadow/selftest/yahoo` が読み取り経路そのもの（cookie・crumb・chart・as-traded の履歴・分割）を、手で選んだ数銘柄（`?codes=`、detail）または本番と同じ 1 step 分（`?mode=chunk&universe=150`）で確かめる。どちらも Blob へは書かず、リクエストも作らない。Yanoshin（TDnet の索引）を Vercel から読む経路は、まだ一度も通っていない。
 - **未実装**: 月の使用量の予算ガード（§5）。cron で自動運用する（Stage 5）前に入れる。
 
+## 8-B. Rehearsal と運用画面（2026-09-20）
+
+### Rehearsal（`surge/rehearsal`）
+
+最初の見込み日（2026-09-24）より前に、**クラウドのパイプラインを一度だけ端から端まで通す**ための仕組み。probe は
+screening で止まり、cohort 自身の選抜は開始日より前の S0 を拒む（`check_s0`）ので、過去日を最後まで流すには別の
+cohort が要る。
+
+- `surge.shadow.day.REHEARSAL`: cohort id `rehearsal-jp-vercel-v1`、seed も別、root は `surge/rehearsal`、
+  system は `vercel-rehearsal`、`teacher_admissible: false` かつ `not_an_evaluation_dataset: true`。
+  **evaluation の prefix（`surge/phase-b*`）には一切書かない**（テストで固定）。
+- 凍結コードは変更しない。`check_s0` は **rehearsal の選抜の呼び出しの間だけ**差し替え（週末の拒否は残る）、
+  呼び出しから戻る時点で必ず元に戻す（`s0_rule_relaxed`、テストで戻りを検査）。`input_building_code_sha256` は
+  8158344c… のまま。
+- 入口は `POST /api/shadow/stage3/rehearsal?s0=YYYY-MM-DD&confirm=stage3-rehearsal`。Jev は呼ばない。
+
+### 状態レコード（`surge/status/operations/runs/<date>/<job>-<n>.json`）
+
+画面が読むのは「公開されたもの」だけ。run record と同じ書き方（write-once、キーは日付と連番から導出）なので、
+**store の list は一度も呼ばない**（Hobby では list も課金対象）。
+
+| job | 誰が書くか | 中身 |
+|---|---|---|
+| `cloud` | deployment 自身（no-op のたび。cron が毎日 1 回動かす） | deployment id / commit / region、python とパッケージ、凍結指紋、input-building code、mode ごとの cohort と root、次の見込み S0 |
+| `pc` | 運用機（`surge-shadow-ops/publish_status.py`） | 正式 Phase B（cohort・凍結指紋・開始日・Windows task の次回実行・credit・budget・送信済み日数・frozen worktree）、クラウドの deployment と health、A〜D と rehearsal の結果、ダッシュボードでしか見えない使用量 |
+| `compare` | 比較のあと（`publish_compare.py`） | `surge.shadow.compare` のレポートそのまま（item ごとの 3 分類と stage4 の可否） |
+
+### 画面
+
+| 画面 | 何を見せるか |
+|---|---|
+| `/` | 運用の要約: Phase B の状態・開始日・次回実行・model・credit・budget、deployment と code、A〜D と cron、rehearsal の件数 |
+| `/system` | 同じものを全部: deployment、コード、A〜D の実測、cron の `cron_verified_at`、使用量（読み取り時刻つき）、PC 側の Phase B |
+| `/runs` | すべての run（shadow day / rehearsal / probe / no-op / compare）: 状態・所要・universe・coverage・screening pass・Primary/Control・events・CPU・ピークメモリ・停止理由 |
+| `/compare` | PC の日 と クラウドの日 の項目別比較（exact_match / expected_timing_difference / unexplained_mismatch）。比較がまだ無いときは「何を比べるか」を出す |
+| `/cohort[...]?cohort=shadow\|rehearsal\|demo` | cohort 自身の画面（従来の 6 画面）。既定は shadow |
+| `/demo` | 合成 fixture の入口。**production の既定表示ではない** |
+
 ## 9. Vercel 上での実施記録（2026-09-19、ユーザー承認後）
 
 | 項目 | 結果 |
