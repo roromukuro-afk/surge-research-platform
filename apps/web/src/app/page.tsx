@@ -49,11 +49,11 @@ export default async function Operations() {
       <Section title="Phase B">
         <PublishedAt what="From the operator's machine," at={pc?.published_at} by={pc?.publisher} />
         <div className="cards">
-          <Stat label="Status" value={phase?.status ?? "unknown"}
+          <Stat label="Status" value={readableStatus(phase?.status)}
                 hint={phase ? `${phase.days.count} days written, ${phase.days.sent.length} sent` : undefined} />
           <Stat label="Prospective start" value={phase?.prospective_start ?? "—"}
                 hint="the first S0 the cohort may draw from" />
-          <Stat label="Next prediction run" value={prediction?.next_run ?? "—"}
+          <Stat label="Next prediction run" value={readableTime(prediction?.next_run)}
                 hint={prediction ? `${prediction.task} · ${prediction.state}` : "the PC's scheduled task"} />
           <Stat label="Model" value={phase?.model?.pinned_served ?? cloud?.phase_b.model ?? "—"}
                 hint={phase ? `${phase.model.provider}, requested ${phase.model.requested}` : undefined} />
@@ -139,6 +139,21 @@ export default async function Operations() {
       </p>
     </>
   );
+}
+
+/** The publisher writes the state as the job knows it; a reader wants a phrase. */
+function readableStatus(status: string | undefined): string {
+  if (!status) return "unknown";
+  return status === "waiting_for_start" ? "waiting for the first day" : status.replace(/_/g, " ");
+}
+
+/** Windows reports a task's next run in its own locale; show the date as everything else here is shown. */
+function readableTime(value: string | undefined): string {
+  if (!value) return "—";
+  const us = value.match(/^(\d{2})\/(\d{2})\/(\d{4}) (\d{2}):(\d{2})/);
+  if (us) return `${us[3]}-${us[1]}-${us[2]} ${us[4]}:${us[5]} JST`;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : value.slice(0, 16).replace("T", " ");
 }
 
 function fmt(value: number | null | undefined): string {
